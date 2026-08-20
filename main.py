@@ -1,5 +1,4 @@
 import base64
-import hmac
 import json
 import logging
 import os
@@ -10,31 +9,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import asyncio
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ContextTypes, filters,
 )
 
 from config import BOT_TOKEN, ADMIN_ID
+from database import init_database, create_user, get_balance, add_balance, get_db, now
 
-from database import (
-    init_database,
-    create_user,
-    get_balance,
-    add_balance,
-    complete_deposit,
-    get_db,
-    now,
-)
 
 XENDIT_SECRET_KEY = os.getenv("XENDIT_SECRET_KEY", "").strip()
 XENDIT_WEBHOOK_TOKEN = os.getenv("XENDIT_WEBHOOK_TOKEN", "").strip()
@@ -46,12 +29,6 @@ if not XENDIT_SECRET_KEY:
 if not XENDIT_WEBHOOK_TOKEN:
     raise RuntimeError("XENDIT_WEBHOOK_TOKEN belum diatur di Railway.")
 
-XENDIT_API_URL = "https://api.xendit.co/v2/invoices"
-
-
-# =========================================================
-# LOGGING
-# =========================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -60,412 +37,27 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+XENDIT_API_URL = "https://" + "api.xendit.co/v2/invoices"
+
 
 # =========================================================
 # HELPER
 # =========================================================
 
-def is_admin(user_id: int) -> bool:
+def is_admin(user_id):
     return user_id == ADMIN_ID
 
 
-def format_rupiah(amount: int) -> str:
+def format_rupiah(amount):
     return f"Rp{amount:,}".replace(",", ".")
 
 
 # =========================================================
-# XENDIT
-# =========================================================
-
-def create_xendit_invoice(amount: int, deposit_id: str):
-    """Create a Xendit Payment Link / Invoice."""
-
-    auth = base64.b64encode(
-        f"{XENDIT_SECRET_KEY}:".encode("utf-8")
-    ).decode("ascii")
-
-    payload = {
-        "external_id": deposit_id,
-        "amount": amount,
-        "description": f"Deposit saldo {deposit_id}",
-        "invoice_duration": 86400,
-        "currency": "IDR",
-        "items": [
-            {
-                "name": "Deposit Saldo",
-                "quantity": 1,
-                "price": amount,
-                "category": "Digital Service",
-            }
-        ],
-        "metadata": {
-            "deposit_id": deposit_id,
-        },
-    }
-
-    request = Request(
-        XENDIT_API_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Basic {auth}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-
-    try:
-        with urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-
-    except HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        logger.error("Xendit HTTP %s: %s", error.code, body)
-        raise RuntimeError(
-            f"Xendit menolak invoice (HTTP {error.code})."
-        ) from error
-
-    except (URLError, TimeoutError) as error:
-        logger.error("Xendit connection error: %s", error)
-        raise RuntimeError(
-            "Tidak bisa terhubung ke Xendit."
-        ) from error
-
-
-def send_telegram_message(chat_id: int, text: str):
-    """Send a Telegram message from the webhook thread."""
-
-    url = (
-        "https://api.telegram.org/bot"
-        + BOT_TOKEN
-        + "/sendMessage"
-    )
-
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-    }
-
-    request = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urlopen(request, timeout=20) as response:
-            response.read()
-    except Exception as error:
-        logger.error("Notifikasi Telegram gagal: %s", error)
-
-
-def process_xendit_webhook(payload: dict):
-    """
-    Process the legacy Xendit Invoice webhook.
-
-    Important: Xendit's Dashboard 'Test & Save' can send a test
-    notification whose external_id is not one of our deposits.
-    Such a notification must still receive HTTP 200 so Xendit can
-    save the webhook URL successfully.
-    """
-
-    status = str(payload.get("status", "")).upper()
-    deposit_id = payload.get("external_id")
-
-    if not deposit_id:
-        logger.warning("Webhook Xendit tanpa external_id: %s", payload)
-        return {"ok": True, "ignored": "missing_external_id"}
-
-    if status == "PAID":
-        paid_amount = payload.get(
-            "paid_amount",
-            payload.get("amount"),
-        )
-
-        try:
-            paid_amount = int(paid_amount)
-        except (TypeError, ValueError):
-            logger.warning(
-                "Nominal PAID tidak valid untuk %s: %r",
-                deposit_id,
-                paid_amount,
-            )
-            return {"ok": True, "ignored": "invalid_amount"}
-
-        with get_db() as db:
-            deposit = db.execute(
-                """
-                SELECT telegram_id, amount, status
-                FROM deposits
-                WHERE deposit_id = %s
-                """,
-                (deposit_id,),
-            ).fetchone()
-
-        if not deposit:
-            logger.info(
-                "Webhook PAID diabaikan karena deposit tidak ditemukan: %s",
-                deposit_id,
-            )
-            return {"ok": True, "ignored": "deposit_not_found"}
-
-        if int(deposit["amount"]) != paid_amount:
-            logger.error(
-                "Nominal webhook tidak cocok: deposit=%s expected=%s paid=%s",
-                deposit_id,
-                deposit["amount"],
-                paid_amount,
-            )
-            return {"ok": True, "ignored": "amount_mismatch"}
-
-        if deposit["status"] == "SUCCESS":
-            logger.info("Webhook duplicate diabaikan: %s", deposit_id)
-            return {"ok": True, "duplicate": True}
-
-        if deposit["status"] != "PENDING":
-            logger.info(
-                "Deposit %s berstatus %s; webhook diabaikan.",
-                deposit_id,
-                deposit["status"],
-            )
-            return {"ok": True, "ignored": "not_pending"}
-
-        payment_reference = (
-            payload.get("payment_id")
-            or payload.get("id")
-            or deposit_id
-        )
-
-        completed, telegram_id, amount, new_balance = complete_deposit(
-            deposit_id,
-            payment_reference=payment_reference,
-        )
-
-        if completed:
-            send_telegram_message(
-                telegram_id,
-                "✅ <b>Deposit berhasil!</b>\n\n"
-                f"💰 Deposit: <b>{format_rupiah(amount)}</b>\n"
-                "💳 Status: <b>PAID</b>\n"
-                f"🧾 ID: <code>{deposit_id}</code>\n\n"
-                f"💰 Saldo sekarang: <b>{format_rupiah(new_balance)}</b>",
-            )
-
-        return {"ok": True, "completed": completed}
-
-    if status == "EXPIRED":
-        with get_db() as db:
-            db.execute(
-                """
-                UPDATE deposits
-                SET status = 'EXPIRED'
-                WHERE deposit_id = %s
-                  AND status = 'PENDING'
-                """,
-                (deposit_id,),
-            )
-
-        logger.info("Deposit expired: %s", deposit_id)
-        return {"ok": True, "expired": True}
-
-    logger.info(
-        "Webhook Xendit diabaikan: deposit=%s status=%s",
-        deposit_id,
-        status,
-    )
-    return {"ok": True, "ignored": status or "empty_status"}
-
-
-class XenditWebhookHandler(BaseHTTPRequestHandler):
-
-    def log_message(self, fmt, *args):
-        logger.info("Webhook HTTP: " + fmt, *args)
-
-    def send_json(self, code: int, data: dict):
-        body = json.dumps(data).encode("utf-8")
-
-        self.send_response(code)
-
-        self.send_header(
-            "Content-Type",
-            "application/json"
-        )
-
-        self.send_header(
-            "Content-Length",
-            str(len(body))
-        )
-
-        self.end_headers()
-
-        self.wfile.write(body)
-
-    def do_GET(self):
-        path = self.path.split("?", 1)[0]
-
-        if path == "/health":
-            self.send_json(
-                200,
-                {"ok": True}
-            )
-            return
-
-        if path == "/xendit/webhook":
-            self.send_json(
-                200,
-                {
-                    "ok": True,
-                    "method": "POST required"
-                }
-            )
-            return
-
-        self.send_json(
-            404,
-            {
-                "ok": False,
-                "error": "Not found"
-            }
-        )
-
-    def do_POST(self):
-        path = self.path.split("?", 1)[0]
-
-        if path != "/xendit/webhook":
-            self.send_json(
-                404,
-                {
-                    "ok": False,
-                    "error": "Not found"
-                }
-            )
-            return
-
-        token = self.headers.get(
-            "x-callback-token",
-            ""
-        ).strip()
-
-        if (
-            not token
-            or not hmac.compare_digest(
-                token,
-                XENDIT_WEBHOOK_TOKEN
-            )
-        ):
-            logger.warning(
-                "Webhook Xendit ditolak: token tidak cocok."
-            )
-
-            self.send_json(
-                403,
-                {
-                    "ok": False,
-                    "error": "Forbidden"
-                }
-            )
-            return
-
-        webhook_id = self.headers.get(
-            "webhook-id",
-            ""
-        )
-
-        if webhook_id:
-            logger.info(
-                "Menerima webhook-id: %s",
-                webhook_id
-            )
-
-        try:
-            length = int(
-                self.headers.get(
-                    "Content-Length",
-                    "0"
-                )
-            )
-
-            if (
-                length <= 0
-                or length > 1024 * 1024
-            ):
-                self.send_json(
-                    400,
-                    {
-                        "ok": False,
-                        "error": "Invalid body"
-                    }
-                )
-                return
-
-            raw_body = self.rfile.read(length)
-
-            payload = json.loads(
-                raw_body.decode("utf-8")
-            )
-
-            result = process_xendit_webhook(
-                payload
-            )
-
-            self.send_json(
-                200,
-                result
-            )
-
-        except json.JSONDecodeError:
-            self.send_json(
-                400,
-                {
-                    "ok": False,
-                    "error": "Invalid JSON"
-                }
-            )
-
-        except Exception as error:
-            logger.exception(
-                "Gagal memproses webhook Xendit: %s",
-                error
-            )
-
-            self.send_json(
-                500,
-                {
-                    "ok": False,
-                    "error": "Webhook processing failed"
-                }
-            )
-
-
-def start_webhook_server():
-
-    server = ThreadingHTTPServer(
-        ("0.0.0.0", PORT),
-        XenditWebhookHandler,
-    )
-
-    thread = threading.Thread(
-        target=server.serve_forever,
-        daemon=True,
-    )
-
-    thread.start()
-
-    logger.info(
-        "Webhook Xendit aktif di port %s",
-        PORT
-    )
-
-    return server
-    # =========================================================
 # USER MENU
 # =========================================================
 
 def user_menu():
-
-    keyboard = [
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "💰 Saldo",
@@ -486,9 +78,7 @@ def user_menu():
                 callback_data="user_history"
             ),
         ],
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
+    ])
 
 
 # =========================================================
@@ -496,8 +86,7 @@ def user_menu():
 # =========================================================
 
 def admin_menu():
-
-    keyboard = [
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "👥 Users",
@@ -522,39 +111,612 @@ def admin_menu():
             InlineKeyboardButton(
                 "📊 Statistik",
                 callback_data="admin_stats"
-            ),
+            )
         ],
-    ]
+    ])
 
-    return InlineKeyboardMarkup(keyboard)
+
+# =========================================================
+# XENDIT CREATE INVOICE
+# =========================================================
+
+def create_xendit_invoice(amount, deposit_id):
+
+    auth = base64.b64encode(
+        f"{XENDIT_SECRET_KEY}:".encode()
+    ).decode()
+
+    payload = {
+        "external_id": deposit_id,
+        "amount": amount,
+        "description": f"Deposit saldo {deposit_id}",
+        "invoice_duration": 86400,
+        "currency": "IDR",
+
+        "items": [
+            {
+                "name": "Deposit Saldo",
+                "quantity": 1,
+                "price": amount,
+                "category": "Digital Service",
+            }
+        ],
+
+        "metadata": {
+            "deposit_id": deposit_id,
+        },
+    }
+
+    request = Request(
+        XENDIT_API_URL,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+
+        with urlopen(request, timeout=30) as response:
+
+            return json.loads(
+                response.read().decode()
+            )
+
+    except HTTPError as error:
+
+        body = error.read().decode(
+            errors="replace"
+        )
+
+        logger.error(
+            "Xendit HTTP %s: %s",
+            error.code,
+            body
+        )
+
+        raise RuntimeError(
+            f"Xendit menolak invoice (HTTP {error.code})."
+        ) from error
+
+    except (URLError, TimeoutError) as error:
+
+        logger.error(
+            "Xendit connection error: %s",
+            error
+        )
+
+        raise RuntimeError(
+            "Tidak bisa terhubung ke Xendit."
+        ) from error
+
+
+# =========================================================
+# TELEGRAM NOTIFICATION
+# =========================================================
+
+def send_telegram_message(chat_id, text):
+
+    url = (
+        "https://"
+        + "api.telegram.org/bot"
+        + BOT_TOKEN
+        + "/sendMessage"
+    )
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+    }
+
+    request = Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json"
+        },
+        method="POST",
+    )
+
+    try:
+
+        with urlopen(request, timeout=20) as response:
+            response.read()
+
+    except Exception as error:
+
+        logger.error(
+            "Notifikasi Telegram gagal: %s",
+            error
+        )
+
+
+# =========================================================
+# COMPLETE DEPOSIT
+# =========================================================
+
+def complete_deposit_payment(
+    deposit_id,
+    payment_reference,
+    paid_amount
+):
+
+    with get_db() as db:
+
+        deposit = db.execute(
+            """
+            SELECT
+                deposit_id,
+                telegram_id,
+                amount,
+                status
+            FROM deposits
+            WHERE deposit_id = %s
+            FOR UPDATE
+            """,
+            (deposit_id,),
+        ).fetchone()
+
+        if not deposit:
+
+            raise ValueError(
+                "Deposit tidak ditemukan."
+            )
+
+        # Mencegah saldo masuk dua kali
+        if deposit["status"] == "SUCCESS":
+
+            return {
+                "completed": False,
+                "already_completed": True,
+            }
+
+        if deposit["status"] != "PENDING":
+
+            raise ValueError(
+                f"Deposit berstatus "
+                f"{deposit['status']}, bukan PENDING."
+            )
+
+        # Pastikan nominal webhook sama
+        # dengan nominal deposit
+        if int(paid_amount) != int(
+            deposit["amount"]
+        ):
+
+            raise ValueError(
+                "Nominal pembayaran Xendit "
+                "tidak sama dengan nominal deposit."
+            )
+
+        user = db.execute(
+            """
+            SELECT balance
+            FROM users
+            WHERE telegram_id = %s
+            FOR UPDATE
+            """,
+            (deposit["telegram_id"],),
+        ).fetchone()
+
+        if not user:
+
+            raise ValueError(
+                "User deposit tidak ditemukan."
+            )
+
+        before = user["balance"]
+
+        after = (
+            before
+            + deposit["amount"]
+        )
+
+        # Update saldo
+        db.execute(
+            """
+            UPDATE users
+            SET balance = %s
+            WHERE telegram_id = %s
+            """,
+            (
+                after,
+                deposit["telegram_id"],
+            ),
+        )
+
+        # Catat ledger
+        db.execute(
+            """
+            INSERT INTO ledger
+            (
+                telegram_id,
+                amount,
+                balance_before,
+                balance_after,
+                transaction_type,
+                reference,
+                description,
+                created_at
+            )
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+            (
+                deposit["telegram_id"],
+                deposit["amount"],
+                before,
+                after,
+                "DEPOSIT",
+                payment_reference
+                or deposit_id,
+                f"Deposit Xendit {deposit_id}",
+                now(),
+            ),
+        )
+
+        # Tandai deposit sukses
+        db.execute(
+            """
+            UPDATE deposits
+            SET
+                status = 'SUCCESS',
+                payment_reference =
+                    COALESCE(
+                        %s,
+                        payment_reference
+                    ),
+                completed_at = %s
+            WHERE deposit_id = %s
+            """,
+            (
+                payment_reference,
+                now(),
+                deposit_id,
+            ),
+        )
+
+        return {
+            "completed": True,
+            "already_completed": False,
+            "telegram_id": deposit["telegram_id"],
+            "amount": deposit["amount"],
+            "new_balance": after,
+        }
+
+
+# =========================================================
+# PROCESS XENDIT WEBHOOK
+# =========================================================
+
+def process_xendit_webhook(payload):
+
+    status = str(
+        payload.get("status", "")
+    ).upper()
+
+    deposit_id = payload.get(
+        "external_id"
+    )
+
+    if not deposit_id:
+
+        raise ValueError(
+            "Webhook tidak memiliki external_id."
+        )
+
+    # -----------------------------------------------------
+    # PAID
+    # -----------------------------------------------------
+
+    if status == "PAID":
+
+        paid_amount = payload.get(
+            "paid_amount",
+            payload.get("amount")
+        )
+
+        try:
+
+            paid_amount = int(
+                paid_amount
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            raise ValueError(
+                "Nominal PAID dari Xendit tidak valid."
+            )
+
+        result = complete_deposit_payment(
+            deposit_id,
+            payload.get("id")
+            or payload.get("payment_id"),
+            paid_amount,
+        )
+
+        if result["completed"]:
+
+            send_telegram_message(
+
+                result["telegram_id"],
+
+                "✅ <b>Deposit berhasil!</b>\n\n"
+
+                f"💰 Deposit: "
+                f"<b>{format_rupiah(result['amount'])}</b>\n"
+
+                "💳 Status: <b>PAID</b>\n"
+
+                f"🧾 ID: "
+                f"<code>{deposit_id}</code>\n\n"
+
+                f"💰 Saldo sekarang: "
+                f"<b>{format_rupiah(result['new_balance'])}</b>",
+            )
+
+        else:
+
+            logger.info(
+                "Webhook duplicate diabaikan: %s",
+                deposit_id
+            )
+
+    # -----------------------------------------------------
+    # EXPIRED
+    # -----------------------------------------------------
+
+    elif status == "EXPIRED":
+
+        with get_db() as db:
+
+            db.execute(
+                """
+                UPDATE deposits
+                SET status = 'EXPIRED'
+                WHERE deposit_id = %s
+                  AND status = 'PENDING'
+                """,
+                (deposit_id,),
+            )
+
+        logger.info(
+            "Deposit expired: %s",
+            deposit_id
+        )
+
+    else:
+
+        logger.info(
+            "Webhook Xendit diabaikan: "
+            "deposit=%s status=%s",
+            deposit_id,
+            status,
+        )
+
+
+# =========================================================
+# WEBHOOK SERVER
+# =========================================================
+
+class XenditWebhookHandler(
+    BaseHTTPRequestHandler
+):
+
+    def log_message(
+        self,
+        fmt,
+        *args
+    ):
+
+        logger.info(
+            "Webhook HTTP: " + fmt,
+            *args
+        )
+
+    def send_json(
+        self,
+        code,
+        data
+    ):
+
+        body = json.dumps(
+            data
+        ).encode()
+
+        self.send_response(code)
+
+        self.send_header(
+            "Content-Type",
+            "application/json"
+        )
+
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
+
+        self.end_headers()
+
+        self.wfile.write(body)
+
+    def do_GET(self):
+
+        if self.path == "/health":
+
+            self.send_json(
+                200,
+                {"ok": True}
+            )
+
+        else:
+
+            self.send_json(
+                404,
+                {
+                    "ok": False,
+                    "error": "Not found"
+                }
+            )
+
+    def do_POST(self):
+
+        if self.path != "/xendit/webhook":
+
+            self.send_json(
+                404,
+                {
+                    "ok": False,
+                    "error": "Not found"
+                }
+            )
+
+            return
+
+        token = self.headers.get(
+            "x-callback-token",
+            ""
+        )
+
+        if token != XENDIT_WEBHOOK_TOKEN:
+
+            logger.warning(
+                "Webhook Xendit ditolak: "
+                "token tidak cocok."
+            )
+
+            self.send_json(
+                403,
+                {
+                    "ok": False,
+                    "error": "Forbidden"
+                }
+            )
+
+            return
+
+        try:
+
+            length = int(
+                self.headers.get(
+                    "Content-Length",
+                    "0"
+                )
+            )
+
+            raw_body = self.rfile.read(
+                length
+            )
+
+            payload = json.loads(
+                raw_body.decode("utf-8")
+            )
+
+            process_xendit_webhook(
+                payload
+            )
+
+            self.send_json(
+                200,
+                {"ok": True}
+            )
+
+        except json.JSONDecodeError:
+
+            self.send_json(
+                400,
+                {
+                    "ok": False,
+                    "error": "Invalid JSON"
+                }
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Gagal memproses webhook Xendit."
+            )
+
+            self.send_json(
+                500,
+                {
+                    "ok": False,
+                    "error": (
+                        "Webhook processing failed"
+                    )
+                }
+            )
+
+
+def start_webhook_server():
+
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", PORT),
+        XenditWebhookHandler,
+    )
+
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+    )
+
+    thread.start()
+
+    logger.info(
+        "Webhook server aktif di port %s",
+        PORT
+    )
+
+    return server
 
 
 # =========================================================
 # USER START
 # =========================================================
 
-async def user_start(update: Update):
+async def user_start(update):
 
     user = update.effective_user
 
     create_user(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
+        user.id,
+        user.username,
+        user.first_name
     )
 
-    balance = get_balance(user.id)
-
-    text = (
-        "👋 <b>Selamat datang!</b>\n\n"
-        "Bot layanan digital kamu sudah aktif.\n\n"
-        f"💰 Saldo: <b>{format_rupiah(balance)}</b>\n\n"
-        "Silakan pilih menu:"
+    balance = get_balance(
+        user.id
     )
 
     await update.message.reply_text(
-        text,
+
+        "👋 <b>Selamat datang!</b>\n\n"
+
+        "Bot layanan digital kamu sudah aktif.\n\n"
+
+        f"💰 Saldo: "
+        f"<b>{format_rupiah(balance)}</b>\n\n"
+
+        "Silakan pilih menu:",
+
         parse_mode="HTML",
+
         reply_markup=user_menu(),
     )
 
@@ -563,23 +725,18 @@ async def user_start(update: Update):
 # ADMIN START
 # =========================================================
 
-async def admin_start(update: Update):
-
-    text = (
-        "👑 <b>ADMIN PANEL</b>\n\n"
-        "Selamat datang, Admin.\n\n"
-        "Dari panel ini kamu nantinya bisa mengelola:\n\n"
-        "👥 User\n"
-        "💳 Deposit\n"
-        "📦 Order\n"
-        "💰 Provider\n"
-        "📊 Statistik\n\n"
-        "Pilih menu:"
-    )
+async def admin_start(update):
 
     await update.message.reply_text(
-        text,
+
+        "👑 <b>ADMIN PANEL</b>\n\n"
+
+        "Selamat datang, Admin.\n\n"
+
+        "Pilih menu:",
+
         parse_mode="HTML",
+
         reply_markup=admin_menu(),
     )
 
@@ -588,19 +745,25 @@ async def admin_start(update: Update):
 # /START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update,
+    context
+):
 
     user = update.effective_user
 
     create_user(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
+        user.id,
+        user.username,
+        user.first_name
     )
 
     if is_admin(user.id):
+
         await admin_start(update)
+
     else:
+
         await user_start(update)
 
 
@@ -610,106 +773,101 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def user_callback(
     query,
-    user_id,
+    user_id
 ):
 
-    # -------------------------
-    # SALDO
-    # -------------------------
-
     if query.data == "user_balance":
-
-        balance = get_balance(user_id)
 
         keyboard = [
             [
                 InlineKeyboardButton(
                     "💳 Deposit",
-                    callback_data="user_deposit",
+                    callback_data="user_deposit"
                 )
             ],
             [
                 InlineKeyboardButton(
                     "⬅️ Kembali",
-                    callback_data="user_home",
+                    callback_data="user_home"
                 )
             ],
         ]
 
         await query.edit_message_text(
-            "💰 <b>Saldo Kamu</b>\n\n"
-            f"Saldo: <b>{format_rupiah(balance)}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # DEPOSIT
-    # -------------------------
+            "💰 <b>Saldo Kamu</b>\n\n"
+
+            f"Saldo: "
+            f"<b>{format_rupiah(get_balance(user_id))}</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
+        )
 
     elif query.data == "user_deposit":
 
         return "WAIT_DEPOSIT"
 
-    # -------------------------
-    # SERVICES
-    # -------------------------
-
     elif query.data == "user_services":
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Kembali",
-                    callback_data="user_home",
-                )
-            ]
-        ]
-
         await query.edit_message_text(
+
             "📱 <b>Layanan</b>\n\n"
+
             "Modul layanan belum diaktifkan.\n\n"
+
             "Nanti menu ini akan terhubung "
             "ke provider API.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # HISTORY
-    # -------------------------
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton(
+                        "⬅️ Kembali",
+                        callback_data="user_home"
+                    )
+                ]]
+            ),
+        )
 
     elif query.data == "user_history":
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Kembali",
-                    callback_data="user_home",
-                )
-            ]
-        ]
-
         await query.edit_message_text(
-            "📜 <b>Riwayat Transaksi</b>\n\n"
-            "Belum ada transaksi.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # HOME
-    # -------------------------
+            "📜 <b>Riwayat Transaksi</b>\n\n"
+
+            "Riwayat deposit akan kita tampilkan "
+            "di tahap berikutnya.",
+
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton(
+                        "⬅️ Kembali",
+                        callback_data="user_home"
+                    )
+                ]]
+            ),
+        )
 
     elif query.data == "user_home":
 
-        balance = get_balance(user_id)
-
         await query.edit_message_text(
+
             "🏠 <b>Menu Utama</b>\n\n"
-            f"💰 Saldo: <b>{format_rupiah(balance)}</b>\n\n"
+
+            f"💰 Saldo: "
+            f"<b>{format_rupiah(get_balance(user_id))}</b>\n\n"
+
             "Pilih menu:",
+
             parse_mode="HTML",
+
             reply_markup=user_menu(),
         )
 
@@ -718,43 +876,38 @@ async def user_callback(
 # ADMIN CALLBACK
 # =========================================================
 
-async def admin_callback(
-    query,
-):
+async def admin_callback(query):
 
-    # -------------------------
-    # USERS
-    # -------------------------
+    back = [[
+        InlineKeyboardButton(
+            "⬅️ Admin Panel",
+            callback_data="admin_home"
+        )
+    ]]
 
     if query.data == "admin_users":
 
         with get_db() as db:
 
-            row = db.execute(
-                "SELECT COUNT(*) AS total FROM users"
-            ).fetchone()
-
-        total_users = row["total"]
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
+            total = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM users
+                """
+            ).fetchone()["total"]
 
         await query.edit_message_text(
-            "👥 <b>USERS</b>\n\n"
-            f"Total user: <b>{total_users}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # DEPOSITS
-    # -------------------------
+            "👥 <b>USERS</b>\n\n"
+
+            f"Total user: <b>{total}</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                back
+            ),
+        )
 
     elif query.data == "admin_deposits":
 
@@ -783,27 +936,22 @@ async def admin_callback(
                 """
             ).fetchone()["total"]
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
-
         await query.edit_message_text(
-            "💳 <b>DEPOSIT</b>\n\n"
-            f"Total: <b>{total}</b>\n"
-            f"Pending: <b>{pending}</b>\n"
-            f"Success: <b>{success}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # ORDERS
-    # -------------------------
+            "💳 <b>DEPOSIT</b>\n\n"
+
+            f"Total transaksi: <b>{total}</b>\n"
+
+            f"Pending: <b>{pending}</b>\n"
+
+            f"Success: <b>{success}</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                back
+            ),
+        )
 
     elif query.data == "admin_orders":
 
@@ -832,55 +980,37 @@ async def admin_callback(
                 """
             ).fetchone()["total"]
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
-
         await query.edit_message_text(
-            "📦 <b>ORDERS</b>\n\n"
-            f"Total: <b>{total}</b>\n"
-            f"Pending: <b>{pending}</b>\n"
-            f"Success: <b>{success}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # PROVIDER
-    # -------------------------
+            "📦 <b>ORDERS</b>\n\n"
+
+            f"Total order: <b>{total}</b>\n"
+
+            f"Pending: <b>{pending}</b>\n"
+
+            f"Success: <b>{success}</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                back
+            ),
+        )
 
     elif query.data == "admin_provider":
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
-
         await query.edit_message_text(
-            "💰 <b>PROVIDER</b>\n\n"
-            "Provider API belum terhubung.\n\n"
-            "Nanti bagian ini akan menampilkan:\n\n"
-            "• Balance provider\n"
-            "• Status API\n"
-            "• Order aktif\n"
-            "• Refund\n"
-            "• Provider cost",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # STATISTICS
-    # -------------------------
+            "💰 <b>PROVIDER</b>\n\n"
+
+            "Provider API belum terhubung.",
+
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                back
+            ),
+        )
 
     elif query.data == "admin_stats":
 
@@ -917,191 +1047,46 @@ async def admin_callback(
                 """
             ).fetchone()["total"]
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
-
         await query.edit_message_text(
+
             "📊 <b>STATISTIK</b>\n\n"
+
             f"👥 Users: <b>{users}</b>\n"
+
             f"💳 Deposits: <b>{deposits}</b>\n"
+
             f"📦 Orders: <b>{orders}</b>\n"
+
             f"💰 Total saldo user: "
             f"<b>{format_rupiah(balance)}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
 
-    # -------------------------
-    # ADMIN HOME
-    # -------------------------
+            parse_mode="HTML",
+
+            reply_markup=InlineKeyboardMarkup(
+                back
+            ),
+        )
 
     elif query.data == "admin_home":
 
         await query.edit_message_text(
+
             "👑 <b>ADMIN PANEL</b>\n\n"
             "Pilih menu:",
+
             parse_mode="HTML",
-            reply_markup=admin_menu(),
-        )
-        # -------------------------
-# ORDERS
-# -------------------------
 
-    elif query.data == "admin_orders":
-
-        with get_db() as db:
-
-            total = db.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM orders
-                """
-            ).fetchone()["total"]
-
-            pending = db.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM orders
-                WHERE status = 'PENDING'
-                """
-            ).fetchone()["total"]
-
-            success = db.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM orders
-                WHERE status = 'SUCCESS'
-                """
-            ).fetchone()["total"]
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            "📦 <b>ORDERS</b>\n\n"
-            f"Total order: <b>{total}</b>\n"
-            f"Pending: <b>{pending}</b>\n"
-            f"Success: <b>{success}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    # -------------------------
-    # PROVIDER
-    # -------------------------
-
-    elif query.data == "admin_provider":
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            "💰 <b>PROVIDER</b>\n\n"
-            "Provider API belum terhubung.\n\n"
-            "Nanti bagian ini akan menampilkan:\n\n"
-            "• Balance provider\n"
-            "• Status API\n"
-            "• Order aktif\n"
-            "• Refund\n"
-            "• Provider cost",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    # -------------------------
-    # STATISTICS
-    # -------------------------
-
-    elif query.data == "admin_stats":
-
-        with get_db() as db:
-
-            users = db.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM users
-                """
-            ).fetchone()["total"]
-
-            deposits = db.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM deposits
-                """
-            ).fetchone()["total"]
-
-            orders = db.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM orders
-                """
-            ).fetchone()["total"]
-
-            balance = db.execute(
-                """
-                SELECT COALESCE(SUM(balance), 0) AS total
-                FROM users
-                """
-            ).fetchone()["total"]
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Admin Panel",
-                    callback_data="admin_home",
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            "📊 <b>STATISTIK</b>\n\n"
-            f"👥 Users: <b>{users}</b>\n"
-            f"💳 Deposits: <b>{deposits}</b>\n"
-            f"📦 Orders: <b>{orders}</b>\n"
-            f"💰 Total saldo user: <b>{format_rupiah(balance)}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    # -------------------------
-    # ADMIN HOME
-    # -------------------------
-
-    elif query.data == "admin_home":
-
-        await query.edit_message_text(
-            "👑 <b>ADMIN PANEL</b>\n\n"
-            "Pilih menu:",
-            parse_mode="HTML",
             reply_markup=admin_menu(),
         )
 
 
 # =========================================================
-# CALLBACK HANDLER
+# BUTTON HANDLER
 # =========================================================
 
 async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    update,
+    context
 ):
 
     query = update.callback_query
@@ -1110,18 +1095,14 @@ async def button_handler(
 
     user_id = query.from_user.id
 
-    # -----------------------------------------------------
-    # SECURITY
-    # -----------------------------------------------------
-
-    admin_callbacks = [
+    admin_callbacks = {
         "admin_users",
         "admin_deposits",
         "admin_orders",
         "admin_provider",
         "admin_stats",
         "admin_home",
-    ]
+    }
 
     if query.data in admin_callbacks:
 
@@ -1129,50 +1110,62 @@ async def button_handler(
 
             await query.answer(
                 "❌ Kamu bukan admin.",
-                show_alert=True,
+                show_alert=True
             )
 
             return
 
-        await admin_callback(query)
+        await admin_callback(
+            query
+        )
 
         return
 
-    # -----------------------------------------------------
-    # USER CALLBACKS
-    # -----------------------------------------------------
+    if query.data == "user_home":
+
+        context.chat_data[
+            "waiting_deposit"
+        ] = False
 
     result = await user_callback(
         query,
-        user_id,
+        user_id
     )
 
     if result == "WAIT_DEPOSIT":
 
-        context.chat_data["waiting_deposit"] = True
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "❌ Batal",
-                    callback_data="user_home",
-                )
-            ]
-        ]
+        context.chat_data[
+            "waiting_deposit"
+        ] = True
 
         await query.edit_message_text(
+
             "💳 <b>Deposit Saldo</b>\n\n"
+
             "Masukkan nominal deposit.\n\n"
+
             "Minimum: <b>Rp1.000</b>\n"
+
             "Kelipatan: <b>Rp1.000</b>\n\n"
+
             "Contoh:\n"
             "1000\n"
             "5000\n"
             "10000\n"
             "25000\n\n"
+
             "Ketik nominal sekarang.",
+
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+
+            reply_markup=InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton(
+                        "❌ Batal",
+                        callback_data="user_home"
+                    )
+                ]]
+            ),
         )
 
 
@@ -1181,30 +1174,42 @@ async def button_handler(
 # =========================================================
 
 async def text_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    update,
+    context
 ):
 
     if not update.message:
+
         return
 
-    if not context.chat_data.get("waiting_deposit"):
+    if not context.chat_data.get(
+        "waiting_deposit"
+    ):
+
         return
 
     user = update.effective_user
 
-    text = update.message.text.strip()
+    context.chat_data[
+        "waiting_deposit"
+    ] = False
 
-    context.chat_data["waiting_deposit"] = False
-
-    text = text.replace(".", "").replace(",", "")
+    text = (
+        update.message.text
+        .strip()
+        .replace(".", "")
+        .replace(",", "")
+    )
 
     if not text.isdigit():
 
         await update.message.reply_text(
+
             "❌ Nominal harus berupa angka.\n\n"
-            "Contoh:\n"
+
+            "Contoh: "
             "<code>10000</code>",
+
             parse_mode="HTML",
         )
 
@@ -1212,43 +1217,38 @@ async def text_handler(
 
     amount = int(text)
 
-    # -----------------------------------------------------
-    # MINIMUM
-    # -----------------------------------------------------
-
     if amount < 1000:
 
         await update.message.reply_text(
+
             "❌ <b>Deposit terlalu kecil.</b>\n\n"
-            "Minimum deposit adalah <b>Rp1.000</b>.",
+
+            "Minimum deposit adalah "
+            "<b>Rp1.000</b>.",
+
             parse_mode="HTML",
         )
 
         return
 
-    # -----------------------------------------------------
-    # MULTIPLE
-    # -----------------------------------------------------
-
     if amount % 1000 != 0:
 
         await update.message.reply_text(
+
             "❌ <b>Nominal tidak valid.</b>\n\n"
-            "Deposit harus kelipatan <b>Rp1.000</b>.\n\n"
-            "Contoh benar:\n"
-            "Rp1.000\n"
-            "Rp5.000\n"
-            "Rp10.000\n"
-            "Rp25.000",
+
+            "Deposit harus kelipatan "
+            "<b>Rp1.000</b>.",
+
             parse_mode="HTML",
         )
 
         return
 
     create_user(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
+        user.id,
+        user.username,
+        user.first_name
     )
 
     deposit_id = (
@@ -1256,7 +1256,7 @@ async def text_handler(
         + uuid.uuid4().hex[:12].upper()
     )
 
-    # Simpan deposit sebagai PENDING sebelum meminta invoice ke Xendit.
+    # Simpan deposit PENDING
     with get_db() as db:
 
         db.execute(
@@ -1269,7 +1269,14 @@ async def text_handler(
                 status,
                 created_at
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
             """,
             (
                 deposit_id,
@@ -1280,32 +1287,30 @@ async def text_handler(
             ),
         )
 
-    # -----------------------------------------------------
-    # CREATE XENDIT INVOICE
-    # -----------------------------------------------------
-
     try:
 
         invoice = await asyncio.to_thread(
             create_xendit_invoice,
             amount,
-            deposit_id,
+            deposit_id
         )
 
-        invoice_id = invoice.get("id")
-        invoice_url = invoice.get("invoice_url")
+        invoice_id = invoice.get(
+            "id"
+        )
+
+        invoice_url = invoice.get(
+            "invoice_url"
+        )
 
         if not invoice_id or not invoice_url:
 
             raise RuntimeError(
                 "Respons Xendit tidak berisi "
-                "invoice ID atau invoice URL."
+                "invoice_id/invoice_url."
             )
 
-        # -------------------------------------------------
-        # SIMPAN ID INVOICE
-        # -------------------------------------------------
-
+        # Simpan invoice ID
         with get_db() as db:
 
             db.execute(
@@ -1316,45 +1321,57 @@ async def text_handler(
                 """,
                 (
                     invoice_id,
-                    deposit_id,
+                    deposit_id
                 ),
             )
 
-        # -------------------------------------------------
-        # PAYMENT BUTTON
-        # -------------------------------------------------
-
         keyboard = [
+
             [
                 InlineKeyboardButton(
                     "💳 Bayar Sekarang",
-                    url=invoice_url,
+                    url=invoice_url
                 )
             ],
+
             [
                 InlineKeyboardButton(
                     "⬅️ Menu Utama",
-                    callback_data="user_home",
+                    callback_data="user_home"
                 )
             ],
+
         ]
 
         await update.message.reply_text(
+
             "💳 <b>Invoice Deposit Dibuat</b>\n\n"
-            f"🧾 ID: <code>{deposit_id}</code>\n"
-            f"💰 Nominal: <b>{format_rupiah(amount)}</b>\n"
+
+            f"🧾 ID: "
+            f"<code>{deposit_id}</code>\n"
+
+            f"💰 Nominal: "
+            f"<b>{format_rupiah(amount)}</b>\n"
+
             "📌 Status: <b>PENDING</b>\n\n"
-            "Klik tombol di bawah untuk melakukan pembayaran.\n\n"
-            "Setelah pembayaran berhasil, saldo akan otomatis masuk.",
+
+            "Klik tombol di bawah "
+            "untuk melakukan pembayaran.\n\n"
+
+            "Setelah pembayaran berhasil, "
+            "saldo akan otomatis masuk.",
+
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
         )
 
-    except Exception as error:
+    except Exception:
 
         logger.exception(
-            "Gagal membuat invoice Xendit: %s",
-            error,
+            "Gagal membuat invoice Xendit."
         )
 
         with get_db() as db:
@@ -1370,8 +1387,11 @@ async def text_handler(
             )
 
         await update.message.reply_text(
+
             "❌ <b>Gagal membuat invoice pembayaran.</b>\n\n"
+
             "Silakan coba lagi beberapa saat kemudian.",
+
             parse_mode="HTML",
         )
 
@@ -1381,11 +1401,13 @@ async def text_handler(
 # =========================================================
 
 async def admin_add_balance(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    update,
+    context
 ):
 
-    if not is_admin(update.effective_user.id):
+    if not is_admin(
+        update.effective_user.id
+    ):
 
         await update.message.reply_text(
             "❌ Kamu bukan admin."
@@ -1396,9 +1418,13 @@ async def admin_add_balance(
     if len(context.args) != 2:
 
         await update.message.reply_text(
+
             "Format:\n\n"
+
             "/addbalance TELEGRAM_ID NOMINAL\n\n"
+
             "Contoh:\n"
+
             "/addbalance 123456789 10000"
         )
 
@@ -1433,14 +1459,21 @@ async def admin_add_balance(
     try:
 
         new_balance = add_balance(
+
             telegram_id=telegram_id,
+
             amount=amount,
+
             transaction_type="ADMIN_TOPUP",
+
             reference=(
                 "ADMIN-"
                 + uuid.uuid4().hex[:8].upper()
             ),
-            description="Saldo ditambahkan oleh admin",
+
+            description=(
+                "Saldo ditambahkan oleh admin"
+            ),
         )
 
     except Exception as error:
@@ -1452,10 +1485,15 @@ async def admin_add_balance(
         return
 
     await update.message.reply_text(
+
         "✅ <b>Saldo berhasil ditambahkan.</b>\n\n"
-        f"👤 User: <code>{telegram_id}</code>\n"
+
+        f"👤 User: "
+        f"<code>{telegram_id}</code>\n"
+
         f"💰 Saldo baru: "
         f"<b>{format_rupiah(new_balance)}</b>",
+
         parse_mode="HTML",
     )
 
@@ -1465,17 +1503,18 @@ async def admin_add_balance(
 # =========================================================
 
 async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
+    update,
+    context
 ):
 
     logger.error(
         "Exception while handling update:",
         exc_info=context.error,
     )
-``` [❶](code://python)
+
+
 # =========================================================
-# RUN BOT
+# RUN
 # =========================================================
 
 def run():
@@ -1491,31 +1530,19 @@ def run():
         .build()
     )
 
-    # -----------------------------------------------------
-    # START
-    # -----------------------------------------------------
-
     application.add_handler(
         CommandHandler(
             "start",
-            start,
+            start
         )
     )
-
-    # -----------------------------------------------------
-    # ADMIN ADD BALANCE
-    # -----------------------------------------------------
 
     application.add_handler(
         CommandHandler(
             "addbalance",
-            admin_add_balance,
+            admin_add_balance
         )
     )
-
-    # -----------------------------------------------------
-    # CALLBACK
-    # -----------------------------------------------------
 
     application.add_handler(
         CallbackQueryHandler(
@@ -1523,20 +1550,13 @@ def run():
         )
     )
 
-    # -----------------------------------------------------
-    # TEXT
-    # -----------------------------------------------------
-
     application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_handler,
+            filters.TEXT
+            & ~filters.COMMAND,
+            text_handler
         )
     )
-
-    # -----------------------------------------------------
-    # ERROR HANDLER
-    # -----------------------------------------------------
 
     application.add_error_handler(
         error_handler
@@ -1547,21 +1567,14 @@ def run():
     )
 
     logger.info(
-        "Webhook Xendit: /xendit/webhook"
+        "Webhook Xendit aktif di "
+        "/xendit/webhook"
     )
-
-    # -----------------------------------------------------
-    # START POLLING
-    # -----------------------------------------------------
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
-
-# =========================================================
-# MAIN
-# =========================================================
 
 if __name__ == "__main__":
     run()
