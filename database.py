@@ -200,9 +200,7 @@ def get_balance(telegram_id):
     user = get_user(telegram_id)
 
     if not user:
-
         create_user(telegram_id)
-
         return 0
 
     return user["balance"]
@@ -221,7 +219,6 @@ def add_balance(
 ):
 
     if amount <= 0:
-
         raise ValueError(
             "Amount harus lebih besar dari 0."
         )
@@ -239,13 +236,11 @@ def add_balance(
         ).fetchone()
 
         if not user:
-
             raise ValueError(
                 "User belum terdaftar."
             )
 
         before = user["balance"]
-
         after = before + amount
 
         db.execute(
@@ -303,7 +298,6 @@ def subtract_balance(
 ):
 
     if amount <= 0:
-
         raise ValueError(
             "Amount harus lebih besar dari 0."
         )
@@ -321,7 +315,6 @@ def subtract_balance(
         ).fetchone()
 
         if not user:
-
             raise ValueError(
                 "User belum terdaftar."
             )
@@ -329,7 +322,6 @@ def subtract_balance(
         before = user["balance"]
 
         if before < amount:
-
             raise ValueError(
                 "Saldo tidak cukup."
             )
@@ -376,3 +368,190 @@ def subtract_balance(
         )
 
         return after
+
+
+# =========================================================
+# COMPLETE DEPOSIT
+# =========================================================
+
+def complete_deposit(
+    deposit_id,
+    payment_reference=None,
+):
+    """
+    Menyelesaikan deposit secara atomik.
+
+    Return:
+        (
+            completed,
+            telegram_id,
+            amount,
+            new_balance
+        )
+
+    completed = True
+        deposit baru berhasil dikreditkan
+
+    completed = False
+        deposit sudah pernah diselesaikan
+    """
+
+    with get_db() as db:
+
+        # -------------------------------------------------
+        # Ambil deposit dan kunci barisnya
+        # -------------------------------------------------
+
+        deposit = db.execute(
+            """
+            SELECT
+                id,
+                deposit_id,
+                telegram_id,
+                amount,
+                status
+            FROM deposits
+            WHERE deposit_id = %s
+            FOR UPDATE
+            """,
+            (deposit_id,)
+        ).fetchone()
+
+        if not deposit:
+            raise ValueError(
+                f"Deposit tidak ditemukan: {deposit_id}"
+            )
+
+        telegram_id = deposit["telegram_id"]
+        amount = deposit["amount"]
+        status = deposit["status"]
+
+        # -------------------------------------------------
+        # Jangan kredit dua kali
+        # -------------------------------------------------
+
+        if status == "COMPLETED":
+
+            user = db.execute(
+                """
+                SELECT balance
+                FROM users
+                WHERE telegram_id = %s
+                """,
+                (telegram_id,)
+            ).fetchone()
+
+            if not user:
+                return (
+                    False,
+                    telegram_id,
+                    amount,
+                    0,
+                )
+
+            return (
+                False,
+                telegram_id,
+                amount,
+                user["balance"],
+            )
+
+        # -------------------------------------------------
+        # Pastikan user tersedia
+        # -------------------------------------------------
+
+        user = db.execute(
+            """
+            SELECT balance
+            FROM users
+            WHERE telegram_id = %s
+            FOR UPDATE
+            """,
+            (telegram_id,)
+        ).fetchone()
+
+        if not user:
+            raise ValueError(
+                f"User tidak ditemukan: {telegram_id}"
+            )
+
+        # -------------------------------------------------
+        # Hitung saldo baru
+        # -------------------------------------------------
+
+        before = user["balance"]
+        after = before + amount
+
+        # -------------------------------------------------
+        # Tambahkan saldo user
+        # -------------------------------------------------
+
+        db.execute(
+            """
+            UPDATE users
+            SET balance = %s
+            WHERE telegram_id = %s
+            """,
+            (
+                after,
+                telegram_id,
+            )
+        )
+
+        # -------------------------------------------------
+        # Catat ke ledger
+        # -------------------------------------------------
+
+        db.execute(
+            """
+            INSERT INTO ledger
+            (
+                telegram_id,
+                amount,
+                balance_before,
+                balance_after,
+                transaction_type,
+                reference,
+                description,
+                created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                telegram_id,
+                amount,
+                before,
+                after,
+                "DEPOSIT",
+                deposit_id,
+                "Deposit berhasil dikonfirmasi oleh Xendit.",
+                now(),
+            )
+        )
+
+        # -------------------------------------------------
+        # Tandai deposit sebagai COMPLETED
+        # -------------------------------------------------
+
+        db.execute(
+            """
+            UPDATE deposits
+            SET
+                status = 'COMPLETED',
+                payment_reference = %s,
+                completed_at = %s
+            WHERE deposit_id = %s
+            """,
+            (
+                payment_reference,
+                now(),
+                deposit_id,
+            )
+        )
+
+        return (
+            True,
+            telegram_id,
+            amount,
+            after,
+        )
