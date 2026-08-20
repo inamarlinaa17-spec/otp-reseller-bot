@@ -165,26 +165,20 @@ def process_xendit_webhook(payload: dict):
     """
     Process the legacy Xendit Invoice webhook.
 
-    Test & Save Xendit boleh mengirim external_id
-    yang tidak ada di database kita. Itu harus tetap
-    mendapat HTTP 200 supaya webhook bisa disimpan.
+    Important: Xendit's Dashboard 'Test & Save' can send a test
+    notification whose external_id is not one of our deposits.
+    Such a notification must still receive HTTP 200 so Xendit can
+    save the webhook URL successfully.
     """
 
     status = str(payload.get("status", "")).upper()
     deposit_id = payload.get("external_id")
 
     if not deposit_id:
-        logger.warning(
-            "Webhook Xendit tanpa external_id: %s",
-            payload
-        )
-        return {
-            "ok": True,
-            "ignored": "missing_external_id"
-        }
+        logger.warning("Webhook Xendit tanpa external_id: %s", payload)
+        return {"ok": True, "ignored": "missing_external_id"}
 
     if status == "PAID":
-
         paid_amount = payload.get(
             "paid_amount",
             payload.get("amount"),
@@ -192,23 +186,15 @@ def process_xendit_webhook(payload: dict):
 
         try:
             paid_amount = int(paid_amount)
-
         except (TypeError, ValueError):
-
             logger.warning(
                 "Nominal PAID tidak valid untuk %s: %r",
                 deposit_id,
                 paid_amount,
             )
+            return {"ok": True, "ignored": "invalid_amount"}
 
-            return {
-                "ok": True,
-                "ignored": "invalid_amount"
-            }
-
-        # Cari deposit asli di database.
         with get_db() as db:
-
             deposit = db.execute(
                 """
                 SELECT telegram_id, amount, status
@@ -218,59 +204,33 @@ def process_xendit_webhook(payload: dict):
                 (deposit_id,),
             ).fetchone()
 
-        # Test & Save bisa menggunakan external_id palsu.
         if not deposit:
-
             logger.info(
                 "Webhook PAID diabaikan karena deposit tidak ditemukan: %s",
                 deposit_id,
             )
+            return {"ok": True, "ignored": "deposit_not_found"}
 
-            return {
-                "ok": True,
-                "ignored": "deposit_not_found"
-            }
-
-        # Pastikan nominal pembayaran sama dengan nominal deposit.
         if int(deposit["amount"]) != paid_amount:
-
             logger.error(
                 "Nominal webhook tidak cocok: deposit=%s expected=%s paid=%s",
                 deposit_id,
                 deposit["amount"],
                 paid_amount,
             )
+            return {"ok": True, "ignored": "amount_mismatch"}
 
-            return {
-                "ok": True,
-                "ignored": "amount_mismatch"
-            }
-
-        # Hindari saldo masuk dua kali.
         if deposit["status"] == "SUCCESS":
-
-            logger.info(
-                "Webhook duplicate diabaikan: %s",
-                deposit_id
-            )
-
-            return {
-                "ok": True,
-                "duplicate": True
-            }
+            logger.info("Webhook duplicate diabaikan: %s", deposit_id)
+            return {"ok": True, "duplicate": True}
 
         if deposit["status"] != "PENDING":
-
             logger.info(
                 "Deposit %s berstatus %s; webhook diabaikan.",
                 deposit_id,
                 deposit["status"],
             )
-
-            return {
-                "ok": True,
-                "ignored": "not_pending"
-            }
+            return {"ok": True, "ignored": "not_pending"}
 
         payment_reference = (
             payload.get("payment_id")
@@ -284,7 +244,6 @@ def process_xendit_webhook(payload: dict):
         )
 
         if completed:
-
             send_telegram_message(
                 telegram_id,
                 "✅ <b>Deposit berhasil!</b>\n\n"
@@ -294,15 +253,10 @@ def process_xendit_webhook(payload: dict):
                 f"💰 Saldo sekarang: <b>{format_rupiah(new_balance)}</b>",
             )
 
-        return {
-            "ok": True,
-            "completed": completed
-        }
+        return {"ok": True, "completed": completed}
 
     if status == "EXPIRED":
-
         with get_db() as db:
-
             db.execute(
                 """
                 UPDATE deposits
@@ -313,38 +267,23 @@ def process_xendit_webhook(payload: dict):
                 (deposit_id,),
             )
 
-        logger.info(
-            "Deposit expired: %s",
-            deposit_id
-        )
-
-        return {
-            "ok": True,
-            "expired": True
-        }
+        logger.info("Deposit expired: %s", deposit_id)
+        return {"ok": True, "expired": True}
 
     logger.info(
         "Webhook Xendit diabaikan: deposit=%s status=%s",
         deposit_id,
         status,
     )
-
-    return {
-        "ok": True,
-        "ignored": status or "empty_status"
-    }
+    return {"ok": True, "ignored": status or "empty_status"}
 
 
 class XenditWebhookHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
-        logger.info(
-            "Webhook HTTP: " + fmt,
-            *args
-        )
+        logger.info("Webhook HTTP: " + fmt, *args)
 
     def send_json(self, code: int, data: dict):
-
         body = json.dumps(data).encode("utf-8")
 
         self.send_response(code)
@@ -364,20 +303,16 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-
         path = self.path.split("?", 1)[0]
 
         if path == "/health":
-
             self.send_json(
                 200,
                 {"ok": True}
             )
-
             return
 
         if path == "/xendit/webhook":
-
             self.send_json(
                 200,
                 {
@@ -385,7 +320,6 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
                     "method": "POST required"
                 }
             )
-
             return
 
         self.send_json(
@@ -397,11 +331,9 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):
-
         path = self.path.split("?", 1)[0]
 
         if path != "/xendit/webhook":
-
             self.send_json(
                 404,
                 {
@@ -409,7 +341,6 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
                     "error": "Not found"
                 }
             )
-
             return
 
         token = self.headers.get(
@@ -424,7 +355,6 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
                 XENDIT_WEBHOOK_TOKEN
             )
         ):
-
             logger.warning(
                 "Webhook Xendit ditolak: token tidak cocok."
             )
@@ -436,7 +366,6 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
                     "error": "Forbidden"
                 }
             )
-
             return
 
         webhook_id = self.headers.get(
@@ -445,14 +374,12 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
         )
 
         if webhook_id:
-
             logger.info(
                 "Menerima webhook-id: %s",
                 webhook_id
             )
 
         try:
-
             length = int(
                 self.headers.get(
                     "Content-Length",
@@ -464,7 +391,6 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
                 length <= 0
                 or length > 1024 * 1024
             ):
-
                 self.send_json(
                     400,
                     {
@@ -472,7 +398,6 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
                         "error": "Invalid body"
                     }
                 )
-
                 return
 
             raw_body = self.rfile.read(length)
@@ -485,15 +410,12 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
                 payload
             )
 
-            # Selalu balas 200 untuk webhook yang
-            # token-nya valid.
             self.send_json(
                 200,
                 result
             )
 
         except json.JSONDecodeError:
-
             self.send_json(
                 400,
                 {
@@ -503,7 +425,6 @@ class XenditWebhookHandler(BaseHTTPRequestHandler):
             )
 
         except Exception as error:
-
             logger.exception(
                 "Gagal memproses webhook Xendit: %s",
                 error
@@ -539,6 +460,642 @@ def start_webhook_server():
 
     return server
     # =========================================================
+# USER MENU
+# =========================================================
+
+def user_menu():
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "💰 Saldo",
+                callback_data="user_balance"
+            ),
+            InlineKeyboardButton(
+                "💳 Deposit",
+                callback_data="user_deposit"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📱 Layanan",
+                callback_data="user_services"
+            ),
+            InlineKeyboardButton(
+                "📜 Riwayat",
+                callback_data="user_history"
+            ),
+        ],
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================================================
+# ADMIN MENU
+# =========================================================
+
+def admin_menu():
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "👥 Users",
+                callback_data="admin_users"
+            ),
+            InlineKeyboardButton(
+                "💳 Deposit",
+                callback_data="admin_deposits"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📦 Orders",
+                callback_data="admin_orders"
+            ),
+            InlineKeyboardButton(
+                "💰 Provider",
+                callback_data="admin_provider"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 Statistik",
+                callback_data="admin_stats"
+            ),
+        ],
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================================================
+# USER START
+# =========================================================
+
+async def user_start(update: Update):
+
+    user = update.effective_user
+
+    create_user(
+        telegram_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+    )
+
+    balance = get_balance(user.id)
+
+    text = (
+        "👋 <b>Selamat datang!</b>\n\n"
+        "Bot layanan digital kamu sudah aktif.\n\n"
+        f"💰 Saldo: <b>{format_rupiah(balance)}</b>\n\n"
+        "Silakan pilih menu:"
+    )
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=user_menu(),
+    )
+
+
+# =========================================================
+# ADMIN START
+# =========================================================
+
+async def admin_start(update: Update):
+
+    text = (
+        "👑 <b>ADMIN PANEL</b>\n\n"
+        "Selamat datang, Admin.\n\n"
+        "Dari panel ini kamu nantinya bisa mengelola:\n\n"
+        "👥 User\n"
+        "💳 Deposit\n"
+        "📦 Order\n"
+        "💰 Provider\n"
+        "📊 Statistik\n\n"
+        "Pilih menu:"
+    )
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=admin_menu(),
+    )
+
+
+# =========================================================
+# /START
+# =========================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    create_user(
+        telegram_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+    )
+
+    if is_admin(user.id):
+        await admin_start(update)
+    else:
+        await user_start(update)
+
+
+# =========================================================
+# USER CALLBACK
+# =========================================================
+
+async def user_callback(
+    query,
+    user_id,
+):
+
+    # -------------------------
+    # SALDO
+    # -------------------------
+
+    if query.data == "user_balance":
+
+        balance = get_balance(user_id)
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "💳 Deposit",
+                    callback_data="user_deposit",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Kembali",
+                    callback_data="user_home",
+                )
+            ],
+        ]
+
+        await query.edit_message_text(
+            "💰 <b>Saldo Kamu</b>\n\n"
+            f"Saldo: <b>{format_rupiah(balance)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # DEPOSIT
+    # -------------------------
+
+    elif query.data == "user_deposit":
+
+        return "WAIT_DEPOSIT"
+
+    # -------------------------
+    # SERVICES
+    # -------------------------
+
+    elif query.data == "user_services":
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Kembali",
+                    callback_data="user_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "📱 <b>Layanan</b>\n\n"
+            "Modul layanan belum diaktifkan.\n\n"
+            "Nanti menu ini akan terhubung "
+            "ke provider API.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # HISTORY
+    # -------------------------
+
+    elif query.data == "user_history":
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Kembali",
+                    callback_data="user_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "📜 <b>Riwayat Transaksi</b>\n\n"
+            "Belum ada transaksi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # HOME
+    # -------------------------
+
+    elif query.data == "user_home":
+
+        balance = get_balance(user_id)
+
+        await query.edit_message_text(
+            "🏠 <b>Menu Utama</b>\n\n"
+            f"💰 Saldo: <b>{format_rupiah(balance)}</b>\n\n"
+            "Pilih menu:",
+            parse_mode="HTML",
+            reply_markup=user_menu(),
+        )
+
+
+# =========================================================
+# ADMIN CALLBACK
+# =========================================================
+
+async def admin_callback(
+    query,
+):
+
+    # -------------------------
+    # USERS
+    # -------------------------
+
+    if query.data == "admin_users":
+
+        with get_db() as db:
+
+            row = db.execute(
+                "SELECT COUNT(*) AS total FROM users"
+            ).fetchone()
+
+        total_users = row["total"]
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "👥 <b>USERS</b>\n\n"
+            f"Total user: <b>{total_users}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # DEPOSITS
+    # -------------------------
+
+    elif query.data == "admin_deposits":
+
+        with get_db() as db:
+
+            total = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM deposits
+                """
+            ).fetchone()["total"]
+
+            pending = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM deposits
+                WHERE status = 'PENDING'
+                """
+            ).fetchone()["total"]
+
+            success = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM deposits
+                WHERE status = 'SUCCESS'
+                """
+            ).fetchone()["total"]
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "💳 <b>DEPOSIT</b>\n\n"
+            f"Total: <b>{total}</b>\n"
+            f"Pending: <b>{pending}</b>\n"
+            f"Success: <b>{success}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # ORDERS
+    # -------------------------
+
+    elif query.data == "admin_orders":
+
+        with get_db() as db:
+
+            total = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                """
+            ).fetchone()["total"]
+
+            pending = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                WHERE status = 'PENDING'
+                """
+            ).fetchone()["total"]
+
+            success = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                WHERE status = 'SUCCESS'
+                """
+            ).fetchone()["total"]
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "📦 <b>ORDERS</b>\n\n"
+            f"Total: <b>{total}</b>\n"
+            f"Pending: <b>{pending}</b>\n"
+            f"Success: <b>{success}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # PROVIDER
+    # -------------------------
+
+    elif query.data == "admin_provider":
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "💰 <b>PROVIDER</b>\n\n"
+            "Provider API belum terhubung.\n\n"
+            "Nanti bagian ini akan menampilkan:\n\n"
+            "• Balance provider\n"
+            "• Status API\n"
+            "• Order aktif\n"
+            "• Refund\n"
+            "• Provider cost",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # STATISTICS
+    # -------------------------
+
+    elif query.data == "admin_stats":
+
+        with get_db() as db:
+
+            users = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM users
+                """
+            ).fetchone()["total"]
+
+            deposits = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM deposits
+                """
+            ).fetchone()["total"]
+
+            orders = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                """
+            ).fetchone()["total"]
+
+            balance = db.execute(
+                """
+                SELECT COALESCE(
+                    SUM(balance),
+                    0
+                ) AS total
+                FROM users
+                """
+            ).fetchone()["total"]
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "📊 <b>STATISTIK</b>\n\n"
+            f"👥 Users: <b>{users}</b>\n"
+            f"💳 Deposits: <b>{deposits}</b>\n"
+            f"📦 Orders: <b>{orders}</b>\n"
+            f"💰 Total saldo user: "
+            f"<b>{format_rupiah(balance)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # ADMIN HOME
+    # -------------------------
+
+    elif query.data == "admin_home":
+
+        await query.edit_message_text(
+            "👑 <b>ADMIN PANEL</b>\n\n"
+            "Pilih menu:",
+            parse_mode="HTML",
+            reply_markup=admin_menu(),
+        )
+        # -------------------------
+# ORDERS
+# -------------------------
+
+    elif query.data == "admin_orders":
+
+        with get_db() as db:
+
+            total = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                """
+            ).fetchone()["total"]
+
+            pending = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                WHERE status = 'PENDING'
+                """
+            ).fetchone()["total"]
+
+            success = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                WHERE status = 'SUCCESS'
+                """
+            ).fetchone()["total"]
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "📦 <b>ORDERS</b>\n\n"
+            f"Total order: <b>{total}</b>\n"
+            f"Pending: <b>{pending}</b>\n"
+            f"Success: <b>{success}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # PROVIDER
+    # -------------------------
+
+    elif query.data == "admin_provider":
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "💰 <b>PROVIDER</b>\n\n"
+            "Provider API belum terhubung.\n\n"
+            "Nanti bagian ini akan menampilkan:\n\n"
+            "• Balance provider\n"
+            "• Status API\n"
+            "• Order aktif\n"
+            "• Refund\n"
+            "• Provider cost",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # STATISTICS
+    # -------------------------
+
+    elif query.data == "admin_stats":
+
+        with get_db() as db:
+
+            users = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM users
+                """
+            ).fetchone()["total"]
+
+            deposits = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM deposits
+                """
+            ).fetchone()["total"]
+
+            orders = db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                """
+            ).fetchone()["total"]
+
+            balance = db.execute(
+                """
+                SELECT COALESCE(SUM(balance), 0) AS total
+                FROM users
+                """
+            ).fetchone()["total"]
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Admin Panel",
+                    callback_data="admin_home",
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            "📊 <b>STATISTIK</b>\n\n"
+            f"👥 Users: <b>{users}</b>\n"
+            f"💳 Deposits: <b>{deposits}</b>\n"
+            f"📦 Orders: <b>{orders}</b>\n"
+            f"💰 Total saldo user: <b>{format_rupiah(balance)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # -------------------------
+    # ADMIN HOME
+    # -------------------------
+
+    elif query.data == "admin_home":
+
+        await query.edit_message_text(
+            "👑 <b>ADMIN PANEL</b>\n\n"
+            "Pilih menu:",
+            parse_mode="HTML",
+            reply_markup=admin_menu(),
+        )
+
+
+# =========================================================
 # CALLBACK HANDLER
 # =========================================================
 
@@ -546,7 +1103,9 @@ async def button_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
+
     await query.answer()
 
     user_id = query.from_user.id
@@ -567,13 +1126,16 @@ async def button_handler(
     if query.data in admin_callbacks:
 
         if not is_admin(user_id):
+
             await query.answer(
                 "❌ Kamu bukan admin.",
                 show_alert=True,
             )
+
             return
 
         await admin_callback(query)
+
         return
 
     # -----------------------------------------------------
@@ -694,10 +1256,7 @@ async def text_handler(
         + uuid.uuid4().hex[:12].upper()
     )
 
-    # -----------------------------------------------------
-    # SIMPAN DEPOSIT
-    # -----------------------------------------------------
-
+    # Simpan deposit sebagai PENDING sebelum meminta invoice ke Xendit.
     with get_db() as db:
 
         db.execute(
@@ -914,8 +1473,7 @@ async def error_handler(
         "Exception while handling update:",
         exc_info=context.error,
     )
-
-
+``` [❶](code://python)
 # =========================================================
 # RUN BOT
 # =========================================================
