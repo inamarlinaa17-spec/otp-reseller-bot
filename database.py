@@ -1,47 +1,69 @@
-import sqlite3
+import os
 from datetime import datetime, timezone
 from contextlib import contextmanager
 
+import psycopg
+from psycopg.rows import dict_row
 
-DATABASE_FILE = "bot.db"
+
+# =========================================================
+# DATABASE CONNECTION
+# =========================================================
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL belum tersedia di environment."
+    )
 
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DATABASE_FILE)
-    conn.row_factory = sqlite3.Row
+
+    conn = psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+    )
 
     try:
         yield conn
         conn.commit()
+
     except Exception:
         conn.rollback()
         raise
+
     finally:
         conn.close()
 
 
+# =========================================================
+# INIT DATABASE
+# =========================================================
+
 def init_database():
+
     with get_db() as db:
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER UNIQUE NOT NULL,
+                id BIGSERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE NOT NULL,
                 username TEXT,
                 first_name TEXT,
-                balance INTEGER NOT NULL DEFAULT 0,
+                balance BIGINT NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
         """)
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS ledger (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                balance_before INTEGER NOT NULL,
-                balance_after INTEGER NOT NULL,
+                id BIGSERIAL PRIMARY KEY,
+                telegram_id BIGINT NOT NULL,
+                amount BIGINT NOT NULL,
+                balance_before BIGINT NOT NULL,
+                balance_after BIGINT NOT NULL,
                 transaction_type TEXT NOT NULL,
                 reference TEXT,
                 description TEXT,
@@ -51,10 +73,10 @@ def init_database():
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS deposits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 deposit_id TEXT UNIQUE NOT NULL,
-                telegram_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
+                telegram_id BIGINT NOT NULL,
+                amount BIGINT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 payment_reference TEXT,
                 created_at TEXT NOT NULL,
@@ -64,13 +86,13 @@ def init_database():
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 order_id TEXT UNIQUE NOT NULL,
-                telegram_id INTEGER NOT NULL,
+                telegram_id BIGINT NOT NULL,
                 country TEXT,
                 service TEXT,
-                sell_price INTEGER NOT NULL,
-                provider_cost INTEGER NOT NULL DEFAULT 0,
+                sell_price BIGINT NOT NULL,
+                provider_cost BIGINT NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 provider_order_id TEXT,
                 refund_status TEXT NOT NULL DEFAULT 'NONE',
@@ -80,91 +102,162 @@ def init_database():
         """)
 
 
+# =========================================================
+# TIME
+# =========================================================
+
 def now():
-    return datetime.now(timezone.utc).isoformat()
+
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
 
 
-def create_user(telegram_id, username=None, first_name=None):
+# =========================================================
+# CREATE USER
+# =========================================================
+
+def create_user(
+    telegram_id,
+    username=None,
+    first_name=None,
+):
+
     with get_db() as db:
+
         existing = db.execute(
-            "SELECT * FROM users WHERE telegram_id = ?",
+            """
+            SELECT *
+            FROM users
+            WHERE telegram_id = %s
+            """,
             (telegram_id,)
         ).fetchone()
 
         if existing:
+
             db.execute(
                 """
                 UPDATE users
-                SET username = ?, first_name = ?
-                WHERE telegram_id = ?
+                SET username = %s,
+                    first_name = %s
+                WHERE telegram_id = %s
                 """,
-                (username, first_name, telegram_id)
+                (
+                    username,
+                    first_name,
+                    telegram_id,
+                )
             )
+
             return
 
         db.execute(
             """
             INSERT INTO users
-            (telegram_id, username, first_name, balance, created_at)
-            VALUES (?, ?, ?, 0, ?)
+            (
+                telegram_id,
+                username,
+                first_name,
+                balance,
+                created_at
+            )
+            VALUES (%s, %s, %s, 0, %s)
             """,
             (
                 telegram_id,
                 username,
                 first_name,
-                now()
+                now(),
             )
         )
 
 
+# =========================================================
+# GET USER
+# =========================================================
+
 def get_user(telegram_id):
+
     with get_db() as db:
+
         return db.execute(
-            "SELECT * FROM users WHERE telegram_id = ?",
+            """
+            SELECT *
+            FROM users
+            WHERE telegram_id = %s
+            """,
             (telegram_id,)
         ).fetchone()
 
 
+# =========================================================
+# GET BALANCE
+# =========================================================
+
 def get_balance(telegram_id):
+
     user = get_user(telegram_id)
 
     if not user:
+
         create_user(telegram_id)
+
         return 0
 
     return user["balance"]
 
+
+# =========================================================
+# ADD BALANCE
+# =========================================================
 
 def add_balance(
     telegram_id,
     amount,
     transaction_type,
     reference=None,
-    description=None
+    description=None,
 ):
+
     if amount <= 0:
-        raise ValueError("Amount harus lebih besar dari 0.")
+
+        raise ValueError(
+            "Amount harus lebih besar dari 0."
+        )
 
     with get_db() as db:
 
         user = db.execute(
-            "SELECT balance FROM users WHERE telegram_id = ?",
+            """
+            SELECT balance
+            FROM users
+            WHERE telegram_id = %s
+            FOR UPDATE
+            """,
             (telegram_id,)
         ).fetchone()
 
         if not user:
-            raise ValueError("User belum terdaftar.")
+
+            raise ValueError(
+                "User belum terdaftar."
+            )
 
         before = user["balance"]
+
         after = before + amount
 
         db.execute(
             """
             UPDATE users
-            SET balance = ?
-            WHERE telegram_id = ?
+            SET balance = %s
+            WHERE telegram_id = %s
             """,
-            (after, telegram_id)
+            (
+                after,
+                telegram_id,
+            )
         )
 
         db.execute(
@@ -180,7 +273,7 @@ def add_balance(
                 description,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 telegram_id,
@@ -190,47 +283,69 @@ def add_balance(
                 transaction_type,
                 reference,
                 description,
-                now()
+                now(),
             )
         )
 
         return after
 
 
+# =========================================================
+# SUBTRACT BALANCE
+# =========================================================
+
 def subtract_balance(
     telegram_id,
     amount,
     transaction_type,
     reference=None,
-    description=None
+    description=None,
 ):
+
     if amount <= 0:
-        raise ValueError("Amount harus lebih besar dari 0.")
+
+        raise ValueError(
+            "Amount harus lebih besar dari 0."
+        )
 
     with get_db() as db:
 
         user = db.execute(
-            "SELECT balance FROM users WHERE telegram_id = ?",
+            """
+            SELECT balance
+            FROM users
+            WHERE telegram_id = %s
+            FOR UPDATE
+            """,
             (telegram_id,)
         ).fetchone()
 
         if not user:
-            raise ValueError("User belum terdaftar.")
+
+            raise ValueError(
+                "User belum terdaftar."
+            )
 
         before = user["balance"]
 
         if before < amount:
-            raise ValueError("Saldo tidak cukup.")
+
+            raise ValueError(
+                "Saldo tidak cukup."
+            )
 
         after = before - amount
 
         db.execute(
             """
             UPDATE users
-            SET balance = ?
-            WHERE telegram_id = ?
+            SET balance = %s
+            WHERE telegram_id = %s
             """,
-            (after, telegram_id)
+            (
+                after,
+                telegram_id,
+            )
         )
 
         db.execute(
@@ -246,7 +361,7 @@ def subtract_balance(
                 description,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 telegram_id,
@@ -256,7 +371,7 @@ def subtract_balance(
                 transaction_type,
                 reference,
                 description,
-                now()
+                now(),
             )
         )
 
