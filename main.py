@@ -593,7 +593,7 @@ async def button_handler(
 
     if result == "WAIT_DEPOSIT":
 
-        context.user_data["waiting_deposit"] = True
+        context.chat_data["waiting_deposit"] = True
 
         keyboard = [
             [
@@ -632,14 +632,14 @@ async def text_handler(
     if not update.message:
         return
 
-    if not context.user_data.get("waiting_deposit"):
+    if not context.chat_data.get("waiting_deposit"):
         return
 
     user = update.effective_user
 
     text = update.message.text.strip()
 
-    context.user_data["waiting_deposit"] = False
+    context.chat_data["waiting_deposit"] = False
 
     text = text.replace(".", "").replace(",", "")
 
@@ -706,7 +706,7 @@ async def text_handler(
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             """,
             (
                 deposit_id,
