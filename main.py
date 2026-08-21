@@ -4,6 +4,7 @@ import logging
 import os
 import threading
 import uuid
+from datetime import datetime # TAMBAH INI
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -40,7 +41,6 @@ snap = midtransclient.Snap(
     server_key=MIDTRANS_SERVER_KEY
 )
 
-
 # =========================================================
 # HELPER
 # =========================================================
@@ -48,10 +48,8 @@ snap = midtransclient.Snap(
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
-
 def format_rupiah(amount):
     return f"Rp{amount:,}".replace(",", ".")
-
 
 # =========================================================
 # USER MENU
@@ -68,7 +66,6 @@ def user_menu():
             InlineKeyboardButton("📜 Riwayat", callback_data="user_history"),
         ],
     ])
-
 
 # =========================================================
 # ADMIN MENU
@@ -88,7 +85,6 @@ def admin_menu():
             InlineKeyboardButton("📊 Statistik", callback_data="admin_stats")
         ],
     ])
-
 
 # =========================================================
 # MIDTRANS CREATE SNAP TOKEN
@@ -111,7 +107,7 @@ def create_midtrans_snap(amount, deposit_id):
             "first_name": f"User {deposit_id}"
         },
         "expiry": {
-            "start_time": now().strftime("%Y-%m-%d %H:%M:%S +07:00"),
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S +07:00"), # INI UDAH DIGANTI
             "unit": "hours",
             "duration": 24
         }
@@ -123,7 +119,6 @@ def create_midtrans_snap(amount, deposit_id):
     except Exception as error:
         logger.error("Midtrans Error: %s", error)
         raise RuntimeError("Gagal membuat Snap Token Midtrans.") from error
-
 
 # =========================================================
 # TELEGRAM NOTIFICATION
@@ -138,7 +133,6 @@ def send_telegram_message(chat_id, text):
             response.read()
     except Exception as error:
         logger.error("Notifikasi Telegram gagal: %s", error)
-
 
 # =========================================================
 # COMPLETE DEPOSIT
@@ -166,7 +160,6 @@ def complete_deposit_payment(deposit_id, payment_reference, paid_amount):
 
         return {"completed": True, "already_completed": False, "telegram_id": deposit["telegram_id"], "amount": deposit["amount"], "new_balance": after}
 
-
 # =========================================================
 # PROCESS MIDTRANS WEBHOOK
 # =========================================================
@@ -189,7 +182,6 @@ def process_midtrans_webhook(payload):
         logger.info("Deposit expired: %s", deposit_id)
     else:
         logger.info("Webhook Midtrans diabaikan: deposit=%s status=%s", deposit_id, status)
-
 
 # =========================================================
 # WEBHOOK SERVER
@@ -221,10 +213,8 @@ class MidtransWebhookHandler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True})
         except json.JSONDecodeError:
             self.send_json(400, {"ok": False, "error": "Invalid JSON"})
-        except Exception:
             logger.exception("Gagal memproses webhook Midtrans.")
             self.send_json(500, {"ok": False, "error": "Webhook processing failed"})
-
 
 def start_webhook_server():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), MidtransWebhookHandler)
@@ -232,7 +222,6 @@ def start_webhook_server():
     thread.start()
     logger.info("Webhook server aktif di port %s", PORT)
     return server
-
 
 # SISA KODE DI BAWAH SAMA KAYAK PUNYAMU
 # CUMA GANTI create_xendit_invoice -> create_midtrans_snap
