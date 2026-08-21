@@ -334,7 +334,11 @@ def run():
     application.add_error_handler(error_handler)
     logger.info("Bot berhasil dijalankan.")
     logger.info("Webhook Midtrans aktif di /midtrans/webhook")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    run()
+    if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path="telegram",
+        webhook_url=f"https://otp-reseller-bot-production.up.railway.app/telegram" # GANTI PAKE URL RAILWAY LU
+    )
