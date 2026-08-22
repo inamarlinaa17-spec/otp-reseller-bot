@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import asyncio
+import pytz # TAMBAH INI
 
 from flask import Flask, request, jsonify # TAMBAH INI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,7 +21,7 @@ from config import (
     BOT_TOKEN, ADMIN_ID, MIDTRANS_SERVER_KEY, MIDTRANS_CLIENT_KEY,
     MIDTRANS_API_URL, MIDTRANS_SNAP_URL
 )
-from database import init_database, create_user, get_balance, add_balance, get_db, now
+from database import init_database, create_user, get_balance, add_balance, get_db, now, get_total_users, get_deposit_history, get_order_history # UBAH INI TAMBAH 3
 import midtransclient
 
 if not MIDTRANS_SERVER_KEY:
@@ -51,14 +52,29 @@ def is_admin(user_id):
 def format_rupiah(amount):
     return f"Rp{amount:,}".replace(",", ".")
 
+def get_wib_time(): # TAMBAH INI
+    wib = pytz.timezone('Asia/Jakarta')
+    return datetime.now(wib).strftime("%d %B %Y pukul %H:%M:%S WIB")
+
 # =========================================================
-# USER MENU
+# USER MENU - UDAH GUE UBAH JADI KAYA MOCHI
 # =========================================================
 
 def user_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Saldo", callback_data="user_balance"), InlineKeyboardButton("💳 Deposit", callback_data="user_deposit")],
-        [InlineKeyboardButton("📱 Layanan", callback_data="user_services"), InlineKeyboardButton("📜 Riwayat", callback_data="user_history")],
+        [InlineKeyboardButton("📖 Cara Penggunaan", callback_data="cara")],
+        [
+            InlineKeyboardButton("📱 Order OTP", callback_data="order"),
+            InlineKeyboardButton("💳 Deposit", callback_data="user_deposit")
+        ],
+        [
+            InlineKeyboardButton("📋 Histori Order", callback_data="user_history_order"),
+            InlineKeyboardButton("📜 Histori Deposit", callback_data="user_history_depo")
+        ],
+        [
+            InlineKeyboardButton("👥 Referral", callback_data="referral"),
+            InlineKeyboardButton("💬 Contact CS", callback_data="cs")
+        ]
     ])
 
 # =========================================================
@@ -169,14 +185,37 @@ def midtrans_webhook():
 
 
 # =========================================================
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLERS - UDAH GUE UBAH TOTAL
 # =========================================================
 
-async def user_start(update):
+async def user_start(update): # UDAH GUE UBAH JADI KAYA MOCHI
     user = update.effective_user
     create_user(user.id, user.username, user.first_name)
-    balance = get_balance(user.id)
-    await update.message.reply_text(f"👋 <b>Selamat datang!</b>\n\nBot layanan digital kamu sudah aktif.\n\n💰 Saldo: <b>{format_rupiah(balance)}</b>\n\nSilakan pilih menu:", parse_mode="HTML", reply_markup=user_menu())
+    saldo = get_balance(user.id)
+    total_user = get_total_users()
+    waktu = get_wib_time()
+    
+    text = f"""
+👋 <b>{user.first_name.upper()}</b>
+{waktu}
+
+<b>User Info :</b>
+├ ID : <code>{user.id}</code>
+├ Username : @{user.username or '-'}
+
+<b>Balance Info :</b>
+├ Balance : <b>{format_rupiah(saldo)}</b>
+
+<b>Bot Stats :</b>
+├ Total User : {total_user}
+
+<b>Info Promo :</b>
+├ Channel : @ChannelLu
+
+<b>Shortcut :</b>
+├ /start - Mulai Bot
+"""
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=user_menu())
 
 async def admin_start(update):
     await update.message.reply_text("👑 <b>ADMIN PANEL</b>\n\nSelamat datang, Admin.\n\nPilih menu:", parse_mode="HTML", reply_markup=admin_menu())
@@ -188,10 +227,34 @@ async def start(update, context):
     else: await user_start(update)
 
 async def user_callback(query, user_id):
-    if query.data == "user_balance":
-        keyboard = [[InlineKeyboardButton("💳 Deposit", callback_data="user_deposit")], [InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]
-        await query.edit_message_text(f"💰 <b>Saldo Kamu</b>\n\nSaldo: <b>{format_rupiah(get_balance(user_id))}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif query.data == "user_deposit": return "WAIT_DEPOSIT"
+    if query.data == "cara":
+        await query.edit_message_text("📖 <b>Cara Penggunaan</b>\n\n1. Klik Deposit untuk isi saldo\n2. Klik Order OTP untuk beli nomor\n3. Saldo otomatis kepotong", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+    
+    elif query.data == "order":
+        await query.edit_message_text("📱 <b>Order OTP</b>\n\nFitur masih tahap development bos", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+    
+    elif query.data == "user_deposit": 
+        context.chat_data["waiting_deposit"] = True
+        await query.edit_message_text("💳 <b>Deposit Saldo</b>\n\nMasukkan nominal deposit.\n\nMinimum: <b>Rp1.000</b>\nKelipatan: <b>Rp1.000</b>\n\nContoh:\n1000\n5000\n10000\n25000\nKetik nominal sekarang.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="user_home")]]))
+
+    elif query.data == "user_history_order":
+        orders = get_order_history(user_id)
+        if not orders: text = "📋 <b>Histori Order</b>\n\nBelum ada histori order."
+        else: text = "📋 <b>5 Histori Order Terakhir</b>\n\n" + "\n".join([f"├ {o['order_id']} - {o['status']}" for o in orders])
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+
+    elif query.data == "user_history_depo":
+        deposits = get_deposit_history(user_id)
+        if not deposits: text = "📜 <b>Histori Deposit</b>\n\nBelum ada histori deposit."
+        else: text = "📜 <b>5 Histori Deposit Terakhir</b>\n\n" + "\n".join([f"├ {d['deposit_id']} - {format_rupiah(d['amount'])} - {d['status']}" for d in deposits])
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+
+    elif query.data == "referral":
+        ref_link = f"https://t.me/{query.from_user.username}?start=ref{user_id}"
+        await query.edit_message_text(f"👥 <b>Referral</b>\n\nLink kamu:\n<code>{ref_link}</code>\n\nDapet 10% dari deposit teman", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+    
+    elif query.data == "cs":
+        await query.edit_message_text("💬 <b>Contact CS</b>\n\nHubungi: @AdminLu", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
 
     # ====== TAMBAH INI 2: HANDLER CEK DEPOSIT ======
     elif query.data == "cek_deposit":
@@ -220,12 +283,8 @@ async def user_callback(query, user_id):
             await query.edit_message_text(f"⏳ <b>Status: {status_data['transaction_status'].upper()}</b>\n\nBelum dibayar. Klik cek lagi setelah bayar.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Cek Lagi", callback_data="cek_deposit")], [InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
     # ===============================================
 
-    elif query.data == "user_services":
-        await query.edit_message_text("📱 <b>Layanan</b>\n\nModul layanan belum diaktifkan.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
-    elif query.data == "user_history":
-        await query.edit_message_text("📜 <b>Riwayat Transaksi</b>\n\nRiwayat deposit akan kita tampilkan di tahap berikutnya.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
     elif query.data == "user_home":
-        await query.edit_message_text(f"🏠 <b>Menu Utama</b>\n\n💰 Saldo: <b>{format_rupiah(get_balance(user_id))}</b>\n\nPilih menu:", parse_mode="HTML", reply_markup=user_menu())
+        await user_start(query)
 
 async def admin_callback(query):
     back = [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]]
@@ -253,10 +312,7 @@ async def button_handler(update, context):
         if not is_admin(user_id): await query.answer("❌ Kamu bukan admin.", show_alert=True); return
         await admin_callback(query); return
     if query.data == "user_home": context.chat_data["waiting_deposit"] = False
-    result = await user_callback(query, user_id)
-    if result == "WAIT_DEPOSIT":
-        context.chat_data["waiting_deposit"] = True
-        await query.edit_message_text("💳 <b>Deposit Saldo</b>\n\nMasukkan nominal deposit.\n\nMinimum: <b>Rp1.000</b>\nKelipatan: <b>Rp1.000</b>\n\nContoh:\n1000\n5000\n10000\n25000\nKetik nominal sekarang.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="user_home")]]))
+    await user_callback(query, user_id)
 
 async def text_handler(update, context):
     if not update.message: return
