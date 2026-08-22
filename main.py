@@ -85,6 +85,21 @@ def create_midtrans_snap(amount, deposit_id):
         logger.error("Midtrans Error: %s", error)
         raise RuntimeError("Gagal membuat Snap Token Midtrans.") from error
 
+# ====== TAMBAH INI 1: FUNGSI CEK STATUS ======
+def cek_status_midtrans(order_id):
+    url = f"{MIDTRANS_API_URL}/{order_id}/status"
+    req = Request(url, headers={
+        "Authorization": "Basic " + base64.b64encode(f"{MIDTRANS_SERVER_KEY}:".encode()).decode()
+    }, method="GET")
+    try:
+        with urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode())
+            return data
+    except HTTPError as e:
+        logger.error("Cek status gagal: %s", e.read().decode())
+        return None
+# =============================================
+
 # =========================================================
 # TELEGRAM NOTIFICATION
 # =========================================================
@@ -151,6 +166,34 @@ async def user_callback(query, user_id):
         keyboard = [[InlineKeyboardButton("💳 Deposit", callback_data="user_deposit")], [InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]
         await query.edit_message_text(f"💰 <b>Saldo Kamu</b>\n\nSaldo: <b>{format_rupiah(get_balance(user_id))}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     elif query.data == "user_deposit": return "WAIT_DEPOSIT"
+
+    # ====== TAMBAH INI 2: HANDLER CEK DEPOSIT ======
+    elif query.data == "cek_deposit":
+        with get_db() as db:
+            deposits = db.execute("SELECT deposit_id, amount FROM deposits WHERE telegram_id = %s AND status = 'PENDING' ORDER BY created_at DESC LIMIT 1", (user_id,)).fetchone()
+        if not deposits:
+            await query.edit_message_text("❌ Kamu tidak punya deposit pending.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+            return
+
+        await query.edit_message_text("⏳ Mengecek pembayaran ke Midtrans...", parse_mode="HTML")
+        status_data = await asyncio.to_thread(cek_status_midtrans, deposits["deposit_id"])
+
+        if not status_data:
+            await query.edit_message_text("❌ Gagal cek ke Midtrans. Coba lagi 5 detik.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Cek Lagi", callback_data="cek_deposit")]]))
+            return
+
+        if status_data["transaction_status"] == "settlement":
+            result = complete_deposit_payment(deposits["deposit_id"], status_data["transaction_id"], status_data["gross_amount"])
+            if result["completed"]:
+                await query.edit_message_text(f"✅ <b>Deposit Berhasil!</b>\n\n💰 Masuk: <b>{format_rupiah(result['amount'])}</b>\n💳 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]))
+                send_telegram_message(result["telegram_id"], f"✅ <b>Deposit berhasil!</b>\n\n💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n💳 Status: <b>PAID</b>\n🧾 ID: <code>{deposits['deposit_id']}</code>\n\n💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>")
+        elif status_data["transaction_status"] in ["expire", "cancel"]:
+            with get_db() as db: db.execute("UPDATE deposits SET status = 'EXPIRED' WHERE deposit_id = %s", (deposits["deposit_id"],))
+            await query.edit_message_text("❌ <b>Deposit Expired</b>\n\nSilakan buat invoice baru.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Deposit Lagi", callback_data="user_deposit")]]))
+        else:
+            await query.edit_message_text(f"⏳ <b>Status: {status_data['transaction_status'].upper()}</b>\n\nBelum dibayar. Klik cek lagi setelah bayar.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Cek Lagi", callback_data="cek_deposit")], [InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+    # ===============================================
+
     elif query.data == "user_services":
         await query.edit_message_text("📱 <b>Layanan</b>\n\nModul layanan belum diaktifkan.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
     elif query.data == "user_history":
@@ -208,8 +251,16 @@ async def text_handler(update, context):
         snap_token = snap_data.get("token")
         if not snap_url or not snap_token: raise RuntimeError("Respons Midtrans tidak berisi redirect_url/token.")
         with get_db() as db: db.execute("UPDATE deposits SET payment_reference = %s WHERE deposit_id = %s", (snap_token, deposit_id))
-        keyboard = [[InlineKeyboardButton("💳 Bayar Sekarang", url=snap_url)], [InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")]]
-        await update.message.reply_text(f"💳 <b>Invoice Deposit Dibuat</b>\n\n🧾 ID: <code>{deposit_id}</code>\n💰 Nominal: <b>{format_rupiah(amount)}</b>\n📌 Status: <b>PENDING</b>\n\nKlik tombol di bawah untuk melakukan pembayaran.\n\nSetelah pembayaran berhasil, saldo akan otomatis masuk.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+        # ====== UBAH INI 3: TAMBAH TOMBOL CEK ======
+        keyboard = [
+            [InlineKeyboardButton("💳 Bayar Sekarang", url=snap_url)],
+            [InlineKeyboardButton("✅ Cek Pembayaran", callback_data="cek_deposit")],
+            [InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")]
+        ]
+        # ===========================================
+
+        await update.message.reply_text(f"💳 <b>Invoice Deposit Dibuat</b>\n\n🧾 ID: <code>{deposit_id}</code>\n💰 Nominal: <b>{format_rupiah(amount)}</b>\n📌 Status: <b>PENDING</b>\n\nKlik tombol di bawah untuk melakukan pembayaran.\n\nSetelah bayar, klik 'Cek Pembayaran' untuk konfirmasi.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
         logger.exception("Gagal membuat invoice Midtrans.")
         with get_db() as db: db.execute("UPDATE deposits SET status = 'FAILED' WHERE deposit_id = %s AND status = 'PENDING'", (deposit_id,))
