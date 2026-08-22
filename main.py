@@ -187,8 +187,14 @@ def midtrans_webhook():
 # TELEGRAM HANDLERS - UDAH GUE UBAH TOTAL
 # =========================================================
 
-async def user_start(update): # UDAH GUE UBAH JADI KAYA MOCHI
-    user = update.effective_user
+async def user_start(update_or_query): # FIX: BISA BUAT MESSAGE DAN CALLBACK
+    if hasattr(update_or_query, 'message'): # kalau dari /start
+        user = update_or_query.effective_user
+        send = update_or_query.message.reply_text
+    else: # kalau dari tombol Kembali
+        user = update_or_query.from_user
+        send = update_or_query.edit_message_text
+
     create_user(user.id, user.username, user.first_name)
     saldo = get_balance(user.id)
     total_user = get_total_users()
@@ -214,7 +220,7 @@ async def user_start(update): # UDAH GUE UBAH JADI KAYA MOCHI
 <b>Shortcut :</b>
 ├ /start - Mulai Bot
 """
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=user_menu())
+    await send(text, parse_mode="HTML", reply_markup=user_menu())
 
 async def admin_start(update):
     await update.message.reply_text("👑 <b>ADMIN PANEL</b>\n\nSelamat datang, Admin.\n\nPilih menu:", parse_mode="HTML", reply_markup=admin_menu())
@@ -306,6 +312,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
     # ===============================================
 
     elif query.data == "user_home":
+        context.chat_data["waiting_deposit"] = False # reset biar ga nyangkut
         await user_start(query)
 
 async def admin_callback(query):
