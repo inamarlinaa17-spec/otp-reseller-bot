@@ -34,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # TAMBAH INI UNTUK FLASK
-app = Flask(__name__) 
+app = Flask(__name__)
 
 # Init Midtrans Snap
 snap = midtransclient.Snap(
@@ -163,7 +163,7 @@ def complete_deposit_payment(deposit_id, payment_reference, paid_amount):
 @app.route('/midtrans/webhook', methods=['POST'])
 def midtrans_webhook():
     data = request.json
-    
+
     order_id = data.get('order_id')
     status = data.get('transaction_status')
     fraud = data.get('fraud_status')
@@ -179,10 +179,9 @@ def midtrans_webhook():
                 logger.info(f"Saldo {amount} masuk ke user {result['telegram_id']}")
         except Exception as e:
             logger.error(f"Gagal proses webhook: {e}")
-        
+
     return jsonify({"status": "ok"}), 200
 # =============================================
-
 
 # =========================================================
 # TELEGRAM HANDLERS - UDAH GUE UBAH TOTAL
@@ -194,7 +193,7 @@ async def user_start(update): # UDAH GUE UBAH JADI KAYA MOCHI
     saldo = get_balance(user.id)
     total_user = get_total_users()
     waktu = get_wib_time()
-    
+
     text = f"""
 👋 <b>{user.first_name.upper()}</b>
 {waktu}
@@ -228,12 +227,35 @@ async def start(update, context):
 
 async def user_callback(query, user_id):
     if query.data == "cara":
-        await query.edit_message_text("📖 <b>Cara Penggunaan</b>\n\n1. Klik Deposit untuk isi saldo\n2. Klik Order OTP untuk beli nomor\n3. Saldo otomatis kepotong", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
-    
+        text = f"""📁 <b>PANDUAN PENGGUNAAN BOT</b>
+
+1️⃣ <b>Deposit</b>
+Isi saldo terlebih dahulu melalui menu <b>Deposit</b>.
+
+2️⃣ <b>Order Nomor</b>
+Pilih layanan yang ingin digunakan:
+- <b>Order OTP</b> → untuk 1 aplikasi saja.
+- <b>Multiservice</b> → 1 nomor dapat digunakan untuk beberapa aplikasi sekaligus.
+
+3️⃣ <b>Gunakan Nomor</b>
+Setelah order berhasil, saldo akan otomatis terpotong dan nomor akan diberikan oleh bot.
+
+4️⃣ <b>Menunggu SMS</b>
+Masukkan nomor tersebut ke aplikasi tujuan dan tunggu kode OTP masuk ke bot.
+
+5️⃣ <b>Refund</b>
+Jika kode OTP tidak masuk, tekan tombol <b>Batal / Refund</b>.
+Saldo akan dikembalikan secara otomatis.
+
+⚠️ <b>Catatan:</b>
+Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
+        keyboard = [[InlineKeyboardButton("🗑️ Kembali", callback_data="user_home")]]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
     elif query.data == "order":
         await query.edit_message_text("📱 <b>Order OTP</b>\n\nFitur masih tahap development bos", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
-    
-    elif query.data == "user_deposit": 
+
+    elif query.data == "user_deposit":
         context.chat_data["waiting_deposit"] = True
         await query.edit_message_text("💳 <b>Deposit Saldo</b>\n\nMasukkan nominal deposit.\n\nMinimum: <b>Rp1.000</b>\nKelipatan: <b>Rp1.000</b>\n\nContoh:\n1000\n5000\n10000\n25000\nKetik nominal sekarang.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="user_home")]]))
 
@@ -252,7 +274,7 @@ async def user_callback(query, user_id):
     elif query.data == "referral":
         ref_link = f"https://t.me/{query.from_user.username}?start=ref{user_id}"
         await query.edit_message_text(f"👥 <b>Referral</b>\n\nLink kamu:\n<code>{ref_link}</code>\n\nDapet 10% dari deposit teman", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
-    
+
     elif query.data == "cs":
         await query.edit_message_text("💬 <b>Contact CS</b>\n\nHubungi: @AdminLu", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
 
