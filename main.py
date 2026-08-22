@@ -2,10 +2,8 @@ import base64
 import json
 import logging
 import os
-import threading
 import uuid
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import asyncio
@@ -147,39 +145,20 @@ def process_midtrans_webhook(payload):
     else:
         logger.info("Webhook Midtrans diabaikan: deposit=%s status=%s", deposit_id, status)
 
-class MidtransWebhookHandler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args): logger.info("Webhook HTTP: " + fmt, *args)
-    def send_json(self, code, data):
-        body = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def do_GET(self):
-        if self.path == "/health": self.send_json(200, {"ok": True})
-        else: self.send_json(404, {"ok": False, "error": "Not found"})
-    def do_POST(self):
-        if self.path!= "/midtrans/webhook":
-            self.send_json(404, {"ok": False, "error": "Not found"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw_body = self.rfile.read(length)
-            payload = json.loads(raw_body.decode("utf-8"))
-            process_midtrans_webhook(payload)
-            self.send_json(200, {"ok": True})
-        except json.JSONDecodeError:
-            self.send_json(400, {"ok": False, "error": "Invalid JSON"})
-            logger.exception("Gagal memproses webhook Midtrans.")
-            self.send_json(500, {"ok": False, "error": "Webhook processing failed"})
+# HAPUS CLASS MidtransWebhookHandler + start_webhook_server
 
-def start_webhook_server():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), MidtransWebhookHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logger.info("Webhook server aktif di port %s", PORT)
-    return server
+async def midtrans_webhook(request):
+    """Handler untuk webhook Midtrans pake aiohttp bawaan telegram"""
+    try:
+        payload = await request.json()
+        process_midtrans_webhook(payload)
+        return web.json_response({"ok": True})
+    except json.JSONDecodeError:
+        logger.exception("Gagal memproses webhook Midtrans.")
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.exception("Webhook processing failed.")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 async def user_start(update):
     user = update.effective_user
@@ -279,16 +258,22 @@ async def error_handler(update, context): logger.error("Exception while handling
 
 async def main():
     init_database()
-    start_webhook_server()
+    # start_webhook_server() <- UDAH DIHAPUS
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("addbalance", admin_add_balance))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_error_handler(error_handler)
+
+    # TAMBAHIN HANDLER BUAT MIDTRANS
+    from aiohttp import web
+    application.web_app.router.add_post("/midtrans/webhook", midtrans_webhook)
+    application.web_app.router.add_get("/health", lambda r: web.json_response({"ok": True}))
+
     logger.info("Bot berhasil dijalankan.")
     logger.info("Webhook Midtrans aktif di /midtrans/webhook")
-    
+
     port = int(os.environ.get('PORT', 8080))
     await application.run_webhook(
         listen="0.0.0.0",
