@@ -231,7 +231,7 @@ async def start(update, context):
     if is_admin(user.id): await admin_start(update)
     else: await user_start(update)
 
-async def user_callback(query, user_id):
+async def user_callback(query, user_id, context): # FIX: TAMBAH context
     if query.data == "cara":
         text = f"""📁 <b>PANDUAN PENGGUNAAN BOT</b>
 
@@ -262,7 +262,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
         await query.edit_message_text("📱 <b>Order OTP</b>\n\nFitur masih tahap development bos", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
 
     elif query.data == "user_deposit":
-        context.chat_data["waiting_deposit"] = True
+        context.chat_data["waiting_deposit"] = True # INI BIKIN DEPOSIT JALAN
         await query.edit_message_text("💳 <b>Deposit Saldo</b>\n\nMasukkan nominal deposit.\n\nMinimum: <b>Rp1.000</b>\nKelipatan: <b>Rp1.000</b>\n\nContoh:\n1000\n5000\n10000\n25000\nKetik nominal sekarang.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="user_home")]]))
 
     elif query.data == "user_history_order":
@@ -340,8 +340,7 @@ async def button_handler(update, context):
     if query.data in admin_callbacks:
         if not is_admin(user_id): await query.answer("❌ Kamu bukan admin.", show_alert=True); return
         await admin_callback(query); return
-    if query.data == "user_home": context.chat_data["waiting_deposit"] = False
-    await user_callback(query, user_id)
+    await user_callback(query, user_id, context) # FIX: KIRIM context
 
 async def text_handler(update, context):
     if not update.message: return
