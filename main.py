@@ -3,11 +3,13 @@ import json
 import logging
 import os
 import uuid
+import threading # TAMBAH INI
 from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import asyncio
 
+from flask import Flask, request, jsonify # TAMBAH INI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -29,6 +31,9 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# TAMBAH INI UNTUK FLASK
+app = Flask(__name__) 
 
 # Init Midtrans Snap
 snap = midtransclient.Snap(
@@ -137,10 +142,31 @@ def complete_deposit_payment(deposit_id, payment_reference, paid_amount):
         return {"completed": True, "already_completed": False, "telegram_id": deposit["telegram_id"], "amount": deposit["amount"], "new_balance": after}
 
 # =========================================================
-# PROCESS MIDTRANS WEBHOOK - KITA MATIIN DULU
+# TAMBAH INI 4: WEBHOOK MIDTRANS
 # =========================================================
-# KALAU MAU WEBHOOK NANTI PAKE RAILWAY HTTP SERVER TERPISAH
-# BUAT SEKARANG PAKE POLLING DULU BIAR BOT HIDUP
+@app.route('/midtrans/webhook', methods=['POST'])
+def midtrans_webhook():
+    data = request.json
+    
+    order_id = data.get('order_id')
+    status = data.get('transaction_status')
+    fraud = data.get('fraud_status')
+    amount = float(data.get('gross_amount'))
+
+    logger.info(f"Webhook masuk: {order_id} status: {status}")
+
+    if status == 'settlement' and fraud == 'accept':
+        try:
+            result = complete_deposit_payment(order_id, data.get('transaction_id'), amount)
+            if result["completed"]:
+                send_telegram_message(result["telegram_id"], f"✅ <b>Deposit berhasil!</b>\n\n💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n💳 Status: <b>PAID</b>\n🧾 ID: <code>{order_id}</code>\n\n💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>")
+                logger.info(f"Saldo {amount} masuk ke user {result['telegram_id']}")
+        except Exception as e:
+            logger.error(f"Gagal proses webhook: {e}")
+        
+    return jsonify({"status": "ok"}), 200
+# =============================================
+
 
 # =========================================================
 # TELEGRAM HANDLERS
@@ -278,6 +304,9 @@ async def admin_add_balance(update, context):
 
 async def error_handler(update, context): logger.error("Exception while handling update:", exc_info=context.error)
 
+def run_flask(): # TAMBAH INI
+    app.run(host='0.0.0.0', port=5000)
+
 def run():
     init_database()
     application = Application.builder().token(BOT_TOKEN).build()
@@ -287,6 +316,9 @@ def run():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_error_handler(error_handler)
     logger.info("Bot berhasil dijalankan.")
+
+    # JALANIN FLASK + BOT BARENG
+    threading.Thread(target=run_flask, daemon=True).start() # TAMBAH INI
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
