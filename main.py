@@ -277,7 +277,7 @@ async def admin_add_balance(update, context):
 
 async def error_handler(update, context): logger.error("Exception while handling update:", exc_info=context.error)
 
-def main():
+async def main():
     init_database()
     start_webhook_server()
     application = Application.builder().token(BOT_TOKEN).build()
@@ -288,9 +288,9 @@ def main():
     application.add_error_handler(error_handler)
     logger.info("Bot berhasil dijalankan.")
     logger.info("Webhook Midtrans aktif di /midtrans/webhook")
-
+    
     port = int(os.environ.get('PORT', 8080))
-    application.run_webhook(
+    await application.run_webhook(
         listen="0.0.0.0",
         port=port,
         url_path="telegram",
@@ -298,4 +298,4 @@ def main():
     )
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
