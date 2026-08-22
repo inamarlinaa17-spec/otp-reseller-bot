@@ -187,12 +187,12 @@ def midtrans_webhook():
 # TELEGRAM HANDLERS - UDAH GUE UBAH TOTAL
 # =========================================================
 
-async def user_start(update_or_query): # FIX: BISA BUAT MESSAGE DAN CALLBACK
+async def user_start(update_or_query): # FIX FINAL: PAKE from_user BUAT CALLBACK
     if hasattr(update_or_query, 'message'): # kalau dari /start
         user = update_or_query.effective_user
         send = update_or_query.message.reply_text
     else: # kalau dari tombol Kembali
-        user = update_or_query.from_user
+        user = update_or_query.from_user # INI YG DIBENERIN
         send = update_or_query.edit_message_text
 
     create_user(user.id, user.username, user.first_name)
@@ -312,8 +312,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
     # ===============================================
 
     elif query.data == "user_home":
-        context.chat_data["waiting_deposit"] = False # reset biar ga nyangkut
-        await user_start(query)
+        await user_start(query) # reset udah dipindah ke button_handler
 
 async def admin_callback(query):
     back = [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]]
@@ -332,7 +331,7 @@ async def admin_callback(query):
         await query.edit_message_text(f"📊 <b>STATISTIK</b>\n\n👥 Users: <b>{users}</b>\n💳 Deposits: <b>{deposits}</b>\n📦 Orders: <b>{orders}</b>\n💰 Total saldo user: <b>{format_rupiah(balance)}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(back))
     elif query.data == "admin_home": await query.edit_message_text("👑 <b>ADMIN PANEL</b>\n\nPilih menu:", parse_mode="HTML", reply_markup=admin_menu())
 
-async def button_handler(update, context):
+async def button_handler(update, context): # FIX FINAL: RESET DISINI
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -340,7 +339,11 @@ async def button_handler(update, context):
     if query.data in admin_callbacks:
         if not is_admin(user_id): await query.answer("❌ Kamu bukan admin.", show_alert=True); return
         await admin_callback(query); return
-    await user_callback(query, user_id, context) # FIX: KIRIM context
+
+    if query.data == "user_home": # INI YG BIKIN BATAL/KEMBALI JALAN
+        context.chat_data["waiting_deposit"] = False
+
+    await user_callback(query, user_id, context)
 
 async def text_handler(update, context):
     if not update.message: return
