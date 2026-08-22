@@ -2,10 +2,8 @@ import base64
 import json
 import logging
 import os
-import threading
 import uuid
-from datetime import datetime # TAMBAH INI
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import asyncio
@@ -23,8 +21,6 @@ from config import (
 from database import init_database, create_user, get_balance, add_balance, get_db, now
 import midtransclient
 
-PORT = int(os.getenv("PORT", "8080"))
-
 if not MIDTRANS_SERVER_KEY:
     raise RuntimeError("MIDTRANS_SERVER_KEY belum diatur di Railway.")
 
@@ -32,7 +28,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
 # Init Midtrans Snap
@@ -57,14 +52,8 @@ def format_rupiah(amount):
 
 def user_menu():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💰 Saldo", callback_data="user_balance"),
-            InlineKeyboardButton("💳 Deposit", callback_data="user_deposit"),
-        ],
-        [
-            InlineKeyboardButton("📱 Layanan", callback_data="user_services"),
-            InlineKeyboardButton("📜 Riwayat", callback_data="user_history"),
-        ],
+        [InlineKeyboardButton("💰 Saldo", callback_data="user_balance"), InlineKeyboardButton("💳 Deposit", callback_data="user_deposit")],
+        [InlineKeyboardButton("📱 Layanan", callback_data="user_services"), InlineKeyboardButton("📜 Riwayat", callback_data="user_history")],
     ])
 
 # =========================================================
@@ -73,17 +62,9 @@ def user_menu():
 
 def admin_menu():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("👥 Users", callback_data="admin_users"),
-            InlineKeyboardButton("💳 Deposit", callback_data="admin_deposits"),
-        ],
-        [
-            InlineKeyboardButton("📦 Orders", callback_data="admin_orders"),
-            InlineKeyboardButton("💰 Provider", callback_data="admin_provider"),
-        ],
-        [
-            InlineKeyboardButton("📊 Statistik", callback_data="admin_stats")
-        ],
+        [InlineKeyboardButton("👥 Users", callback_data="admin_users"), InlineKeyboardButton("💳 Deposit", callback_data="admin_deposits")],
+        [InlineKeyboardButton("📦 Orders", callback_data="admin_orders"), InlineKeyboardButton("💰 Provider", callback_data="admin_provider")],
+        [InlineKeyboardButton("📊 Statistik", callback_data="admin_stats")],
     ])
 
 # =========================================================
@@ -91,28 +72,12 @@ def admin_menu():
 # =========================================================
 
 def create_midtrans_snap(amount, deposit_id):
-
     param = {
-        "transaction_details": {
-            "order_id": deposit_id,
-            "gross_amount": amount,
-        },
-        "item_details": [{
-            "id": "DEPOSIT",
-            "price": amount,
-            "quantity": 1,
-            "name": "Deposit Saldo Bot"
-        }],
-        "customer_details": {
-            "first_name": f"User {deposit_id}"
-        },
-        "expiry": {
-            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S +07:00"), # INI UDAH DIGANTI
-            "unit": "hours",
-            "duration": 24
-        }
+        "transaction_details": {"order_id": deposit_id, "gross_amount": amount},
+        "item_details": [{"id": "DEPOSIT", "price": amount, "quantity": 1, "name": "Deposit Saldo Bot"}],
+        "customer_details": {"first_name": f"User {deposit_id}"},
+        "expiry": {"start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S +07:00"), "unit": "hours", "duration": 24}
     }
-
     try:
         transaction = snap.create_transaction(param)
         return transaction
@@ -145,87 +110,26 @@ def complete_deposit_payment(deposit_id, payment_reference, paid_amount):
         if deposit["status"] == "SUCCESS": return {"completed": False, "already_completed": True}
         if deposit["status"]!= "PENDING": raise ValueError(f"Deposit berstatus {deposit['status']}, bukan PENDING.")
         if int(paid_amount)!= int(deposit["amount"]): raise ValueError("Nominal pembayaran Midtrans tidak sama dengan nominal deposit.")
-
         user = db.execute("SELECT balance FROM users WHERE telegram_id = %s FOR UPDATE", (deposit["telegram_id"],)).fetchone()
         if not user: raise ValueError("User deposit tidak ditemukan.")
-
         before = user["balance"]
         after = before + deposit["amount"]
-
         db.execute("UPDATE users SET balance = %s WHERE telegram_id = %s", (after, deposit["telegram_id"]))
         db.execute("""INSERT INTO ledger (telegram_id, amount, balance_before, balance_after, transaction_type, reference, description, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                    (deposit["telegram_id"], deposit["amount"], before, after, "DEPOSIT", payment_reference or deposit_id, f"Deposit Midtrans {deposit_id}", now()))
         db.execute("UPDATE deposits SET status = 'SUCCESS', payment_reference = COALESCE(%s, payment_reference), completed_at = %s WHERE deposit_id = %s",
                    (payment_reference, now(), deposit_id))
-
         return {"completed": True, "already_completed": False, "telegram_id": deposit["telegram_id"], "amount": deposit["amount"], "new_balance": after}
 
 # =========================================================
-# PROCESS MIDTRANS WEBHOOK
+# PROCESS MIDTRANS WEBHOOK - KITA MATIIN DULU
 # =========================================================
-
-def process_midtrans_webhook(payload):
-    status = payload.get("transaction_status")
-    deposit_id = payload.get("order_id")
-    payment_reference = payload.get("transaction_id")
-    paid_amount = payload.get("gross_amount")
-
-    if not deposit_id: raise ValueError("Webhook tidak memiliki order_id.")
-
-    if status == "settlement":
-        result = complete_deposit_payment(deposit_id, payment_reference, int(float(paid_amount)))
-        if result["completed"]:
-            send_telegram_message(result["telegram_id"], f"✅ <b>Deposit berhasil!</b>\n\n💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n💳 Status: <b>PAID</b>\n🧾 ID: <code>{deposit_id}</code>\n\n💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>")
-    elif status in ["expire", "cancel"]:
-        with get_db() as db:
-            db.execute("UPDATE deposits SET status = 'EXPIRED' WHERE deposit_id = %s AND status = 'PENDING'", (deposit_id,))
-        logger.info("Deposit expired: %s", deposit_id)
-    else:
-        logger.info("Webhook Midtrans diabaikan: deposit=%s status=%s", deposit_id, status)
+# KALAU MAU WEBHOOK NANTI PAKE RAILWAY HTTP SERVER TERPISAH
+# BUAT SEKARANG PAKE POLLING DULU BIAR BOT HIDUP
 
 # =========================================================
-# WEBHOOK SERVER
+# TELEGRAM HANDLERS
 # =========================================================
-
-class MidtransWebhookHandler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args): logger.info("Webhook HTTP: " + fmt, *args)
-    def send_json(self, code, data):
-        body = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        if self.path == "/health": self.send_json(200, {"ok": True})
-        else: self.send_json(404, {"ok": False, "error": "Not found"})
-
-    def do_POST(self):
-        if self.path!= "/midtrans/webhook":
-            self.send_json(404, {"ok": False, "error": "Not found"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw_body = self.rfile.read(length)
-            payload = json.loads(raw_body.decode("utf-8"))
-            process_midtrans_webhook(payload)
-            self.send_json(200, {"ok": True})
-        except json.JSONDecodeError:
-            self.send_json(400, {"ok": False, "error": "Invalid JSON"})
-            logger.exception("Gagal memproses webhook Midtrans.")
-            self.send_json(500, {"ok": False, "error": "Webhook processing failed"})
-
-def start_webhook_server():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), MidtransWebhookHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logger.info("Webhook server aktif di port %s", PORT)
-    return server
-
-# SISA KODE DI BAWAH SAMA KAYAK PUNYAMU
-# CUMA GANTI create_xendit_invoice -> create_midtrans_snap
-# DAN URL WEBHOOK -> /midtrans/webhook
 
 async def user_start(update):
     user = update.effective_user
@@ -248,7 +152,7 @@ async def user_callback(query, user_id):
         await query.edit_message_text(f"💰 <b>Saldo Kamu</b>\n\nSaldo: <b>{format_rupiah(get_balance(user_id))}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     elif query.data == "user_deposit": return "WAIT_DEPOSIT"
     elif query.data == "user_services":
-        await query.edit_message_text("📱 <b>Layanan</b>\n\nModul layanan belum diaktifkan.\n\nNanti menu ini akan terhubung ke provider API.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+        await query.edit_message_text("📱 <b>Layanan</b>\n\nModul layanan belum diaktifkan.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
     elif query.data == "user_history":
         await query.edit_message_text("📜 <b>Riwayat Transaksi</b>\n\nRiwayat deposit akan kita tampilkan di tahap berikutnya.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
     elif query.data == "user_home":
@@ -322,20 +226,16 @@ async def admin_add_balance(update, context):
     await update.message.reply_text(f"✅ <b>Saldo berhasil ditambahkan.</b>\n\n👤 User: <code>{telegram_id}</code>\n💰 Saldo baru: <b>{format_rupiah(new_balance)}</b>", parse_mode="HTML")
 
 async def error_handler(update, context): logger.error("Exception while handling update:", exc_info=context.error)
-    
+
 def run():
     init_database()
-    
     application = Application.builder().token(BOT_TOKEN).build()
-    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("addbalance", admin_add_balance))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_error_handler(error_handler)
-    
     logger.info("Bot berhasil dijalankan.")
-    logger.info("Webhook Midtrans aktif di /midtrans/webhook") # ini bisa dihapus
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
