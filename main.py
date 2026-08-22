@@ -64,8 +64,6 @@ snap = midtransclient.Snap(
     is_production=True,
     server_key=MIDTRANS_SERVER_KEY
 )
-)
-
 
 # =========================================================
 # HELPER
