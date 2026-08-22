@@ -3,4 +3,5 @@ midtransclient
 aiohttp==3.9.1
 python-dotenv==1.0.1
 psycopg==3.1.18
-Flask
+Flask==3.0.2
+pytz==2024.1
