@@ -322,18 +322,20 @@ async def admin_add_balance(update, context):
     await update.message.reply_text(f"✅ <b>Saldo berhasil ditambahkan.</b>\n\n👤 User: <code>{telegram_id}</code>\n💰 Saldo baru: <b>{format_rupiah(new_balance)}</b>", parse_mode="HTML")
 
 async def error_handler(update, context): logger.error("Exception while handling update:", exc_info=context.error)
-
+    
 def run():
     init_database()
-    start_webhook_server()
+    
     application = Application.builder().token(BOT_TOKEN).build()
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("addbalance", admin_add_balance))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_error_handler(error_handler)
+    
     logger.info("Bot berhasil dijalankan.")
-    logger.info("Webhook Midtrans aktif di /midtrans/webhook")
+    logger.info("Webhook Midtrans aktif di /midtrans/webhook") # ini bisa dihapus
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
