@@ -107,69 +107,30 @@ def init_database():
 # =========================================================
 
 def now():
-
-    return datetime.now(
-        timezone.utc
-    ).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 # =========================================================
 # CREATE USER
 # =========================================================
 
-def create_user(
-    telegram_id,
-    username=None,
-    first_name=None,
-):
-
+def create_user(telegram_id, username=None, first_name=None):
     with get_db() as db:
-
         existing = db.execute(
-            """
-            SELECT *
-            FROM users
-            WHERE telegram_id = %s
-            """,
+            "SELECT * FROM users WHERE telegram_id = %s",
             (telegram_id,)
         ).fetchone()
 
         if existing:
-
             db.execute(
-                """
-                UPDATE users
-                SET username = %s,
-                    first_name = %s
-                WHERE telegram_id = %s
-                """,
-                (
-                    username,
-                    first_name,
-                    telegram_id,
-                )
+                "UPDATE users SET username = %s, first_name = %s WHERE telegram_id = %s",
+                (username, first_name, telegram_id)
             )
-
             return
 
         db.execute(
-            """
-            INSERT INTO users
-            (
-                telegram_id,
-                username,
-                first_name,
-                balance,
-                created_at
-            )
-            VALUES (%s, %s, %s, 0, %s)
-            """,
-            (
-                telegram_id,
-                username,
-                first_name,
-                now(),
-            )
+            "INSERT INTO users (telegram_id, username, first_name, balance, created_at) VALUES (%s, %s, %s, 0, %s)",
+            (telegram_id, username, first_name, now())
         )
 
 
@@ -178,15 +139,9 @@ def create_user(
 # =========================================================
 
 def get_user(telegram_id):
-
     with get_db() as db:
-
         return db.execute(
-            """
-            SELECT *
-            FROM users
-            WHERE telegram_id = %s
-            """,
+            "SELECT * FROM users WHERE telegram_id = %s",
             (telegram_id,)
         ).fetchone()
 
@@ -196,99 +151,76 @@ def get_user(telegram_id):
 # =========================================================
 
 def get_balance(telegram_id):
-
     user = get_user(telegram_id)
-
     if not user:
-
-        create_user(
-            telegram_id=telegram_id
-        )
-
+        create_user(telegram_id=telegram_id)
         return 0
-
     return user["balance"]
+
+
+# =========================================================
+# GET TOTAL USER - BARU BUAT MENU
+# =========================================================
+
+def get_total_users():
+    with get_db() as db:
+        result = db.execute("SELECT COUNT(*) as total FROM users").fetchone()
+        return result["total"]
+
+
+# =========================================================
+# GET HISTORI DEPOSIT - BARU BUAT MENU
+# =========================================================
+
+def get_deposit_history(telegram_id, limit=5):
+    with get_db() as db:
+        return db.execute(
+            "SELECT * FROM deposits WHERE telegram_id = %s ORDER BY created_at DESC LIMIT %s",
+            (telegram_id, limit)
+        ).fetchall()
+
+
+# =========================================================
+# GET HISTORI ORDER - BARU BUAT MENU
+# =========================================================
+
+def get_order_history(telegram_id, limit=5):
+    with get_db() as db:
+        return db.execute(
+            "SELECT * FROM orders WHERE telegram_id = %s ORDER BY created_at DESC LIMIT %s",
+            (telegram_id, limit)
+        ).fetchall()
 
 
 # =========================================================
 # ADD BALANCE
 # =========================================================
 
-def add_balance(
-    telegram_id,
-    amount,
-    transaction_type,
-    reference=None,
-    description=None,
-):
-
+def add_balance(telegram_id, amount, transaction_type, reference=None, description=None):
     if amount <= 0:
-
-        raise ValueError(
-            "Amount harus lebih besar dari 0."
-        )
+        raise ValueError("Amount harus lebih besar dari 0.")
 
     with get_db() as db:
-
         user = db.execute(
-            """
-            SELECT balance
-            FROM users
-            WHERE telegram_id = %s
-            FOR UPDATE
-            """,
+            "SELECT balance FROM users WHERE telegram_id = %s FOR UPDATE",
             (telegram_id,)
         ).fetchone()
 
         if not user:
-
-            raise ValueError(
-                "User belum terdaftar."
-            )
+            raise ValueError("User belum terdaftar.")
 
         before = user["balance"]
-
         after = before + amount
 
         db.execute(
-            """
-            UPDATE users
-            SET balance = %s
-            WHERE telegram_id = %s
-            """,
-            (
-                after,
-                telegram_id,
-            )
+            "UPDATE users SET balance = %s WHERE telegram_id = %s",
+            (after, telegram_id)
         )
 
         db.execute(
-            """
-            INSERT INTO ledger
-            (
-                telegram_id,
-                amount,
-                balance_before,
-                balance_after,
-                transaction_type,
-                reference,
-                description,
-                created_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                telegram_id,
-                amount,
-                before,
-                after,
-                transaction_type,
-                reference,
-                description,
-                now(),
-            )
+            "INSERT INTO ledger (telegram_id, amount, balance_before, balance_after, transaction_type, reference, description, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (telegram_id, amount, before, after, transaction_type, reference, description, now())
         )
-
         return after
 
 
@@ -296,87 +228,34 @@ def add_balance(
 # SUBTRACT BALANCE
 # =========================================================
 
-def subtract_balance(
-    telegram_id,
-    amount,
-    transaction_type,
-    reference=None,
-    description=None,
-):
-
+def subtract_balance(telegram_id, amount, transaction_type, reference=None, description=None):
     if amount <= 0:
-
-        raise ValueError(
-            "Amount harus lebih besar dari 0."
-        )
+        raise ValueError("Amount harus lebih besar dari 0.")
 
     with get_db() as db:
-
         user = db.execute(
-            """
-            SELECT balance
-            FROM users
-            WHERE telegram_id = %s
-            FOR UPDATE
-            """,
+            "SELECT balance FROM users WHERE telegram_id = %s FOR UPDATE",
             (telegram_id,)
         ).fetchone()
 
         if not user:
-
-            raise ValueError(
-                "User belum terdaftar."
-            )
+            raise ValueError("User belum terdaftar.")
 
         before = user["balance"]
-
         if before < amount:
-
-            raise ValueError(
-                "Saldo tidak cukup."
-            )
+            raise ValueError("Saldo tidak cukup.")
 
         after = before - amount
 
         db.execute(
-            """
-            UPDATE users
-            SET balance = %s
-            WHERE telegram_id = %s
-            """,
-            (
-                after,
-                telegram_id,
-            )
+            "UPDATE users SET balance = %s WHERE telegram_id = %s",
+            (after, telegram_id)
         )
 
         db.execute(
-            """
-            INSERT INTO ledger
-            (
-                telegram_id,
-                amount,
-                balance_before,
-                balance_after,
-                transaction_type,
-                reference,
-                description,
-                created_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                telegram_id,
-                -amount,
-                before,
-                after,
-                transaction_type,
-                reference,
-                description,
-                now(),
-            )
+            "INSERT INTO ledger (telegram_id, amount, balance_before, balance_after, transaction_type, reference, description, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (telegram_id, -amount, before, after, transaction_type, reference, description, now())
         )
-
         return after
 
 
@@ -384,232 +263,46 @@ def subtract_balance(
 # COMPLETE DEPOSIT
 # =========================================================
 
-def complete_deposit(
-    deposit_id,
-    payment_reference=None,
-):
-    """
-    Menyelesaikan deposit secara atomik.
-
-    Status deposit:
-
-        PENDING
-            ↓
-        SUCCESS
-
-    Return:
-
-        (
-            completed,
-            telegram_id,
-            amount,
-            new_balance
-        )
-
-    completed = True
-        deposit baru berhasil dikreditkan
-
-    completed = False
-        deposit sudah pernah diselesaikan
-    """
-
+def complete_deposit(deposit_id, payment_reference=None):
     with get_db() as db:
-
-        # -------------------------------------------------
-        # AMBIL DEPOSIT DAN KUNCI BARIS
-        # -------------------------------------------------
-
         deposit = db.execute(
-            """
-            SELECT
-                id,
-                deposit_id,
-                telegram_id,
-                amount,
-                status
-            FROM deposits
-            WHERE deposit_id = %s
-            FOR UPDATE
-            """,
+            "SELECT id, deposit_id, telegram_id, amount, status FROM deposits WHERE deposit_id = %s FOR UPDATE",
             (deposit_id,)
         ).fetchone()
 
         if not deposit:
-
-            raise ValueError(
-                f"Deposit tidak ditemukan: {deposit_id}"
-            )
+            raise ValueError(f"Deposit tidak ditemukan: {deposit_id}")
 
         telegram_id = deposit["telegram_id"]
-
-        amount = int(
-            deposit["amount"]
-        )
-
-        status = str(
-            deposit["status"]
-        ).upper()
-
-        # -------------------------------------------------
-        # JANGAN KREDIT DUA KALI
-        # -------------------------------------------------
+        amount = int(deposit["amount"])
+        status = str(deposit["status"]).upper()
 
         if status == "SUCCESS":
-
-            user = db.execute(
-                """
-                SELECT balance
-                FROM users
-                WHERE telegram_id = %s
-                """,
-                (telegram_id,)
-            ).fetchone()
-
-            if not user:
-
-                return (
-                    False,
-                    telegram_id,
-                    amount,
-                    0,
-                )
-
-            return (
-                False,
-                telegram_id,
-                amount,
-                user["balance"],
-            )
-
-        # -------------------------------------------------
-        # HANYA PENDING YANG BOLEH DISELESAIKAN
-        # -------------------------------------------------
+            user = db.execute("SELECT balance FROM users WHERE telegram_id = %s", (telegram_id,)).fetchone()
+            return (False, telegram_id, amount, user["balance"] if user else 0)
 
         if status != "PENDING":
+            user = db.execute("SELECT balance FROM users WHERE telegram_id = %s", (telegram_id,)).fetchone()
+            current_balance = user["balance"] if user else 0
+            return (False, telegram_id, amount, current_balance)
 
-            user = db.execute(
-                """
-                SELECT balance
-                FROM users
-                WHERE telegram_id = %s
-                """,
-                (telegram_id,)
-            ).fetchone()
-
-            current_balance = (
-                user["balance"]
-                if user
-                else 0
-            )
-
-            return (
-                False,
-                telegram_id,
-                amount,
-                current_balance,
-            )
-
-        # -------------------------------------------------
-        # PASTIKAN USER TERSEDIA
-        # -------------------------------------------------
-
-        user = db.execute(
-            """
-            SELECT balance
-            FROM users
-            WHERE telegram_id = %s
-            FOR UPDATE
-            """,
-            (telegram_id,)
-        ).fetchone()
-
+        user = db.execute("SELECT balance FROM users WHERE telegram_id = %s FOR UPDATE", (telegram_id,)).fetchone()
         if not user:
+            raise ValueError(f"User tidak ditemukan: {telegram_id}")
 
-            raise ValueError(
-                f"User tidak ditemukan: {telegram_id}"
-            )
-
-        # -------------------------------------------------
-        # HITUNG SALDO BARU
-        # -------------------------------------------------
-
-        before = int(
-            user["balance"]
-        )
-
+        before = int(user["balance"])
         after = before + amount
 
-        # -------------------------------------------------
-        # TAMBAHKAN SALDO USER
-        # -------------------------------------------------
+        db.execute("UPDATE users SET balance = %s WHERE telegram_id = %s", (after, telegram_id))
 
         db.execute(
-            """
-            UPDATE users
-            SET balance = %s
-            WHERE telegram_id = %s
-            """,
-            (
-                after,
-                telegram_id,
-            )
+            "INSERT INTO ledger (telegram_id, amount, balance_before, balance_after, transaction_type, reference, description, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (telegram_id, amount, before, after, "DEPOSIT", deposit_id, "Deposit berhasil dikonfirmasi.", now())
         )
-
-        # -------------------------------------------------
-        # CATAT KE LEDGER
-        # -------------------------------------------------
 
         db.execute(
-            """
-            INSERT INTO ledger
-            (
-                telegram_id,
-                amount,
-                balance_before,
-                balance_after,
-                transaction_type,
-                reference,
-                description,
-                created_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                telegram_id,
-                amount,
-                before,
-                after,
-                "DEPOSIT",
-                deposit_id,
-                "Deposit berhasil dikonfirmasi oleh Xendit.",
-                now(),
-            )
+            "UPDATE deposits SET status = 'SUCCESS', payment_reference = %s, completed_at = %s WHERE deposit_id = %s AND status = 'PENDING'",
+            (payment_reference, now(), deposit_id)
         )
 
-        # -------------------------------------------------
-        # TANDAI DEPOSIT SUCCESS
-        # -------------------------------------------------
-
-        db.execute(
-            """
-            UPDATE deposits
-            SET
-                status = 'SUCCESS',
-                payment_reference = %s,
-                completed_at = %s
-            WHERE deposit_id = %s
-              AND status = 'PENDING'
-            """,
-            (
-                payment_reference,
-                now(),
-                deposit_id,
-            )
-        )
-
-        return (
-            True,
-            telegram_id,
-            amount,
-            after,
-        )
+        return (True, telegram_id, amount, after)
