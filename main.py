@@ -75,7 +75,11 @@ from provider import (
     cancel_number
 )
 
-from aggregator import get_aggregated_countries, get_aggregated_quotes
+from aggregator import (
+    get_aggregated_countries,
+    get_aggregated_quotes,
+    get_aggregator_service_catalog,
+)
 
 from smsman import (
     get_balance as get_smsman_balance,
@@ -1248,61 +1252,14 @@ def get_service_catalog(server):
     seen = {code.lower() for code, _ in catalog}
 
     if server == "aggregator":
-        # Ambil katalog ketiga provider secara paralel agar menu tidak lambat.
-        def load_5sim():
-            try:
-                return ("5sim", get_all_products())
-            except Exception:
-                logger.exception("Aggregator: gagal mengambil katalog 5SIM")
-                return ("5sim", None)
-
-        def load_smspool():
-            try:
-                return ("smspool", get_smspool_services())
-            except Exception:
-                logger.exception("Aggregator: gagal mengambil katalog SMSPool")
-                return ("smspool", None)
-
-        def load_smsman():
-            try:
-                from smsman import get_applications
-                return ("smsman", get_applications())
-            except Exception:
-                logger.exception("Aggregator: gagal mengambil katalog SMS-Man")
-                return ("smsman", None)
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            results = list(executor.map(lambda fn: fn(), (load_5sim, load_smspool, load_smsman)))
-
-        for provider_name, data in results:
-            if provider_name == "5sim":
-                # 5SIM: key produk adalah service code.
-                if isinstance(data, dict):
-                    for product, info in data.items():
-                        if isinstance(info, dict):
-                            category = str(info.get("Category", "")).lower()
-                            if category and category != "activation":
-                                continue
-                        code = str(product).strip()
-                        if code and code.lower() not in seen:
-                            catalog.append((code, code.replace("_", " ").title()))
-                            seen.add(code.lower())
-
-            elif provider_name == "smspool":
-                _merge_service_catalog(
-                    catalog, seen, data,
-                    ("ID", "id", "service_id", "name", "service"),
-                    ("name", "service", "title")
-                )
-
-            else:  # SMS-Man
-                _merge_service_catalog(
-                    catalog, seen, data,
-                    ("code", "id", "application_id", "name", "service"),
-                    ("name", "title", "service", "code")
-                )
-
-        return catalog
+        # Aggregator memakai satu canonical key per layanan. Saat order,
+        # aggregator.py menerjemahkan key tersebut ke ID layanan masing-masing
+        # provider. Jadi tidak lagi mengirim ID 5SIM ke SMSPool/SMS-Man.
+        try:
+            return get_aggregator_service_catalog()
+        except Exception:
+            logger.exception("Aggregator: gagal mengambil katalog gabungan")
+            return catalog
 
     if server == "5sim":
         data = get_all_products()

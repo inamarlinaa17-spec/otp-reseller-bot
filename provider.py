@@ -153,23 +153,67 @@ def get_products(
 # =========================================================
 
 def get_all_products():
+    """Return a complete product catalog from the public price matrix.
 
+    5SIM documents /guest/products/{country}/{operator}, not a global
+    /guest/products endpoint. The old implementation called the latter,
+    which is why Server 1 could fall back to only the small hard-coded
+    service list. The public /guest/prices endpoint exposes the product
+    keys for every country, so we build a deduplicated activation catalog
+    from that matrix.
+    """
     try:
-
         response = requests.get(
-            f"{BASE_URL}/guest/products",
-            headers={
-                "Accept": "application/json"
-            },
-            timeout=20
+            f"{BASE_URL}/guest/prices",
+            headers={"Accept": "application/json"},
+            timeout=30
         )
 
-        response.raise_for_status()
+        if response.status_code != 200:
+            print(
+                "[5SIM] product catalog error "
+                f"HTTP {response.status_code}: {response.text[:500]}"
+            )
+            return {}
 
-        return response.json()
+        data = response.json()
+        catalog = {}
 
-    except Exception:
+        if not isinstance(data, dict):
+            return catalog
 
+        # /guest/prices => {country: {product: {operator: {...}}}}
+        # Be tolerant of the alternative {product: {country: ...}} shape.
+        for first_key, first_value in data.items():
+            if not isinstance(first_value, dict):
+                continue
+
+            for second_key, second_value in first_value.items():
+                if not isinstance(second_value, dict):
+                    continue
+
+                # Country -> product -> operator
+                if any(
+                    isinstance(v, dict) and (
+                        "cost" in v or "count" in v or "rate" in v
+                    )
+                    for v in second_value.values()
+                ):
+                    product = str(second_key).strip()
+                    if product:
+                        catalog.setdefault(product, {"Category": "activation"})
+                    continue
+
+                # Product -> country -> operator
+                if any(isinstance(v, dict) for v in second_value.values()):
+                    product = str(first_key).strip()
+                    if product:
+                        catalog.setdefault(product, {"Category": "activation"})
+
+        return catalog
+
+    except Exception as error:
+        print(f"[5SIM] product catalog request error: {error}")
         return {}
 
 
