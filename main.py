@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import asyncio
 import pytz
+from concurrent.futures import ThreadPoolExecutor
 
 from datetime import datetime
 from urllib.error import HTTPError
@@ -1206,10 +1207,102 @@ async def show_server_page(
 # =========================================================
 
 
+def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
+    """Tambahkan layanan provider ke katalog tanpa duplikasi."""
+    if isinstance(data, dict):
+        iterable = data.items()
+    elif isinstance(data, list):
+        iterable = enumerate(data)
+    else:
+        iterable = []
+
+    for key, value in iterable:
+        if isinstance(value, dict):
+            code = ""
+            for field in code_keys:
+                if value.get(field) is not None:
+                    code = str(value.get(field)).strip()
+                    if code:
+                        break
+            code = code or str(key).strip()
+
+            label = ""
+            for field in label_keys:
+                if value.get(field) is not None:
+                    label = str(value.get(field)).strip()
+                    if label:
+                        break
+            label = label or code
+        else:
+            code = str(value).strip()
+            label = code
+
+        if code and code.lower() not in seen:
+            catalog.append((code, label))
+            seen.add(code.lower())
+
+
 def get_service_catalog(server):
-    """Katalog layanan: daftar utama seperti screenshot + layanan provider."""
+    """Katalog layanan. Aggregator memakai UNION layanan 5SIM + SMSPool + SMS-Man."""
     catalog = list(OTP_SERVICES)
     seen = {code.lower() for code, _ in catalog}
+
+    if server == "aggregator":
+        # Ambil katalog ketiga provider secara paralel agar menu tidak lambat.
+        def load_5sim():
+            try:
+                return ("5sim", get_all_products())
+            except Exception:
+                logger.exception("Aggregator: gagal mengambil katalog 5SIM")
+                return ("5sim", None)
+
+        def load_smspool():
+            try:
+                return ("smspool", get_smspool_services())
+            except Exception:
+                logger.exception("Aggregator: gagal mengambil katalog SMSPool")
+                return ("smspool", None)
+
+        def load_smsman():
+            try:
+                from smsman import get_applications
+                return ("smsman", get_applications())
+            except Exception:
+                logger.exception("Aggregator: gagal mengambil katalog SMS-Man")
+                return ("smsman", None)
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(lambda fn: fn(), (load_5sim, load_smspool, load_smsman)))
+
+        for provider_name, data in results:
+            if provider_name == "5sim":
+                # 5SIM: key produk adalah service code.
+                if isinstance(data, dict):
+                    for product, info in data.items():
+                        if isinstance(info, dict):
+                            category = str(info.get("Category", "")).lower()
+                            if category and category != "activation":
+                                continue
+                        code = str(product).strip()
+                        if code and code.lower() not in seen:
+                            catalog.append((code, code.replace("_", " ").title()))
+                            seen.add(code.lower())
+
+            elif provider_name == "smspool":
+                _merge_service_catalog(
+                    catalog, seen, data,
+                    ("ID", "id", "service_id", "name", "service"),
+                    ("name", "service", "title")
+                )
+
+            else:  # SMS-Man
+                _merge_service_catalog(
+                    catalog, seen, data,
+                    ("code", "id", "application_id", "name", "service"),
+                    ("name", "title", "service", "code")
+                )
+
+        return catalog
 
     if server == "5sim":
         data = get_all_products()
@@ -1227,48 +1320,19 @@ def get_service_catalog(server):
                     seen.add(code.lower())
 
     elif server == "smspool":
-        data = get_smspool_services()
-        if isinstance(data, dict):
-            iterable = data.items()
-        elif isinstance(data, list):
-            iterable = enumerate(data)
-        else:
-            iterable = []
-
-        for key, value in iterable:
-            if isinstance(value, dict):
-                code = str(
-                    value.get("ID")
-                    or value.get("id")
-                    or value.get("service_id")
-                    or value.get("name")
-                    or value.get("service")
-                    or key
-                ).strip()
-                label = str(
-                    value.get("name")
-                    or value.get("service")
-                    or code
-                ).strip()
-            else:
-                code = str(value).strip()
-                label = code
-
-            if code and code.lower() not in seen:
-                catalog.append((code, label))
-                seen.add(code.lower())
+        _merge_service_catalog(
+            catalog, seen, get_smspool_services(),
+            ("ID", "id", "service_id", "name", "service"),
+            ("name", "service", "title")
+        )
 
     elif server == "smsman":
         from smsman import get_applications
-        data = get_applications()
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            code = str(item.get("code") or item.get("id") or item.get("application_id") or "").strip()
-            label = str(item.get("name") or item.get("title") or code).strip()
-            if code and code.lower() not in seen:
-                catalog.append((code, label))
-                seen.add(code.lower())
+        _merge_service_catalog(
+            catalog, seen, get_applications(),
+            ("code", "id", "application_id", "name", "service"),
+            ("name", "title", "service", "code")
+        )
 
     return catalog
 
@@ -1312,6 +1376,13 @@ async def show_service_page(
         keyboard.append(row)
 
     navigation = [
+        InlineKeyboardButton(
+            "◀️",
+            callback_data=(
+                f"otp_services:{server}:"
+                f"{max(page - 1, 0)}"
+            )
+        ),
         InlineKeyboardButton(
             f"{page + 1}/{total_pages}",
             callback_data="otp_noop"
@@ -1751,7 +1822,12 @@ async def show_service_country_page(
         for item, best in zip(page_items, quote_rows):
             if best:
                 price = hitung_harga_jual(best["cost_usd"])
-                label = f"🌍 {item['name']}  |  💰 {format_rupiah(price)}  |  📦 {best['stock']}"
+                provider_label = {
+                    "5sim": "S1",
+                    "smspool": "S2",
+                    "smsman": "S3",
+                }.get(best.get("provider"), best.get("provider", "?"))
+                label = f"🌍 {item['name']}  |  💰 {format_rupiah(price)}  |  📦 {best['stock']}  |  ⚡ {provider_label}"
             else:
                 label = f"🌍 {item['name']}  |  ❌ Tidak tersedia"
             keyboard.append([
@@ -2399,9 +2475,14 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
             country_name=q.get("country_name") or country
         )
         sell = hitung_harga_jual(q["cost_usd"])
+        provider_label = {
+            "5sim": "⚡ Server 1 (5SIM)",
+            "smspool": "⚡ Server 2 (SMSPool)",
+            "smsman": "⚡ Server 3 (SMS-Man)",
+        }.get(q.get("provider"), str(q.get("provider", "Provider")))
         keyboard.append([
             InlineKeyboardButton(
-                f"💰 {format_rupiah(sell)} | 📦 {q['stock']}",
+                f"{provider_label} | 💰 {format_rupiah(sell)} | 📦 {q['stock']}",
                 callback_data=f"otp_quote:{quote_id}"
             )
         ])
