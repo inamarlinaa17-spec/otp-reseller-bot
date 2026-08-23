@@ -128,6 +128,20 @@ SMSMAN_API_KEY = os.getenv(
     ""
 ).strip()
 
+
+# =========================================================
+# TELEGRAM PROMO CHANNEL
+# =========================================================
+# Configure this in Railway Variables:
+# PROMO_CHANNEL=@YourChannel
+# or PROMO_CHANNEL=YourChannel
+# or PROMO_CHANNEL=https://t.me/YourChannel
+PROMO_CHANNEL = os.getenv(
+    "PROMO_CHANNEL",
+    ""
+).strip()
+
+
 # SMS-Man control API reports prices in its account currency;
 # the default installation uses RUB and converts to USD for
 # comparison with 5SIM/SMSPool. Change this in Railway if

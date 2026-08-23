@@ -38,7 +38,8 @@ from config import (
     MIDTRANS_CLIENT_KEY,
     MIDTRANS_API_URL,
     MIDTRANS_SNAP_URL,
-    KURS_DOLAR
+    KURS_DOLAR,
+    PROMO_CHANNEL
 )
 
 from database import (
@@ -1056,6 +1057,27 @@ async def user_start(
 
     waktu = get_wib_time()
 
+    # PROMO_CHANNEL can be configured in Railway as either:
+    #   @YourChannel
+    #   YourChannel
+    #   https://t.me/YourChannel
+    # Keep the public channel configurable; never hard-code it in source.
+    raw_channel = (PROMO_CHANNEL or "").strip()
+    if raw_channel:
+        channel_handle = raw_channel.rstrip("/")
+        if channel_handle.startswith("https://t.me/"):
+            channel_url = channel_handle
+            channel_label = "@" + channel_handle.rsplit("/", 1)[-1].lstrip("@")
+        elif channel_handle.startswith("http://t.me/"):
+            channel_url = "https://" + channel_handle.split("://", 1)[1]
+            channel_label = "@" + channel_handle.rsplit("/", 1)[-1].lstrip("@")
+        else:
+            channel_label = "@" + channel_handle.lstrip("@")
+            channel_url = "https://t.me/" + channel_handle.lstrip("@")
+        promo_channel_display = f'<a href="{channel_url}">{channel_label}</a>'
+    else:
+        promo_channel_display = "Belum diatur"
+
     text = f"""
 👋 <b>{user.first_name.upper()}</b>
 {waktu}
@@ -1071,7 +1093,7 @@ async def user_start(
 ├ Total User : {total_user}
 
 <b>Info Promo :</b>
-├ Channel : @ChannelLu
+├ Channel : {promo_channel_display}
 
 <b>Shortcut :</b>
 ├ /start - Mulai Bot
@@ -1301,10 +1323,22 @@ async def show_service_page(
 ):
     """Tampilan layanan 2 kolom seperti menu referensi."""
 
-    services = await asyncio.to_thread(
-        get_service_catalog,
-        server
-    )
+    try:
+        services = await asyncio.wait_for(
+            asyncio.to_thread(get_service_catalog, server),
+            timeout=15
+        )
+    except asyncio.TimeoutError:
+        await query.edit_message_text(
+            "⚠️ <b>Data layanan sedang dimuat.</b>\n\n"
+            "Silakan tekan kembali lalu coba lagi sebentar.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"otp_server:{server}"),
+                InlineKeyboardButton("⬅️ Kembali", callback_data="order"),
+            ]])
+        )
+        return
 
     total_pages = (
         len(services) + SERVICES_PER_PAGE - 1
@@ -1771,18 +1805,20 @@ async def show_service_country_page(
     keyboard = []
 
     if server == "aggregator":
-        # Show the cheapest live quote at the top of each country button.
-        async def country_quote(item):
-            quotes = await asyncio.to_thread(get_aggregated_quotes, item["country"], service)
-            return quotes[0] if quotes else None
-        quote_rows = await asyncio.gather(*(country_quote(item) for item in page_items))
-        for item, best in zip(page_items, quote_rows):
-            if best:
-                price = hitung_harga_jual(best["cost_usd"])
-                # The country menu is an aggregator view: price = cheapest
-                # live quote, stock = combined stock from all providers.
-                # Never expose the underlying provider here.
-                label = f"🌍 {item['name']}  |  💰 mulai {format_rupiah(price)}  |  📦 {item['stock']}"
+        # get_aggregated_countries() already contains the cheapest price and
+        # combined stock from all providers. Do NOT make a second live quote
+        # request here: a temporary provider timeout must never turn a country
+        # that is actually available into "Tidak tersedia".
+        for item in page_items:
+            cost = float(item.get("cost") or 0)
+            stock = int(item.get("stock") or 0)
+            if cost > 0 and stock > 0:
+                price = hitung_harga_jual(cost)
+                label = (
+                    f"🌍 {item['name']}  |  "
+                    f"💰 mulai {format_rupiah(price)}  |  "
+                    f"📦 {stock}"
+                )
             else:
                 label = f"🌍 {item['name']}  |  ❌ Tidak tersedia"
             keyboard.append([
@@ -2819,16 +2855,16 @@ Isi saldo terlebih dahulu melalui menu <b>Deposit</b>.
 Pilih server OTP atau gunakan Price Aggregator.
 
 3️⃣ <b>Pilih Server</b>
-├ Server 1 → 5SIM
-├ Server 2 → SMSPOOL
-├ Server 3 → SMS-MAN
-└ Price Aggregator → gabungkan quote 5SIM + SMSPOOL + SMS-MAN
+├ Server 1
+├ Server 2
+├ Server 3
+└ Price Aggregator → mencari harga & stok terbaik dari seluruh server
 
 4️⃣ <b>Pilih layanan</b>
 Bot menampilkan layanan OTP seperti WhatsApp, Telegram, Shopee, TikTok, Facebook, Instagram, Google, Vercel, UangMe, Grab, DANA, Gojek, OVO, Any Other, dan lainnya.
 
 5️⃣ <b>Pilih Negara</b>
-Untuk server 5SIM, pilih negara nomor yang tersedia.
+Pilih negara nomor yang tersedia.
 
 6️⃣ <b>Pilih layanan/provider</b>
 Pilih layanan yang memiliki stok.

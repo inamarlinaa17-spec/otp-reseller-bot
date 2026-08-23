@@ -1,5 +1,8 @@
 import logging
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 from provider import get_prices as get_5sim_prices, get_all_products as get_5sim_products
 from smspool import (
@@ -19,6 +22,39 @@ from smsman import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Short-lived caches reduce repeated provider/API calls when users move
+# between the same Aggregator screens. The TTL is intentionally short so
+# stock/prices stay reasonably fresh.
+_AGGREGATOR_CACHE_TTL = 12.0
+_SERVICE_CATALOG_CACHE_TTL = 60.0
+_cache_lock = Lock()
+_quotes_cache = {}
+_service_catalog_cache = None
+_service_catalog_cache_at = 0.0
+
+
+def _cache_get_quotes(service):
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _quotes_cache.get(str(service))
+        if entry and now - entry[0] < _AGGREGATOR_CACHE_TTL:
+            return list(entry[1])
+    return None
+
+
+def _cache_set_quotes(service, quotes):
+    with _cache_lock:
+        _quotes_cache[str(service)] = (time.monotonic(), list(quotes))
+
+
+def _clear_aggregator_cache():
+    global _service_catalog_cache, _service_catalog_cache_at
+    with _cache_lock:
+        _quotes_cache.clear()
+        _service_catalog_cache = None
+        _service_catalog_cache_at = 0.0
 
 
 def _num(value, default=0.0):
@@ -164,42 +200,44 @@ def _canonical_service_key(name_or_code):
 
 
 def get_aggregator_service_catalog():
-    """Return the UNION of all provider services.
+    """Return the UNION of all provider services with a short cache."""
+    global _service_catalog_cache, _service_catalog_cache_at
 
-    The returned key is a short canonical key used by Telegram callbacks.
-    It is deliberately NOT a provider ID, because each provider uses its
-    own service/application ID.
-    """
+    now = time.monotonic()
+    with _cache_lock:
+        if (_service_catalog_cache is not None and
+                now - _service_catalog_cache_at < _SERVICE_CATALOG_CACHE_TTL):
+            return list(_service_catalog_cache)
+
     records = []
 
-    # Keep the calls independent: one provider being down must not hide
-    # services from the other two.
+    # Fetch the three catalogs concurrently. One slow provider no longer
+    # blocks the other provider's service list.
     loaders = (
         ("5SIM", get_5sim_products),
         ("SMSPool", get_smspool_services),
         ("SMS-Man", get_smsman_applications),
     )
-
-    for provider_name, loader in loaders:
-        try:
-            data = loader()
-            for rec in _extract_service_records(data):
-                rec["provider"] = provider_name
-                records.append(rec)
-        except Exception:
-            logger.exception("Aggregator service catalog failed: %s", provider_name)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(loader): name for name, loader in loaders}
+        for future in as_completed(futures):
+            provider_name = futures[future]
+            try:
+                data = future.result()
+                for rec in _extract_service_records(data):
+                    rec["provider"] = provider_name
+                    records.append(rec)
+            except Exception:
+                logger.exception("Aggregator service catalog failed: %s", provider_name)
 
     grouped = {}
     order = []
-
-    # First add the common services in the familiar order.
     for key, label in DISPLAY_ALIASES.items():
         grouped[key] = (key, label)
         order.append(key)
 
     for rec in records:
         key = _canonical_service_key(rec["name"])
-        # If the provider only exposes a short code, also try the code.
         if key not in grouped:
             key = _canonical_service_key(rec["code"])
         if key not in grouped:
@@ -207,7 +245,11 @@ def get_aggregator_service_catalog():
             grouped[key] = (key, label)
             order.append(key)
 
-    return [grouped[k] for k in order if k in grouped]
+    result = [grouped[k] for k in order if k in grouped]
+    with _cache_lock:
+        _service_catalog_cache = list(result)
+        _service_catalog_cache_at = time.monotonic()
+    return result
 
 
 def _service_candidates(service):
@@ -356,18 +398,25 @@ def _5sim_all_quotes(service):
     if not isinstance(data, dict):
         return []
 
-    root = data.get(provider_service) if isinstance(data.get(provider_service), dict) else data
+    # /guest/prices has appeared in both shapes over time:
+    #   {country: {product: {operator: {cost,count}}}}
+    # and {product: {country: {operator: {cost,count}}}}.
+    # Normalize both shapes before extracting quotes.
     quotes = []
 
-    for country_id, country_data in root.items():
+    def add_country_quotes(country_id, country_data):
         if not isinstance(country_data, dict):
-            continue
+            return
+
+        # If a product layer is still present, unwrap it.
+        if provider_service in country_data and isinstance(country_data.get(provider_service), dict):
+            country_data = country_data[provider_service]
 
         for operator, info in country_data.items():
             if not isinstance(info, dict):
                 continue
             cost = _num(info.get("cost"))
-            stock = _int(info.get("count"))
+            stock = _int(info.get("count") or info.get("stock") or info.get("available"))
             if cost <= 0 or stock <= 0:
                 continue
 
@@ -383,6 +432,28 @@ def _5sim_all_quotes(service):
                 "cost_usd": cost,
                 "stock": stock,
             })
+
+    # Product -> country -> operator
+    product_root = data.get(provider_service) if isinstance(data.get(provider_service), dict) else None
+    if product_root is not None:
+        for country_id, country_data in product_root.items():
+            add_country_quotes(country_id, country_data)
+
+    # Country -> product -> operator (the common /guest/prices shape)
+    if not quotes:
+        for country_id, country_data in data.items():
+            if not isinstance(country_data, dict):
+                continue
+            if provider_service in country_data:
+                add_country_quotes(country_id, country_data)
+            else:
+                # Filtered responses may use a provider-specific alias/code.
+                # Only unwrap when the nested object actually looks like
+                # an operator map.
+                for product_key, product_data in country_data.items():
+                    if _canonical_service_key(product_key) == _canonical_service_key(service):
+                        add_country_quotes(country_id, product_data)
+                        break
 
     return quotes
 
@@ -606,23 +677,35 @@ def _smsman_all_quotes(service):
 
 
 def _all_quotes(service):
-    """Fetch all three providers. A failure in one provider never blocks the others."""
-    quotes = []
-    for name, fn in (
+    """Fetch all three providers in parallel, with a short-lived cache."""
+    cached = _cache_get_quotes(service)
+    if cached is not None:
+        return cached
+
+    results = []
+    providers = (
         ("5SIM", _5sim_all_quotes),
         ("SMSPool", _smspool_all_quotes),
         ("SMS-Man", _smsman_all_quotes),
-    ):
-        try:
-            result = fn(service)
-            if result:
-                quotes.extend(result)
-                logger.info("[AGGREGATOR] %s: %d live quotes for service=%s", name, len(result), service)
-            else:
-                logger.warning("[AGGREGATOR] %s returned NO STOCK for service=%s", name, service)
-        except Exception:
-            logger.exception("[AGGREGATOR] %s error: service=%s", name, service)
-    return quotes
+    )
+
+    # Provider calls are independent, so never wait for them sequentially.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(fn, service): name for name, fn in providers}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    results.extend(result)
+                    logger.info("[AGGREGATOR] %s: %d live quotes for service=%s", name, len(result), service)
+                else:
+                    logger.warning("[AGGREGATOR] %s returned NO STOCK for service=%s", name, service)
+            except Exception:
+                logger.exception("[AGGREGATOR] %s error: service=%s", name, service)
+
+    _cache_set_quotes(service, results)
+    return results
 
 
 def get_aggregated_quotes(country, service):
