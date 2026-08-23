@@ -71,12 +71,38 @@ logger = logging.getLogger(__name__)
 # =========================================================
 app = Flask(__name__)
 
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 # =========================================================
 # MIDTRANS SNAP
 # =========================================================
 snap = midtransclient.Snap(is_production=True, server_key=MIDTRANS_SERVER_KEY)
 
-#... SEMUA KODE LU DARI ATAS SAMPAI SINI TETEP...
+# =========================================================
+# UTILS
+# =========================================================
+def format_rupiah(amount):
+    try:
+        return f"Rp{int(amount):,}".replace(",", ".")
+    except:
+        return "Rp0"
+
+def is_admin(user_id):
+    return str(user_id) == str(ADMIN_ID)
+
+def admin_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Users", callback_data="admin_users")],
+        [InlineKeyboardButton("💳 Deposit", callback_data="admin_deposits")],
+        [InlineKeyboardButton("📦 Orders", callback_data="admin_orders")],
+        [InlineKeyboardButton("💰 Saldo 5SIM", callback_data="admin_provider")],
+        [InlineKeyboardButton("📊 Stats", callback_data="admin_stats")]
+    ])
 
 # =========================================================
 # FUNGSI BARU: CEK OTP OTOMATIS
@@ -106,23 +132,24 @@ async def cek_otp_task(application, order_id, telegram_id):
             break
 
 # =========================================================
-# USER CALLBACK - BAGIAN ORDER DIUBAH
+# USER CALLBACK
 # =========================================================
 async def user_callback(query, user_id, context):
-    application = context.application # buat kirim pesan dari background
+    application = context.application
 
-    # =====================================================
-    # ORDER - INI YG DIUBAH TOTAL
-    # =====================================================
-    if query.data == "order":
+    if query.data == "user_home":
+        keyboard = [[InlineKeyboardButton("📦 Order Nomor WA", callback_data="order")]]
+        if is_admin(user_id): keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin_home")])
+        await query.edit_message_text(f"🏠 <b>MENU UTAMA</b>\nSaldo: {format_rupiah(get_balance(user_id))}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "order":
         saldo = get_balance(user_id)
-        prices = provider.get_prices("0") # 0 = Indonesia
+        prices = provider.get_prices("0")
 
         if not prices or "whatsapp" not in prices:
             await query.edit_message_text("❌ Layanan WhatsApp kosong di 5sim", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
             return
 
-        # Ambil harga termurah WA
         harga_dolar = min([op['cost'] for op in prices['whatsapp'].values()])
         harga_jual = provider.hitung_harga_jual(harga_dolar)
 
@@ -130,7 +157,6 @@ async def user_callback(query, user_id, context):
             await query.edit_message_text(f"❌ Saldo tidak cukup\nHarga WA: {format_rupiah(harga_jual)}\nSaldo: {format_rupiah(saldo)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Deposit", callback_data="user_deposit"), InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
             return
 
-        # Beli nomor
         await query.edit_message_text("⏳ Sedang beli nomor...", parse_mode="HTML")
         buy_res = provider.buy_number(country="0", product="whatsapp")
 
@@ -140,9 +166,8 @@ async def user_callback(query, user_id, context):
 
         order_id = str(buy_res["id"])
         phone = buy_res["phone"]
-        provider_cost = int(harga_dolar * 100) # simpan dalam sen
+        provider_cost = int(harga_dolar * 100)
 
-        # Potong saldo user
         subtract_balance(user_id, harga_jual, "ORDER", order_id, f"Beli nomor {phone}")
         add_order(order_id, user_id, phone, "0", "whatsapp", harga_jual, provider_cost, order_id)
 
@@ -155,17 +180,11 @@ async def user_callback(query, user_id, context):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal & Refund", callback_data=f"cancel_{order_id}"), InlineKeyboardButton("🏠 Menu", callback_data="user_home")]])
         )
-
-        # Jalanin cek OTP di background
         asyncio.create_task(cek_otp_task(application, order_id, user_id))
 
-    # =====================================================
-    # BATAL ORDER
-    # =====================================================
     elif query.data.startswith("cancel_"):
         order_id = query.data.split("_")[1]
         order = get_order(order_id)
-
         if order and order['status'] == 'WAITING':
             provider.cancel_number(order_id)
             update_order_status(order_id, "CANCELED")
@@ -174,18 +193,48 @@ async def user_callback(query, user_id, context):
         else:
             await query.answer("Order sudah tidak bisa dibatalkan", show_alert=True)
 
-    #... SEMUA CALLBACK LAINNYA TETEP SAMA KAYAK PUNYA LU...
     elif query.data == "cara":
-        #... kode lu yg lama...
-        pass
+        await query.edit_message_text("Cara pakai: Klik Order > Beli nomor > Masukkan ke WA", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
+
     elif query.data == "user_deposit":
-        #... kode lu yg lama...
-        pass
-    # dst... copy semua callback lu yg lain kesini
+        await query.edit_message_text("Fitur deposit Midtrans", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]))
 
 # =========================================================
-# BUTTON HANDLER - TAMBAH ADMIN_PROVIDER
+# ADMIN CALLBACK
 # =========================================================
+async def admin_callback(query):
+    back = [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]]
+    if query.data == "admin_home":
+        await query.edit_message_text("👑 <b>ADMIN PANEL</b>\n\nPilih menu:", parse_mode="HTML", reply_markup=admin_menu())
+    elif query.data == "admin_provider":
+        balance = provider.get_balance()
+        await query.edit_message_text(f"💰 <b>5SIM BALANCE</b>\n\nSaldo: <b>${balance}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(back))
+    elif query.data == "admin_users":
+        total = get_total_users()
+        await query.edit_message_text(f"👥 Total Users: {total}", reply_markup=InlineKeyboardMarkup(back))
+    else:
+        await query.edit_message_text("Menu admin lain", reply_markup=InlineKeyboardMarkup(back))
+
+# =========================================================
+# HANDLERS UTAMA
+# =========================================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    create_user(user_id)
+    keyboard = [[InlineKeyboardButton("📦 Order Nomor WA", callback_data="order")]]
+    if is_admin(user_id): keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin_home")])
+    await update.message.reply_text(f"Halo! Saldo: {format_rupiah(get_balance(user_id))}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Pake tombol aja ya bos /start")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+
+async def admin_add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    await update.message.reply_text("Gunakan panel admin untuk add balance")
+
 async def button_handler(update, context):
     query = update.callback_query
     if not query: return
@@ -206,25 +255,12 @@ async def button_handler(update, context):
     await user_callback(query, user_id, context)
 
 # =========================================================
-# ADMIN CALLBACK - TAMBAH CEK SALDO 5SIM
-# =========================================================
-async def admin_callback(query):
-    back = [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]]
-    if query.data == "admin_provider":
-        balance = provider.get_balance()
-        await query.edit_message_text(f"💰 <b>5SIM BALANCE</b>\n\nSaldo: <b>${balance}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(back))
-    #... SEMUA ADMIN LAINNYA TETEP...
-    elif query.data == "admin_home":
-        await query.edit_message_text("👑 <b>ADMIN PANEL</b>\n\nPilih menu:", parse_mode="HTML", reply_markup=admin_menu())
-
-#... SEMUA FUNGSI LAIN DARI PUNYA LU TETEP COPY SEMUA SAMPAI BAWAH...
-# =========================================================
 # RUN BOT
 # =========================================================
 def run():
     init_database()
     application = Application.builder().token(BOT_TOKEN).build()
-    
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("addbalance", admin_add_balance))
     application.add_handler(CallbackQueryHandler(button_handler))
@@ -235,7 +271,7 @@ def run():
 
     threading.Thread(target=run_flask, daemon=True).start()
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-    
+
 # =========================================================
 # MAIN
 # =========================================================
