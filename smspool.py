@@ -224,6 +224,9 @@ def get_prices(
     )
 
     if not result:
+        print(
+            f"[SMSPOOL] all_stock empty: service={service!r} country={country!r}"
+        )
         return []
 
     # API errors are dicts with success=0; callers should treat them
@@ -236,6 +239,28 @@ def get_prices(
         return []
 
     return result
+
+
+# =========================================================
+# SUGGESTED COUNTRIES PER SERVICE
+# =========================================================
+
+def get_suggested_countries(service):
+    """Return SMSPool suggested countries with price for a service."""
+    result = post_request(
+        "/request/suggested_countries",
+        data={"service": service},
+        timeout=30
+    )
+
+    if isinstance(result, dict) and str(result.get("success", "1")) == "0":
+        print(
+            "[SMSPOOL] suggested countries error: "
+            f"{result.get('type') or result.get('message') or result}"
+        )
+        return []
+
+    return result if isinstance(result, list) else []
 
 
 # =========================================================
