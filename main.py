@@ -218,7 +218,24 @@ async def admin_callback(query):
         await query.edit_message_text("👑 <b>ADMIN PANEL</b>\n\nPilih menu:", parse_mode="HTML", reply_markup=admin_menu())
 
 #... SEMUA FUNGSI LAIN DARI PUNYA LU TETEP COPY SEMUA SAMPAI BAWAH...
+# =========================================================
+# RUN BOT
+# =========================================================
+def run():
+    init_database()
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("addbalance", admin_add_balance))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    application.add_error_handler(error_handler)
 
+    logger.info("Bot berhasil dijalankan.")
+
+    threading.Thread(target=run_flask, daemon=True).start()
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
 # =========================================================
 # MAIN
 # =========================================================
