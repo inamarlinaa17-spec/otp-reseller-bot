@@ -15,14 +15,23 @@ import pytz
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters,
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
 
 from config import (
-    BOT_TOKEN, ADMIN_ID, MIDTRANS_SERVER_KEY, MIDTRANS_CLIENT_KEY,
-    MIDTRANS_API_URL, MIDTRANS_SNAP_URL
+    BOT_TOKEN,
+    ADMIN_ID,
+    MIDTRANS_SERVER_KEY,
+    MIDTRANS_CLIENT_KEY,
+    MIDTRANS_API_URL,
+    MIDTRANS_SNAP_URL
 )
+
 from database import (
     init_database,
     create_user,
@@ -34,12 +43,23 @@ from database import (
     get_deposit_history,
     get_order_history
 )
+
 import midtransclient
 
 
-if not MIDTRANS_SERVER_KEY:
-    raise RuntimeError("MIDTRANS_SERVER_KEY belum diatur di Railway.")
+# =========================================================
+# VALIDASI MIDTRANS
+# =========================================================
 
+if not MIDTRANS_SERVER_KEY:
+    raise RuntimeError(
+        "MIDTRANS_SERVER_KEY belum diatur di Railway."
+    )
+
+
+# =========================================================
+# LOGGING
+# =========================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -58,12 +78,14 @@ app = Flask(__name__)
 
 # =========================================================
 # MIDTRANS SNAP
+# PRODUCTION / LIVE
 # =========================================================
 
 snap = midtransclient.Snap(
     is_production=True,
     server_key=MIDTRANS_SERVER_KEY
 )
+
 
 # =========================================================
 # HELPER
@@ -74,7 +96,7 @@ def is_admin(user_id):
 
 
 def format_rupiah(amount):
-    return f"Rp{int(float(amount)):,}".replace(",", ".")
+    return f"Rp{amount:,}".replace(",", ".")
 
 
 def get_wib_time():
@@ -160,7 +182,7 @@ def admin_menu():
                 "📊 Statistik",
                 callback_data="admin_stats"
             )
-        ],
+        ]
     ])
 
 
@@ -169,11 +191,13 @@ def admin_menu():
 # =========================================================
 
 def create_midtrans_snap(amount, deposit_id):
+
     param = {
         "transaction_details": {
             "order_id": deposit_id,
             "gross_amount": amount
         },
+
         "item_details": [
             {
                 "id": "DEPOSIT",
@@ -182,9 +206,11 @@ def create_midtrans_snap(amount, deposit_id):
                 "name": "Deposit Saldo Bot"
             }
         ],
+
         "customer_details": {
             "first_name": f"User {deposit_id}"
         },
+
         "expiry": {
             "start_time": datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S +07:00"
@@ -195,14 +221,18 @@ def create_midtrans_snap(amount, deposit_id):
     }
 
     try:
+
         transaction = snap.create_transaction(param)
+
         return transaction
 
     except Exception as error:
+
         logger.error(
             "Midtrans Error: %s",
             error
         )
+
         raise RuntimeError(
             "Gagal membuat Snap Token Midtrans."
         ) from error
@@ -213,6 +243,7 @@ def create_midtrans_snap(amount, deposit_id):
 # =========================================================
 
 def cek_status_midtrans(order_id):
+
     url = f"{MIDTRANS_API_URL}/{order_id}/status"
 
     req = Request(
@@ -228,28 +259,28 @@ def cek_status_midtrans(order_id):
     )
 
     try:
+
         with urlopen(req, timeout=20) as response:
+
             data = json.loads(
                 response.read().decode()
             )
+
             return data
 
     except HTTPError as e:
-        try:
-            error_body = e.read().decode()
-        except Exception:
-            error_body = str(e)
 
         logger.error(
             "Cek status gagal: %s",
-            error_body
+            e.read().decode()
         )
 
         return None
 
     except Exception as e:
+
         logger.error(
-            "Error cek status Midtrans: %s",
+            "Cek status Midtrans error: %s",
             e
         )
 
@@ -261,6 +292,7 @@ def cek_status_midtrans(order_id):
 # =========================================================
 
 def send_telegram_message(chat_id, text):
+
     url = (
         f"https://api.telegram.org/"
         f"bot{BOT_TOKEN}/sendMessage"
@@ -272,7 +304,7 @@ def send_telegram_message(chat_id, text):
         "parse_mode": "HTML"
     }
 
-    request = Request(
+    telegram_request = Request(
         url,
         data=json.dumps(payload).encode(),
         headers={
@@ -282,10 +314,16 @@ def send_telegram_message(chat_id, text):
     )
 
     try:
-        with urlopen(request, timeout=20) as response:
+
+        with urlopen(
+            telegram_request,
+            timeout=20
+        ) as response:
+
             response.read()
 
     except Exception as error:
+
         logger.error(
             "Notifikasi Telegram gagal: %s",
             error
@@ -301,6 +339,7 @@ def complete_deposit_payment(
     payment_reference,
     paid_amount
 ):
+
     with get_db() as db:
 
         deposit = db.execute(
@@ -318,17 +357,20 @@ def complete_deposit_payment(
         ).fetchone()
 
         if not deposit:
+
             raise ValueError(
                 "Deposit tidak ditemukan."
             )
 
         if deposit["status"] == "SUCCESS":
+
             return {
                 "completed": False,
                 "already_completed": True
             }
 
         if deposit["status"] != "PENDING":
+
             raise ValueError(
                 f"Deposit berstatus "
                 f"{deposit['status']}, bukan PENDING."
@@ -337,6 +379,7 @@ def complete_deposit_payment(
         if int(float(paid_amount)) != int(
             deposit["amount"]
         ):
+
             raise ValueError(
                 "Nominal pembayaran Midtrans "
                 "tidak sama dengan nominal deposit."
@@ -353,13 +396,17 @@ def complete_deposit_payment(
         ).fetchone()
 
         if not user:
+
             raise ValueError(
                 "User deposit tidak ditemukan."
             )
 
         before = user["balance"]
 
-        after = before + deposit["amount"]
+        after = (
+            before +
+            deposit["amount"]
+        )
 
         db.execute(
             """
@@ -386,8 +433,7 @@ def complete_deposit_payment(
                 description,
                 created_at
             )
-            VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 deposit["telegram_id"],
@@ -450,6 +496,7 @@ def midtrans_webhook():
         )
 
         if not data:
+
             logger.error(
                 "Webhook Midtrans menerima body kosong."
             )
@@ -499,11 +546,8 @@ def midtrans_webhook():
 
         logger.info(
             "Webhook Midtrans masuk | "
-            "order_id=%s | "
-            "status=%s | "
-            "payment_type=%s | "
-            "fraud=%s | "
-            "amount=%s",
+            "order_id=%s | status=%s | "
+            "payment_type=%s | fraud=%s | amount=%s",
             order_id,
             status,
             payment_type,
@@ -512,13 +556,10 @@ def midtrans_webhook():
         )
 
         # -------------------------------------------------
-        # VALIDASI DATA
+        # VALIDASI DASAR
         # -------------------------------------------------
 
         if not order_id:
-            logger.error(
-                "Webhook tidak memiliki order_id."
-            )
 
             return jsonify({
                 "status": "error",
@@ -526,10 +567,6 @@ def midtrans_webhook():
             }), 400
 
         if not status_code:
-            logger.error(
-                "Webhook %s tidak memiliki status_code.",
-                order_id
-            )
 
             return jsonify({
                 "status": "error",
@@ -537,10 +574,6 @@ def midtrans_webhook():
             }), 400
 
         if not gross_amount:
-            logger.error(
-                "Webhook %s tidak memiliki gross_amount.",
-                order_id
-            )
 
             return jsonify({
                 "status": "error",
@@ -548,10 +581,6 @@ def midtrans_webhook():
             }), 400
 
         if not signature_key:
-            logger.error(
-                "Webhook %s tidak memiliki signature_key.",
-                order_id
-            )
 
             return jsonify({
                 "status": "error",
@@ -559,9 +588,7 @@ def midtrans_webhook():
             }), 403
 
         # -------------------------------------------------
-        # VALIDASI SIGNATURE MIDTRANS
-        # SHA512
-        # order_id + status_code + gross_amount + ServerKey
+        # VALIDASI SIGNATURE
         # -------------------------------------------------
 
         signature_string = (
@@ -579,6 +606,7 @@ def midtrans_webhook():
             expected_signature.lower(),
             str(signature_key).lower()
         ):
+
             logger.error(
                 "Signature Midtrans tidak valid "
                 "untuk order %s.",
@@ -597,22 +625,22 @@ def midtrans_webhook():
         )
 
         # -------------------------------------------------
-        # CEK STATUS PEMBAYARAN
+        # STATUS SUKSES
         # -------------------------------------------------
 
         is_success = False
 
         if status == "settlement":
+
             is_success = True
 
         elif (
             status == "capture"
             and payment_type == "credit_card"
         ):
+
             is_success = True
 
-        # Jika fraud_status tersedia,
-        # harus accept.
         if is_success and fraud is not None:
 
             if str(fraud).lower() != "accept":
@@ -630,12 +658,13 @@ def midtrans_webhook():
                         "Fraud status not accepted"
                 }), 200
 
-        # Transaksi sukses harus status_code 200.
-        if is_success and status_code != "200":
+        if (
+            is_success
+            and status_code != "200"
+        ):
 
             logger.warning(
                 "Pembayaran %s memiliki "
-                "status sukses tetapi "
                 "status_code=%s",
                 order_id,
                 status_code
@@ -648,7 +677,7 @@ def midtrans_webhook():
             }), 200
 
         # -------------------------------------------------
-        # PROSES PEMBAYARAN
+        # PROSES PAYMENT
         # -------------------------------------------------
 
         if is_success:
@@ -665,20 +694,20 @@ def midtrans_webhook():
 
                     send_telegram_message(
                         result["telegram_id"],
+
                         f"✅ <b>Deposit berhasil!</b>\n\n"
                         f"💰 Deposit: "
                         f"<b>{format_rupiah(result['amount'])}</b>\n"
                         f"💳 Status: <b>PAID</b>\n"
-                        f"🧾 ID: <code>{order_id}</code>\n\n"
+                        f"🧾 ID: "
+                        f"<code>{order_id}</code>\n\n"
                         f"💰 Saldo sekarang: "
                         f"<b>{format_rupiah(result['new_balance'])}</b>"
                     )
 
                     logger.info(
                         "SALDO BERHASIL MASUK | "
-                        "user=%s | "
-                        "amount=%s | "
-                        "order=%s",
+                        "user=%s | amount=%s | order=%s",
                         result["telegram_id"],
                         result["amount"],
                         order_id
@@ -687,8 +716,8 @@ def midtrans_webhook():
                 elif result["already_completed"]:
 
                     logger.info(
-                        "Webhook duplikat diabaikan | "
-                        "order=%s",
+                        "Webhook duplikat "
+                        "diabaikan | order=%s",
                         order_id
                     )
 
@@ -706,6 +735,10 @@ def midtrans_webhook():
                     "message":
                         "Failed to process payment"
                 }), 500
+
+        # -------------------------------------------------
+        # EXPIRED / CANCEL
+        # -------------------------------------------------
 
         elif status in [
             "expire",
@@ -744,8 +777,8 @@ def midtrans_webhook():
         else:
 
             logger.info(
-                "Webhook %s diterima tetapi "
-                "belum sukses. status=%s",
+                "Webhook %s diterima "
+                "tetapi belum sukses. status=%s",
                 order_id,
                 status
             )
@@ -757,8 +790,8 @@ def midtrans_webhook():
     except Exception as e:
 
         logger.exception(
-            "Error tidak terduga pada "
-            "webhook Midtrans: %s",
+            "Error tidak terduga "
+            "pada webhook Midtrans: %s",
             e
         )
 
@@ -790,16 +823,14 @@ def health_check():
 
 async def user_start(update_or_query):
 
-    # =====================================================
-    # PENTING:
-    # JANGAN pakai hasattr(..., "message")
-    # karena CallbackQuery juga memiliki .message
-    # =====================================================
+    # -----------------------------------------------------
+    # INI PERBAIKAN UTAMA
+    #
+    # Jangan pakai hasattr(message), karena CallbackQuery
+    # juga memiliki .message.
+    # -----------------------------------------------------
 
-    if isinstance(
-        update_or_query,
-        Update
-    ):
+    if isinstance(update_or_query, Update):
 
         user = update_or_query.effective_user
 
@@ -877,13 +908,10 @@ async def admin_start(update):
 
 
 # =========================================================
-# START
+# START COMMAND
 # =========================================================
 
-async def start(
-    update,
-    context
-):
+async def start(update, context):
 
     user = update.effective_user
 
@@ -893,16 +921,16 @@ async def start(
         user.first_name
     )
 
-    # Pastikan state input deposit bersih
-    context.user_data[
-        "waiting_deposit"
-    ] = False
-
     if is_admin(user.id):
 
         await admin_start(update)
 
     else:
+
+        # Pastikan mode deposit bersih
+        context.chat_data[
+            "waiting_deposit"
+        ] = False
 
         await user_start(update)
 
@@ -917,9 +945,9 @@ async def user_callback(
     context
 ):
 
-    # -----------------------------------------------------
+    # =====================================================
     # CARA
-    # -----------------------------------------------------
+    # =====================================================
 
     if query.data == "cara":
 
@@ -963,18 +991,11 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             )
         )
 
-        return
-
-    # -----------------------------------------------------
+    # =====================================================
     # ORDER
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "order":
-
-        # Pastikan mode input deposit mati
-        context.user_data[
-            "waiting_deposit"
-        ] = False
 
         await query.edit_message_text(
             "📱 <b>Order OTP</b>\n\n"
@@ -990,16 +1011,14 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    # -----------------------------------------------------
+    # =====================================================
     # DEPOSIT
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "user_deposit":
 
         # Aktifkan mode menunggu nominal
-        context.user_data[
+        context.chat_data[
             "waiting_deposit"
         ] = True
 
@@ -1014,7 +1033,9 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             "10000\n"
             "25000\n\n"
             "Ketik nominal sekarang.",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1025,39 +1046,29 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    # -----------------------------------------------------
-    # CANCEL DEPOSIT INPUT
-    # -----------------------------------------------------
+    # =====================================================
+    # CANCEL DEPOSIT
+    # =====================================================
 
     elif query.data == "cancel_deposit":
 
-        # MATIKAN STATE INPUT
-        context.user_data[
+        # MATIKAN MODE INPUT
+        context.chat_data[
             "waiting_deposit"
         ] = False
 
-        # Bersihkan state lain jika ada
-        context.user_data.pop(
-            "waiting_deposit",
-            None
+        await query.edit_message_text(
+            "❌ <b>Deposit dibatalkan.</b>\n\n"
+            "Tidak ada nominal yang diproses.",
+            parse_mode="HTML",
+            reply_markup=user_menu()
         )
 
-        await user_start(query)
-
-        return
-
-    # -----------------------------------------------------
+    # =====================================================
     # HISTORY ORDER
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "user_history_order":
-
-        # Pastikan tidak sedang menunggu nominal
-        context.user_data[
-            "waiting_deposit"
-        ] = False
 
         orders = get_order_history(
             user_id
@@ -1075,10 +1086,12 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             text = (
                 "📋 <b>5 Histori Order Terakhir</b>\n\n"
                 +
-                "\n".join([
-                    f"├ {o['order_id']} - {o['status']}"
-                    for o in orders
-                ])
+                "\n".join(
+                    [
+                        f"├ {o['order_id']} - {o['status']}"
+                        for o in orders
+                    ]
+                )
             )
 
         await query.edit_message_text(
@@ -1094,17 +1107,11 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    # -----------------------------------------------------
+    # =====================================================
     # HISTORY DEPOSIT
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "user_history_depo":
-
-        context.user_data[
-            "waiting_deposit"
-        ] = False
 
         deposits = get_deposit_history(
             user_id
@@ -1122,12 +1129,14 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             text = (
                 "📜 <b>5 Histori Deposit Terakhir</b>\n\n"
                 +
-                "\n".join([
-                    f"├ {d['deposit_id']} - "
-                    f"{format_rupiah(d['amount'])} - "
-                    f"{d['status']}"
-                    for d in deposits
-                ])
+                "\n".join(
+                    [
+                        f"├ {d['deposit_id']} - "
+                        f"{format_rupiah(d['amount'])} - "
+                        f"{d['status']}"
+                        for d in deposits
+                    ]
+                )
             )
 
         await query.edit_message_text(
@@ -1143,21 +1152,13 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    # -----------------------------------------------------
+    # =====================================================
     # REFERRAL
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "referral":
 
-        context.user_data[
-            "waiting_deposit"
-        ] = False
-
-        username = (
-            query.from_user.username
-        )
+        username = query.from_user.username
 
         if username:
 
@@ -1170,8 +1171,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
         else:
 
             ref_link = (
-                "Username Telegram kamu belum "
-                "diatur."
+                "Username Telegram kamu belum diatur."
             )
 
         await query.edit_message_text(
@@ -1179,7 +1179,9 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             f"Link kamu:\n"
             f"<code>{ref_link}</code>\n\n"
             f"Dapet 10% dari deposit teman",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1190,22 +1192,18 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    # -----------------------------------------------------
+    # =====================================================
     # CS
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "cs":
-
-        context.user_data[
-            "waiting_deposit"
-        ] = False
 
         await query.edit_message_text(
             "💬 <b>Contact CS</b>\n\n"
             "Hubungi: @AdminLu",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1216,17 +1214,11 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    # -----------------------------------------------------
+    # =====================================================
     # CEK DEPOSIT
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "cek_deposit":
-
-        context.user_data[
-            "waiting_deposit"
-        ] = False
 
         with get_db() as db:
 
@@ -1249,7 +1241,9 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             await query.edit_message_text(
                 "❌ Kamu tidak punya "
                 "deposit pending.",
+
                 parse_mode="HTML",
+
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -1265,6 +1259,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
         await query.edit_message_text(
             "⏳ Mengecek pembayaran "
             "ke Midtrans...",
+
             parse_mode="HTML"
         )
 
@@ -1278,7 +1273,9 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             await query.edit_message_text(
                 "❌ Gagal cek ke Midtrans.\n\n"
                 "Coba lagi beberapa detik.",
+
                 parse_mode="HTML",
+
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -1325,7 +1322,9 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                     f"<b>{format_rupiah(result['amount'])}</b>\n"
                     f"💳 Saldo sekarang: "
                     f"<b>{format_rupiah(result['new_balance'])}</b>",
+
                     parse_mode="HTML",
+
                     reply_markup=InlineKeyboardMarkup([
                         [
                             InlineKeyboardButton(
@@ -1338,6 +1337,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
 
                 send_telegram_message(
                     result["telegram_id"],
+
                     f"✅ <b>Deposit berhasil!</b>\n\n"
                     f"💰 Deposit: "
                     f"<b>{format_rupiah(result['amount'])}</b>\n"
@@ -1351,11 +1351,13 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             elif result["already_completed"]:
 
                 await query.edit_message_text(
-                    f"✅ <b>Deposit sudah berhasil "
-                    f"diproses.</b>\n\n"
-                    f"💰 Saldo sekarang: "
+                    "✅ <b>Deposit sudah "
+                    "berhasil diproses.</b>\n\n"
+                    "💰 Saldo sekarang: "
                     f"<b>{format_rupiah(get_balance(user_id))}</b>",
+
                     parse_mode="HTML",
+
                     reply_markup=InlineKeyboardMarkup([
                         [
                             InlineKeyboardButton(
@@ -1365,8 +1367,6 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                         ]
                     ])
                 )
-
-            return
 
         # -------------------------------------------------
         # EXPIRED / CANCEL
@@ -1386,13 +1386,17 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                     WHERE deposit_id = %s
                     AND status = 'PENDING'
                     """,
-                    (deposits["deposit_id"],)
+                    (
+                        deposits["deposit_id"],
+                    )
                 )
 
             await query.edit_message_text(
                 "❌ <b>Deposit Expired</b>\n\n"
                 "Silakan buat invoice baru.",
+
                 parse_mode="HTML",
+
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -1409,24 +1413,20 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                 ])
             )
 
-            return
-
         # -------------------------------------------------
         # BELUM BAYAR
         # -------------------------------------------------
 
         else:
 
-            status_text = str(
-                transaction_status or "UNKNOWN"
-            ).upper()
-
             await query.edit_message_text(
-                f"⏳ <b>Status: {status_text}</b>\n\n"
-                f"Belum dibayar.\n\n"
-                f"Klik <b>Cek Lagi</b> setelah "
-                f"pembayaran selesai.",
+                f"⏳ <b>Status: "
+                f"{str(transaction_status).upper()}</b>\n\n"
+                "Belum dibayar.\n"
+                "Klik cek lagi setelah bayar.",
+
                 parse_mode="HTML",
+
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -1443,30 +1443,18 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                 ])
             )
 
-            return
-
-    # -----------------------------------------------------
+    # =====================================================
     # USER HOME
-    # -----------------------------------------------------
+    # =====================================================
 
     elif query.data == "user_home":
 
-        # INI PENTING
-        # Matikan mode input deposit
-        context.user_data[
+        # PASTIKAN MODE INPUT DEPOSIT MATI
+        context.chat_data[
             "waiting_deposit"
         ] = False
 
-        # Bersihkan state
-        context.user_data.pop(
-            "waiting_deposit",
-            None
-        )
-
-        # Edit pesan yang sedang dibuka
         await user_start(query)
-
-        return
 
 
 # =========================================================
@@ -1484,10 +1472,6 @@ async def admin_callback(query):
         ]
     ]
 
-    # -----------------------------------------------------
-    # USERS
-    # -----------------------------------------------------
-
     if query.data == "admin_users":
 
         with get_db() as db:
@@ -1502,15 +1486,13 @@ async def admin_callback(query):
         await query.edit_message_text(
             f"👥 <b>USERS</b>\n\n"
             f"Total user: <b>{total}</b>",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 back
             )
         )
-
-    # -----------------------------------------------------
-    # DEPOSITS
-    # -----------------------------------------------------
 
     elif query.data == "admin_deposits":
 
@@ -1544,15 +1526,13 @@ async def admin_callback(query):
             f"Total transaksi: <b>{total}</b>\n"
             f"Pending: <b>{pending}</b>\n"
             f"Success: <b>{success}</b>",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 back
             )
         )
-
-    # -----------------------------------------------------
-    # ORDERS
-    # -----------------------------------------------------
 
     elif query.data == "admin_orders":
 
@@ -1586,30 +1566,26 @@ async def admin_callback(query):
             f"Total order: <b>{total}</b>\n"
             f"Pending: <b>{pending}</b>\n"
             f"Success: <b>{success}</b>",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 back
             )
         )
-
-    # -----------------------------------------------------
-    # PROVIDER
-    # -----------------------------------------------------
 
     elif query.data == "admin_provider":
 
         await query.edit_message_text(
             "💰 <b>PROVIDER</b>\n\n"
             "Provider API belum terhubung.",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 back
             )
         )
-
-    # -----------------------------------------------------
-    # STATISTICS
-    # -----------------------------------------------------
 
     elif query.data == "admin_stats":
 
@@ -1654,22 +1630,22 @@ async def admin_callback(query):
             f"📦 Orders: <b>{orders}</b>\n"
             f"💰 Total saldo user: "
             f"<b>{format_rupiah(balance)}</b>",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 back
             )
         )
-
-    # -----------------------------------------------------
-    # ADMIN HOME
-    # -----------------------------------------------------
 
     elif query.data == "admin_home":
 
         await query.edit_message_text(
             "👑 <b>ADMIN PANEL</b>\n\n"
             "Pilih menu:",
+
             parse_mode="HTML",
+
             reply_markup=admin_menu()
         )
 
@@ -1688,10 +1664,19 @@ async def button_handler(
     if not query:
         return
 
-    # Jawab callback SEBELUM proses
-    await query.answer()
+    try:
+
+        await query.answer()
+
+    except Exception:
+
+        pass
 
     user_id = query.from_user.id
+
+    # -----------------------------------------------------
+    # ADMIN CALLBACK
+    # -----------------------------------------------------
 
     admin_callbacks = {
         "admin_users",
@@ -1702,20 +1687,20 @@ async def button_handler(
         "admin_home"
     }
 
-    # -----------------------------------------------------
-    # ADMIN
-    # -----------------------------------------------------
-
     if query.data in admin_callbacks:
 
         if not is_admin(user_id):
 
-            # Callback sudah di-answer di atas.
-            # Jangan answer kedua kali.
-            await query.edit_message_text(
-                "❌ Kamu bukan admin.",
-                parse_mode="HTML"
-            )
+            try:
+
+                await query.answer(
+                    "❌ Kamu bukan admin.",
+                    show_alert=True
+                )
+
+            except Exception:
+
+                pass
 
             return
 
@@ -1724,42 +1709,17 @@ async def button_handler(
         return
 
     # -----------------------------------------------------
-    # CANCEL DEPOSIT
+    # BATAL / HOME
     # -----------------------------------------------------
 
-    if query.data == "cancel_deposit":
+    if query.data in [
+        "user_home",
+        "cancel_deposit"
+    ]:
 
-        context.user_data[
+        context.chat_data[
             "waiting_deposit"
         ] = False
-
-        context.user_data.pop(
-            "waiting_deposit",
-            None
-        )
-
-        await user_start(query)
-
-        return
-
-    # -----------------------------------------------------
-    # USER HOME
-    # -----------------------------------------------------
-
-    if query.data == "user_home":
-
-        context.user_data[
-            "waiting_deposit"
-        ] = False
-
-        context.user_data.pop(
-            "waiting_deposit",
-            None
-        )
-
-        await user_start(query)
-
-        return
 
     # -----------------------------------------------------
     # USER CALLBACK
@@ -1784,22 +1744,24 @@ async def text_handler(
     if not update.message:
         return
 
-    # =====================================================
-    # PENTING:
-    # Sekarang pakai user_data,
-    # bukan chat_data.
-    # =====================================================
+    # -----------------------------------------------------
+    # HANYA TERIMA NOMINAL KALAU MODE DEPOSIT AKTIF
+    # -----------------------------------------------------
 
-    if not context.user_data.get(
+    if not context.chat_data.get(
         "waiting_deposit",
         False
     ):
+
         return
 
     user = update.effective_user
 
-    # Matikan state segera
-    context.user_data[
+    # -----------------------------------------------------
+    # MATIKAN MODE SEBELUM PROSES
+    # -----------------------------------------------------
+
+    context.chat_data[
         "waiting_deposit"
     ] = False
 
@@ -1811,7 +1773,7 @@ async def text_handler(
     )
 
     # -----------------------------------------------------
-    # NOMINAL BUKAN ANGKA
+    # VALIDASI ANGKA
     # -----------------------------------------------------
 
     if not text.isdigit():
@@ -1871,13 +1833,12 @@ async def text_handler(
     # -----------------------------------------------------
 
     deposit_id = (
-        "DEP-"
-        +
+        "DEP-" +
         uuid.uuid4().hex[:12].upper()
     )
 
     # -----------------------------------------------------
-    # INSERT PENDING DEPOSIT
+    # INSERT PENDING
     # -----------------------------------------------------
 
     with get_db() as db:
@@ -1892,8 +1853,7 @@ async def text_handler(
                 status,
                 created_at
             )
-            VALUES
-            (%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s)
             """,
             (
                 deposit_id,
@@ -1905,7 +1865,7 @@ async def text_handler(
         )
 
     # -----------------------------------------------------
-    # CREATE MIDTRANS INVOICE
+    # CREATE MIDTRANS
     # -----------------------------------------------------
 
     try:
@@ -1932,7 +1892,7 @@ async def text_handler(
             )
 
         # -------------------------------------------------
-        # SAVE SNAP TOKEN
+        # SAVE TOKEN
         # -------------------------------------------------
 
         with get_db() as db:
@@ -1950,7 +1910,7 @@ async def text_handler(
             )
 
         # -------------------------------------------------
-        # INVOICE BUTTON
+        # PAYMENT BUTTONS
         # -------------------------------------------------
 
         keyboard = [
@@ -1979,16 +1939,26 @@ async def text_handler(
         ]
 
         await update.message.reply_text(
+
             f"💳 <b>Invoice Deposit Dibuat</b>\n\n"
-            f"🧾 ID: <code>{deposit_id}</code>\n"
+
+            f"🧾 ID: "
+            f"<code>{deposit_id}</code>\n"
+
             f"💰 Nominal: "
             f"<b>{format_rupiah(amount)}</b>\n"
+
             f"📌 Status: <b>PENDING</b>\n\n"
-            f"Klik tombol di bawah untuk "
-            f"melakukan pembayaran.\n\n"
+
+            f"Klik tombol di bawah "
+            f"untuk melakukan pembayaran.\n\n"
+
             f"Setelah bayar, klik "
-            f"'Cek Pembayaran' untuk konfirmasi.",
+            f"'Cek Pembayaran' "
+            f"untuk konfirmasi.",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 keyboard
             )
@@ -1999,6 +1969,10 @@ async def text_handler(
         logger.exception(
             "Gagal membuat invoice Midtrans."
         )
+
+        # -------------------------------------------------
+        # MARK FAILED
+        # -------------------------------------------------
 
         with get_db() as db:
 
@@ -2015,8 +1989,8 @@ async def text_handler(
         await update.message.reply_text(
             "❌ <b>Gagal membuat invoice "
             "pembayaran.</b>\n\n"
-            "Silakan coba lagi beberapa saat "
-            "kemudian.",
+            "Silakan coba lagi beberapa "
+            "saat kemudian.",
             parse_mode="HTML"
         )
 
@@ -2044,7 +2018,7 @@ async def admin_add_balance(
 
         await update.message.reply_text(
             "Format:\n\n"
-            "/addbalance TELEGRAM_ID NOMINAL\n\n"
+            "/addbalance TELEGRAM_ID NOMINAL\n"
             "Contoh:\n"
             "/addbalance 123456789 10000"
         )
@@ -2085,8 +2059,7 @@ async def admin_add_balance(
             amount=amount,
             transaction_type="ADMIN_TOPUP",
             reference=(
-                "ADMIN-"
-                +
+                "ADMIN-" +
                 uuid.uuid4().hex[:8].upper()
             ),
             description=(
@@ -2103,10 +2076,16 @@ async def admin_add_balance(
         return
 
     await update.message.reply_text(
-        f"✅ <b>Saldo berhasil ditambahkan.</b>\n\n"
-        f"👤 User: <code>{telegram_id}</code>\n"
+
+        f"✅ <b>Saldo berhasil "
+        f"ditambahkan.</b>\n\n"
+
+        f"👤 User: "
+        f"<code>{telegram_id}</code>\n"
+
         f"💰 Saldo baru: "
         f"<b>{format_rupiah(new_balance)}</b>",
+
         parse_mode="HTML"
     )
 
@@ -2178,7 +2157,7 @@ def run():
     )
 
     # -----------------------------------------------------
-    # ADMIN ADD BALANCE
+    # ADD BALANCE
     # -----------------------------------------------------
 
     application.add_handler(
@@ -2189,7 +2168,7 @@ def run():
     )
 
     # -----------------------------------------------------
-    # CALLBACK
+    # CALLBACK BUTTON
     # -----------------------------------------------------
 
     application.add_handler(
@@ -2199,12 +2178,13 @@ def run():
     )
 
     # -----------------------------------------------------
-    # TEXT
+    # TEXT / DEPOSIT NOMINAL
     # -----------------------------------------------------
 
     application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT &
+            ~filters.COMMAND,
             text_handler
         )
     )
@@ -2222,17 +2202,13 @@ def run():
     )
 
     # -----------------------------------------------------
-    # FLASK + TELEGRAM BARENG
+    # FLASK + TELEGRAM
     # -----------------------------------------------------
 
     threading.Thread(
         target=run_flask,
         daemon=True
     ).start()
-
-    # -----------------------------------------------------
-    # POLLING
-    # -----------------------------------------------------
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
