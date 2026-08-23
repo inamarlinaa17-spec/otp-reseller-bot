@@ -53,6 +53,7 @@ def init_database():
                 username TEXT,
                 first_name TEXT,
                 balance BIGINT NOT NULL DEFAULT 0,
+                last_checkin_at TEXT,
                 created_at TEXT NOT NULL
             )
         """)
@@ -125,6 +126,11 @@ def init_database():
         # =====================================================
         # MIGRATION
         # =====================================================
+
+        db.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS last_checkin_at TEXT
+        """)
 
         db.execute("""
             ALTER TABLE orders
@@ -1128,4 +1134,118 @@ def refund_order(
                 order[
                     "sell_price"
                 ]
+        }
+
+
+# =========================================================
+# CHECK-IN / SALDO GRATIS
+# =========================================================
+
+def get_checkin_status(telegram_id):
+    """Return deposit eligibility and last check-in timestamp."""
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT
+                u.last_checkin_at,
+                COALESCE((
+                    SELECT SUM(amount)
+                    FROM deposits
+                    WHERE telegram_id = %s
+                      AND status = 'SUCCESS'
+                ), 0) AS total_success_deposit,
+                EXISTS(
+                    SELECT 1 FROM deposits
+                    WHERE telegram_id = %s
+                      AND status = 'SUCCESS'
+                      AND amount >= 10000
+                ) AS has_min_deposit
+            FROM users u
+            WHERE u.telegram_id = %s
+            """,
+            (telegram_id, telegram_id, telegram_id)
+        ).fetchone()
+        return row or {"last_checkin_at": None, "total_success_deposit": 0, "has_min_deposit": False}
+
+
+def claim_checkin(telegram_id, reward):
+    """Atomically claim a daily check-in reward.
+
+    Eligibility requires at least Rp10.000 in successful lifetime deposits
+    and 24 hours since the previous claim.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    reward = int(reward)
+    if reward < 1:
+        raise ValueError("Reward tidak valid.")
+
+    with get_db() as db:
+        user = db.execute(
+            """SELECT balance, last_checkin_at FROM users
+               WHERE telegram_id = %s FOR UPDATE""",
+            (telegram_id,)
+        ).fetchone()
+        if not user:
+            raise ValueError("User belum terdaftar.")
+
+        deposit_stats = db.execute(
+            """SELECT
+                    COALESCE(SUM(amount), 0) AS total,
+                    EXISTS(SELECT 1 FROM deposits d2
+                           WHERE d2.telegram_id = %s
+                             AND d2.status = 'SUCCESS'
+                             AND d2.amount >= 10000) AS eligible
+               FROM deposits
+               WHERE telegram_id = %s AND status = 'SUCCESS'""",
+            (telegram_id, telegram_id)
+        ).fetchone()
+        total = deposit_stats["total"]
+        if not deposit_stats["eligible"]:
+            return {"ok": False, "reason": "MIN_DEPOSIT", "total_deposit": int(total or 0)}
+
+        now_dt = datetime.now(timezone.utc)
+        last_raw = user.get("last_checkin_at")
+        if last_raw:
+            try:
+                last_dt = datetime.fromisoformat(str(last_raw).replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                elapsed = now_dt - last_dt
+                if elapsed < timedelta(hours=24):
+                    remaining = timedelta(hours=24) - elapsed
+                    total_seconds = max(0, int(remaining.total_seconds()))
+                    return {
+                        "ok": False,
+                        "reason": "COOLDOWN",
+                        "remaining_seconds": total_seconds,
+                        "last_checkin_at": last_dt.isoformat(),
+                    }
+            except Exception:
+                pass
+
+        before = int(user["balance"] or 0)
+        after = before + reward
+        now_iso = now_dt.isoformat()
+        db.execute(
+            "UPDATE users SET balance = %s, last_checkin_at = %s WHERE telegram_id = %s",
+            (after, now_iso, telegram_id)
+        )
+        db.execute(
+            """INSERT INTO ledger
+               (telegram_id, amount, balance_before, balance_after,
+                transaction_type, reference, description, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                telegram_id, reward, before, after,
+                "CHECKIN", f"CHECKIN:{telegram_id}:{now_iso}",
+                "Saldo gratis check-in 24 jam", now_iso
+            )
+        )
+        return {
+            "ok": True,
+            "reward": reward,
+            "balance": after,
+            "total_deposit": int(total or 0),
+            "last_checkin_at": now_iso,
         }

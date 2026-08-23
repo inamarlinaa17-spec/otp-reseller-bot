@@ -8,6 +8,8 @@ import hashlib
 import hmac
 import asyncio
 import pytz
+import random
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 from datetime import datetime
@@ -54,6 +56,8 @@ from database import (
     get_deposit_history,
     get_order_history,
     create_pending_order,
+    get_checkin_status,
+    claim_checkin,
     save_provider_order,
     get_order,
     mark_order_success,
@@ -350,6 +354,13 @@ def user_menu():
                 callback_data="referral"
             ),
 
+            InlineKeyboardButton(
+                "🎁 Saldo Gratis",
+                callback_data="checkin"
+            )
+        ],
+
+        [
             InlineKeyboardButton(
                 "💬 Contact CS",
                 callback_data="cs"
@@ -668,12 +679,11 @@ def complete_deposit_payment(
                 "User deposit tidak ditemukan."
             )
 
-        before = user["balance"]
-
-        after = (
-            before +
-            deposit["amount"]
-        )
+        before = int(user["balance"] or 0)
+        deposit_amount = int(deposit["amount"])
+        bonus = int(deposit_amount * 0.10) if deposit_amount >= 100000 else 0
+        after_deposit = before + deposit_amount
+        after = after_deposit + bonus
 
         db.execute(
             """
@@ -681,38 +691,37 @@ def complete_deposit_payment(
             SET balance = %s
             WHERE telegram_id = %s
             """,
-            (
-                after,
-                deposit["telegram_id"]
-            )
+            (after, deposit["telegram_id"])
         )
 
         db.execute(
             """
             INSERT INTO ledger
-            (
-                telegram_id,
-                amount,
-                balance_before,
-                balance_after,
-                transaction_type,
-                reference,
-                description,
-                created_at
-            )
+            (telegram_id, amount, balance_before, balance_after,
+             transaction_type, reference, description, created_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
-                deposit["telegram_id"],
-                deposit["amount"],
-                before,
-                after,
-                "DEPOSIT",
-                payment_reference or deposit_id,
-                f"Deposit Midtrans {deposit_id}",
-                now()
+                deposit["telegram_id"], deposit_amount, before, after_deposit,
+                "DEPOSIT", payment_reference or deposit_id,
+                f"Deposit Midtrans {deposit_id}", now()
             )
         )
+
+        if bonus > 0:
+            db.execute(
+                """
+                INSERT INTO ledger
+                (telegram_id, amount, balance_before, balance_after,
+                 transaction_type, reference, description, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    deposit["telegram_id"], bonus, after_deposit, after,
+                    "DEPOSIT_BONUS", deposit_id,
+                    f"Bonus 10% deposit {deposit_id}", now()
+                )
+            )
 
         db.execute(
             """
@@ -745,6 +754,12 @@ def complete_deposit_payment(
 
             "amount":
                 deposit["amount"],
+
+            "bonus":
+                bonus,
+
+            "credited":
+                deposit["amount"] + bonus,
 
             "new_balance":
                 after
@@ -2430,6 +2445,127 @@ async def show_product_page(
         )
 
     )
+
+
+# =========================================================
+# COMMAND MENU / CHECK-IN
+# =========================================================
+
+BOT_COMMANDS = [
+    ("start", "Menu Utama Bot"),
+    ("server1", "List Layanan Server1"),
+    ("server2", "List Layanan Server2"),
+    ("server3", "List Layanan Server3"),
+    ("multiserver", "List Layanan Multi Server"),
+    ("deposit", "Menu Deposit"),
+    ("checkin", "Saldo Gratis"),
+]
+
+
+def _service_keyboard_sync(services, server, page=0):
+    total_pages = max(1, (len(services) + SERVICES_PER_PAGE - 1) // SERVICES_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    page_items = services[page * SERVICES_PER_PAGE:(page + 1) * SERVICES_PER_PAGE]
+    keyboard = []
+    for i in range(0, len(page_items), 2):
+        row = []
+        for code, label in page_items[i:i + 2]:
+            row.append(InlineKeyboardButton(label, callback_data=f"otp_service:{server}:{code}"))
+        keyboard.append(row)
+    keyboard.append([
+        InlineKeyboardButton("◀️", callback_data=f"otp_services:{server}:{max(0, page-1)}"),
+        InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="otp_noop"),
+        InlineKeyboardButton("▶️", callback_data=f"otp_services:{server}:{min(total_pages-1, page+1)}"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("🔎 Search", callback_data=f"otp_search:{server}"),
+        InlineKeyboardButton("↩️ Server", callback_data="order"),
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def command_server(update, context, server):
+    user = update.effective_user
+    create_user(user.id, user.username, user.first_name)
+    try:
+        services = await asyncio.wait_for(
+            asyncio.to_thread(get_service_catalog, server), timeout=15
+        )
+    except Exception:
+        services = list(OTP_SERVICES)
+    await update.message.reply_text(
+        "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
+        f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"
+        "Pilih layanan OTP:",
+        parse_mode="HTML",
+        reply_markup=_service_keyboard_sync(services, server, 0),
+    )
+
+
+async def command_deposit(update, context):
+    context.chat_data["waiting_deposit"] = True
+    await update.message.reply_text(
+        "💳 <b>Deposit Saldo</b>\n\n"
+        "Masukkan nominal deposit.\n\n"
+        "Minimum: <b>Rp1.000</b>\n"
+        "Kelipatan: <b>Rp1.000</b>\n\n"
+        "🎁 <b>Bonus deposit:</b> setiap deposit <b>Rp100.000 atau lebih</b> mendapat bonus saldo <b>10%</b> secara otomatis.\n\n"
+        "Contoh: <code>10000</code> atau <code>100000</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]]),
+    )
+
+
+def _format_remaining(seconds):
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours} jam {minutes} menit"
+
+
+async def perform_checkin(update, context):
+    user = update.effective_user
+    create_user(user.id, user.username, user.first_name)
+    status = get_checkin_status(user.id)
+    total_deposit = int(status.get("total_success_deposit") or 0)
+    if not status.get("has_min_deposit"):
+        text = (
+            "🎁 <b>SALDO GRATIS</b>\n\n"
+            "Kamu belum memenuhi syarat check-in.\n\n"
+            "💳 Minimal salah satu deposit berhasil: <b>Rp10.000</b>\n"
+            f"📊 Total deposit kamu: <b>{format_rupiah(total_deposit)}</b>\n\n"
+            "Setelah memenuhi minimal deposit, kamu bisa check-in setiap 24 jam."
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("💳 Deposit", callback_data="user_deposit")]])
+    else:
+        reward = random.randint(50, 110) if not status.get("last_checkin_at") else random.randint(50, 100)
+        result = await asyncio.to_thread(claim_checkin, user.id, reward)
+        if result.get("ok"):
+            text = (
+                "🎉 <b>CHECK-IN BERHASIL!</b>\n\n"
+                f"🎁 Saldo gratis: <b>{format_rupiah(result['reward'])}</b>\n"
+                f"💰 Saldo sekarang: <b>{format_rupiah(result['balance'])}</b>\n\n"
+                "⏰ Check-in berikutnya tersedia <b>24 jam</b> setelah check-in ini."
+            )
+        elif result.get("reason") == "COOLDOWN":
+            text = (
+                "⏳ <b>CHECK-IN BELUM TERSEDIA</b>\n\n"
+                f"Coba lagi dalam sekitar <b>{_format_remaining(result['remaining_seconds'])}</b>.\n\n"
+                "Timer dihitung 24 jam sejak check-in terakhir."
+            )
+        else:
+            text = "❌ Check-in belum bisa diproses. Silakan coba lagi."
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]])
+    if isinstance(update, Update):
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+    else:
+        await update.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def post_init(application):
+    await application.bot.set_my_commands([
+        __import__('telegram').BotCommand(command, description)
+        for command, description in BOT_COMMANDS
+    ])
 
 
 # =========================================================
@@ -4367,6 +4503,48 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         return
 
     # =====================================================
+    # CHECK-IN
+    # =====================================================
+
+    if data == "checkin":
+        # Reuse the same atomic claim logic as /checkin.
+        class _FakeUpdate:
+            def __init__(self, q):
+                self.message = None
+                self.effective_user = q.from_user
+                self._query = q
+            async def edit_message_text(self, *args, **kwargs):
+                return await self._query.edit_message_text(*args, **kwargs)
+
+        status = get_checkin_status(user_id)
+        total_deposit = int(status.get("total_success_deposit") or 0)
+        if not status.get("has_min_deposit"):
+            await query.edit_message_text(
+                "🎁 <b>SALDO GRATIS</b>\n\n"
+                "💳 Minimal salah satu deposit berhasil: <b>Rp10.000</b>\n"
+                f"📊 Total deposit kamu: <b>{format_rupiah(total_deposit)}</b>\n\n"
+                "Lakukan deposit minimal Rp10.000 terlebih dahulu untuk membuka fitur check-in.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Deposit", callback_data="user_deposit")]])
+            )
+            return
+        reward = random.randint(50, 110) if not status.get("last_checkin_at") else random.randint(50, 100)
+        result = await asyncio.to_thread(claim_checkin, user_id, reward)
+        if result.get("ok"):
+            text = (
+                "🎉 <b>CHECK-IN BERHASIL!</b>\n\n"
+                f"🎁 Saldo gratis: <b>{format_rupiah(result['reward'])}</b>\n"
+                f"💰 Saldo sekarang: <b>{format_rupiah(result['balance'])}</b>\n\n"
+                "⏰ Check-in berikutnya tersedia <b>24 jam</b> setelah check-in ini."
+            )
+        elif result.get("reason") == "COOLDOWN":
+            text = "⏳ <b>CHECK-IN BELUM TERSEDIA</b>\n\n" + f"Coba lagi dalam sekitar <b>{_format_remaining(result['remaining_seconds'])}</b>."
+        else:
+            text = "❌ Check-in belum bisa diproses. Silakan coba lagi."
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]))
+        return
+
+    # =====================================================
     # REFERRAL
     # =====================================================
 
@@ -4566,11 +4744,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                     "✅ <b>Deposit Berhasil!</b>\n\n"
 
-                    f"💰 Masuk: "
-                    f"<b>{format_rupiah(result['amount'])}</b>\n"
-
-                    f"💳 Saldo sekarang: "
-                    f"<b>{format_rupiah(result['new_balance'])}</b>",
+                    f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
+                    + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get('bonus', 0) else "")
+                    + f"💳 Total masuk: <b>{format_rupiah(result['credited'])}</b>\n"
+                    + f"💳 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>",
 
                     parse_mode="HTML",
 
@@ -5633,6 +5810,7 @@ def run():
         Application
         .builder()
         .token(BOT_TOKEN)
+        .post_init(post_init)
         .build()
 
     )
@@ -5662,6 +5840,13 @@ def run():
         )
 
     )
+
+    application.add_handler(CommandHandler("server1", lambda u, c: command_server(u, c, "5sim")))
+    application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "smspool")))
+    application.add_handler(CommandHandler("server3", lambda u, c: command_server(u, c, "smsman")))
+    application.add_handler(CommandHandler("multiserver", lambda u, c: command_server(u, c, "aggregator")))
+    application.add_handler(CommandHandler("deposit", command_deposit))
+    application.add_handler(CommandHandler("checkin", perform_checkin))
 
     # -----------------------------------------------------
     # CALLBACK
