@@ -1483,7 +1483,8 @@ def _smspool_country_name_map():
             if not isinstance(item, dict):
                 continue
             key = (
-                item.get("id")
+                item.get("ID")
+                or item.get("id")
                 or item.get("country")
                 or item.get("code")
             )
@@ -1535,11 +1536,63 @@ async def show_service_country_page(
         service.title()
     )
 
-    items = await asyncio.to_thread(
-        get_service_countries,
-        server,
-        service
-    )
+    try:
+        items = await asyncio.wait_for(
+            asyncio.to_thread(
+                get_service_countries,
+                server,
+                service
+            ),
+            timeout=20
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "OTP stock timeout: server=%s service=%s",
+            server,
+            service
+        )
+        await query.edit_message_text(
+            "⚠️ <b>Provider terlalu lama merespons.</b>\n\n"
+            f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
+            f"📱 Layanan: <b>{service_label}</b>\n\n"
+            "Silakan tekan Refresh dan coba lagi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data=f"otp_service:{server}:{service}"
+                )],
+                [InlineKeyboardButton(
+                    "⬅️ Pilih Layanan",
+                    callback_data=f"otp_server:{server}"
+                )]
+            ])
+        )
+        return
+    except Exception as error:
+        logger.exception(
+            "OTP stock error: server=%s service=%s",
+            server,
+            service
+        )
+        await query.edit_message_text(
+            "⚠️ <b>Gagal mengambil stok provider.</b>\n\n"
+            f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
+            f"📱 Layanan: <b>{service_label}</b>\n\n"
+            "Periksa API provider atau tekan Refresh.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data=f"otp_service:{server}:{service}"
+                )],
+                [InlineKeyboardButton(
+                    "⬅️ Pilih Layanan",
+                    callback_data=f"otp_server:{server}"
+                )]
+            ])
+        )
+        return
 
     # Indonesia diprioritaskan
     items.sort(
