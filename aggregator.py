@@ -7,6 +7,7 @@ from smspool import (
     find_service as find_smspool_service,
     get_all_countries as get_smspool_countries,
     get_all_services as get_smspool_services,
+    get_suggested_countries as get_smspool_suggested_countries,
 )
 from smsman import (
     get_country_items as get_smsman_country_items,
@@ -14,6 +15,7 @@ from smsman import (
     find_country as find_smsman_country,
     find_application as find_smsman_application,
     get_applications as get_smsman_applications,
+    _price_to_usd as smsman_price_to_usd,
 )
 
 logger = logging.getLogger(__name__)
@@ -262,10 +264,26 @@ def _resolve_smspool_service(service):
                 return found
         except Exception:
             continue
+
+    # Raw-catalog fallback; SMSPool permits either ID or service name in
+    # /sms/all_stock, so a resolved name is enough for the quote request.
+    try:
+        target = _canonical_service_key(service)
+        for item in get_smspool_services() or []:
+            if not isinstance(item, dict):
+                continue
+            sid = item.get("ID") or item.get("id") or item.get("service_id")
+            vals = [item.get("name"), item.get("service"), item.get("title")]
+            for value in vals:
+                if value and _canonical_service_key(value) == target:
+                    return {"id": sid, "name": str(item.get("name") or value)}
+    except Exception:
+        logger.exception("[AGGREGATOR] SMSPool raw service resolution failed: %s", service)
     return None
 
 
 def _resolve_smsman_service(service):
+    # First use the provider helper.
     for candidate in _service_candidates(service):
         try:
             found = find_smsman_application(candidate)
@@ -273,6 +291,26 @@ def _resolve_smsman_service(service):
                 return found
         except Exception:
             continue
+
+    # Fallback: scan the raw application catalog with the same canonical
+    # normalization used by the aggregator. This catches cases where the
+    # provider exposes e.g. code=wa but name=WhatsApp, or a translated name.
+    try:
+        target = _canonical_service_key(service)
+        for item in get_smsman_applications() or []:
+            if not isinstance(item, dict):
+                continue
+            aid = item.get("id") or item.get("application_id")
+            vals = [item.get("name"), item.get("title"), item.get("code"), item.get("service")]
+            for value in vals:
+                if value and _canonical_service_key(value) == target:
+                    return {
+                        "id": str(aid),
+                        "name": str(item.get("name") or value),
+                        "code": str(item.get("code") or value),
+                    }
+    except Exception:
+        logger.exception("[AGGREGATOR] SMS-Man raw service resolution failed: %s", service)
     return None
 
 
@@ -350,14 +388,26 @@ def _5sim_all_quotes(service):
 
 
 def _smspool_all_quotes(service):
+    """Fetch SMSPool stock for a canonical service.
+
+    SMSPool accepts either the service ID or service name.  Prefer the
+    resolved service name because it is less brittle when the provider
+    changes numeric IDs.  If /sms/all_stock returns no rows, fall back to
+    /request/suggested_countries so a valid service is not incorrectly
+    reported as unavailable.
+    """
     found = _resolve_smspool_service(service)
-    lookup_service = found.get("id") if found else service
+    lookup_service = (
+        found.get("name")
+        if found and found.get("name")
+        else (found.get("id") if found else service)
+    )
 
     data = get_smspool_prices(service=lookup_service)
     country_names = _smspool_country_map()
     quotes = []
 
-    def add_row(cid, value, fallback_name=None, pool=None):
+    def add_row(cid, value, fallback_name=None, pool=None, allow_zero_stock=False):
         if not isinstance(value, dict):
             return
 
@@ -371,7 +421,7 @@ def _smspool_all_quotes(service):
             or value.get("count")
             or value.get("available")
         )
-        if stock <= 0 and cost > 0:
+        if stock <= 0 and allow_zero_stock and cost > 0:
             stock = 1
         if cost <= 0 or stock <= 0 or cid is None:
             return
@@ -409,28 +459,26 @@ def _smspool_all_quotes(service):
                 or item.get("country_code"),
                 item,
             )
-        return quotes
 
-    if not isinstance(data, dict):
-        return quotes
+    elif isinstance(data, dict):
+        # Tolerate {country: {...}} and {country: {pool: {...}}}.
+        for country_id, country_data in data.items():
+            if not isinstance(country_data, dict):
+                continue
 
-    # Be tolerant of {country: {pool/service: {price...}}} responses.
-    for country_id, country_data in data.items():
-        if not isinstance(country_data, dict):
-            continue
+            direct_cost = (
+                country_data.get("cost")
+                or country_data.get("price")
+                or country_data.get("amount")
+            )
+            if direct_cost is not None:
+                add_row(country_id, country_data)
+                continue
 
-        direct_cost = (
-            country_data.get("cost")
-            or country_data.get("price")
-            or country_data.get("amount")
-        )
-        if direct_cost is not None:
-            add_row(country_id, country_data)
-            continue
-
-        candidates = []
-        for pool, nested in country_data.items():
-            if isinstance(nested, dict):
+            candidates = []
+            for pool, nested in country_data.items():
+                if not isinstance(nested, dict):
+                    continue
                 cost = _num(
                     nested.get("cost")
                     or nested.get("price")
@@ -443,50 +491,116 @@ def _smspool_all_quotes(service):
                 )
                 if cost > 0 and stock > 0:
                     candidates.append((cost, stock, pool, nested))
+            if candidates:
+                _, _, pool, nested = min(candidates, key=lambda x: x[0])
+                add_row(country_id, nested, pool=pool)
 
-        if candidates:
-            _, _, pool, nested = min(candidates, key=lambda x: x[0])
-            add_row(country_id, nested, pool=pool)
+    if quotes:
+        return quotes
+
+    # Fallback: suggested countries returns a price even when all_stock is
+    # temporarily unavailable. It does not expose stock count, so mark it
+    # as 1 only as an availability indicator.
+    try:
+        suggested = get_smspool_suggested_countries(lookup_service)
+        if isinstance(suggested, list):
+            for item in suggested:
+                if not isinstance(item, dict):
+                    continue
+                add_row(
+                    item.get("country_id") or item.get("country") or item.get("ID"),
+                    {
+                        "price": item.get("price") or item.get("cost"),
+                        "stock": 1,
+                        "country_name": item.get("name") or item.get("country_name") or item.get("short_name"),
+                    },
+                    allow_zero_stock=True,
+                )
+    except Exception:
+        logger.exception("[AGGREGATOR] SMSPool suggested countries fallback failed")
 
     return quotes
 
 
 def _smsman_all_quotes(service):
+    """Fetch SMS-Man prices using the documented API v2.0 shape."""
     target_app = _resolve_smsman_service(service)
     if not target_app:
+        logger.warning("[AGGREGATOR] SMS-Man service not found: %s", service)
         return []
 
-    # get_country_items(service) already parses the v2 get-prices response.
-    # Pass the provider's application ID/name so the lookup is unambiguous.
-    items = get_smsman_country_items(
-        target_app.get("code")
-        or target_app.get("name")
-        or target_app.get("id")
-    )
+    app_id = target_app.get("id")
+    app_code = target_app.get("code") or service
+    apps = [app_id, app_code, target_app.get("name")]
 
+    countries = get_smsman_countries()
+    data = get_smsman_country_items(app_code)
     quotes = []
-    for item in items:
+
+    # First use the already-normalized helper used by Server 3.
+    for item in data or []:
         cost = _num(item.get("cost"))
         stock = _int(item.get("stock"))
         cid = item.get("country_id") or item.get("country")
-        if not cid or cost <= 0 or stock <= 0:
+        if cid is None or cost <= 0 or stock <= 0:
             continue
-
         quotes.append({
             "provider": "smsman",
-            "country": str(cid),  # provider-specific country ID
+            "country": str(cid),
             "country_name": str(item.get("name") or item.get("country") or cid),
-            "service": str(
-                target_app.get("code")
-                or target_app.get("id")
-                or service
-            ),
+            "service": str(app_code),
             "service_name": str(service),
             "operator": "AUTO",
             "pool": None,
             "cost_usd": cost,
             "stock": stock,
         })
+
+    if quotes:
+        return quotes
+
+    # Fallback parser for any API response shape not handled by the helper.
+    try:
+        from smsman import get_prices as get_smsman_prices
+        prices = get_smsman_prices()
+        country_names = {}
+        for c in countries or []:
+            if not isinstance(c, dict):
+                continue
+            cid = c.get("id") or c.get("country_id")
+            if cid is not None:
+                country_names[str(cid)] = str(c.get("title") or c.get("name_en") or c.get("name") or cid)
+
+        if isinstance(prices, dict):
+            for cid, country_data in prices.items():
+                if not isinstance(country_data, dict):
+                    continue
+                item = None
+                for candidate in apps:
+                    if candidate is None:
+                        continue
+                    item = country_data.get(str(candidate)) or country_data.get(candidate)
+                    if isinstance(item, dict):
+                        break
+                if not isinstance(item, dict):
+                    continue
+                cost = _num(item.get("cost"))
+                stock = _int(item.get("count") or item.get("numbers"))
+                if cost <= 0 or stock <= 0:
+                    continue
+                quotes.append({
+                    "provider": "smsman",
+                    "country": str(cid),
+                    "country_name": country_names.get(str(cid), str(cid)),
+                    "service": str(app_code),
+                    "service_name": str(service),
+                    "operator": "AUTO",
+                    "pool": None,
+                    "cost_usd": smsman_price_to_usd(cost),
+                    "stock": stock,
+                })
+    except Exception:
+        logger.exception("[AGGREGATOR] SMS-Man fallback parser failed")
 
     return quotes
 
@@ -503,8 +617,9 @@ def _all_quotes(service):
             result = fn(service)
             if result:
                 quotes.extend(result)
+                logger.info("[AGGREGATOR] %s: %d live quotes for service=%s", name, len(result), service)
             else:
-                logger.info("[AGGREGATOR] %s returned no stock for service=%s", name, service)
+                logger.warning("[AGGREGATOR] %s returned NO STOCK for service=%s", name, service)
         except Exception:
             logger.exception("[AGGREGATOR] %s error: service=%s", name, service)
     return quotes
