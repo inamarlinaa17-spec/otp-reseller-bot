@@ -117,6 +117,29 @@ SMSPOOL_API_KEY = os.getenv(
 ).strip()
 
 
+
+
+# =========================================================
+# SMS-MAN CONFIGURATION
+# =========================================================
+
+SMSMAN_API_KEY = os.getenv(
+    "SMSMAN_API_KEY",
+    ""
+).strip()
+
+# SMS-Man control API reports prices in its account currency;
+# the default installation uses RUB and converts to USD for
+# comparison with 5SIM/SMSPool. Change this in Railway if
+# your SMS-Man account uses a different price basis.
+SMSMAN_RUB_TO_USD = float(
+    os.getenv(
+        "SMSMAN_RUB_TO_USD",
+        "0.0125"
+    )
+)
+
+
 # =========================================================
 # VALIDATION
 # =========================================================

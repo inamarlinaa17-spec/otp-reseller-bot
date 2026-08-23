@@ -2,6 +2,7 @@ import logging
 
 from provider import get_prices as get_5sim_prices
 from smspool import get_prices as get_smspool_prices, find_service as find_smspool_service
+from smsman import get_quotes as get_smsman_quotes, get_country_items as get_smsman_country_items
 
 logger = logging.getLogger(__name__)
 
@@ -99,12 +100,40 @@ def get_aggregated_quotes(country, service):
         quotes.extend(get_smspool_quotes(country, service))
     except Exception:
         logger.exception("SMSPool aggregator error: country=%s service=%s", country, service)
+    try:
+        quotes.extend(get_smsman_quotes(country, service))
+    except Exception:
+        logger.exception("SMS-Man aggregator error: country=%s service=%s", country, service)
     return sorted(quotes, key=lambda q: (q["cost_usd"], q["provider"], q.get("operator") or ""))
 
 
 def get_aggregated_countries(service):
+    """Return countries with the cheapest live quote across all providers.
+
+    The returned cost is provider cost in USD; UI applies the global 7% margin.
+    Provider identity is intentionally not included in the country-list display.
+    """
     countries = {}
-    # 5SIM: get all prices for service so country discovery remains one request.
+
+    def upsert(item):
+        if not item:
+            return
+        name = str(item.get("name") or item.get("country") or "").strip()
+        if not name:
+            return
+        key = name.lower().replace("_", " ")
+        candidate = {
+            "country": name,
+            "name": name,
+            "cost": float(item.get("cost") or item.get("cost_usd") or 0),
+            "stock": int(item.get("stock") or item.get("count") or 0),
+        }
+        if candidate["cost"] <= 0 or candidate["stock"] <= 0:
+            return
+        current = countries.get(key)
+        if current is None or candidate["cost"] < current["cost"]:
+            countries[key] = candidate
+
     try:
         data = get_5sim_prices(product=service)
         if isinstance(data, dict):
@@ -112,19 +141,17 @@ def get_aggregated_countries(service):
             for country, country_data in root.items():
                 if not isinstance(country_data, dict):
                     continue
-                available = any(
-                    isinstance(info, dict) and _num(info.get("cost")) > 0 and _int(info.get("count")) > 0
-                    for info in country_data.values()
-                )
-                if available:
-                    countries.setdefault(str(country), {
-                        "country": str(country),
-                        "name": str(country).replace("_", " ").title(),
-                    })
+                for info in country_data.values():
+                    if isinstance(info, dict):
+                        upsert({
+                            "country": str(country).replace("_", " ").title(),
+                            "name": str(country).replace("_", " ").title(),
+                            "cost": _num(info.get("cost")),
+                            "stock": _int(info.get("count")),
+                        })
     except Exception:
         logger.exception("5SIM country aggregation error: service=%s", service)
 
-    # SMSPool: current all_stock endpoint.
     try:
         found = find_smspool_service(service)
         lookup_service = found.get("id") if found and found.get("id") is not None else service
@@ -136,12 +163,23 @@ def get_aggregated_countries(service):
                 country = item.get("country") or item.get("country_id") or item.get("country_code")
                 cost = _num(item.get("cost") or item.get("price") or item.get("amount"))
                 stock = _int(item.get("stock") or item.get("count") or item.get("available"))
-                if country and cost > 0 and stock > 0:
-                    countries.setdefault(str(country), {
-                        "country": str(country),
+                if country:
+                    upsert({
+                        "country": str(item.get("country_name") or country),
                         "name": str(item.get("country_name") or country),
+                        "cost": cost,
+                        "stock": stock,
                     })
     except Exception:
         logger.exception("SMSPool country aggregation error: service=%s", service)
 
-    return list(countries.values())
+    try:
+        for item in get_smsman_country_items(service):
+            upsert(item)
+    except Exception:
+        logger.exception("SMS-Man country aggregation error: service=%s", service)
+
+    return sorted(countries.values(), key=lambda x: (
+        0 if str(x["name"]).lower() == "indonesia" else 1,
+        str(x["name"]).lower()
+    ))
