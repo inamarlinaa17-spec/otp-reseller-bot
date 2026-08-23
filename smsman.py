@@ -27,6 +27,16 @@ def _get(path, params=None):
         return None
 
 
+
+def check_api():
+    """Check SMS-Man control API connectivity without exposing credentials."""
+    if not SMSMAN_API_KEY:
+        return {"success": False, "error": "SMSMAN_API_KEY belum diatur."}
+    data = _get("get-balance")
+    if isinstance(data, dict):
+        return {"success": True, "data": data}
+    return {"success": False, "error": "Respons SMS-Man tidak valid."}
+
 def get_balance():
     data = _get("get-balance")
     try:

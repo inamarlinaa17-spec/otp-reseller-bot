@@ -39,7 +39,8 @@ from config import (
     MIDTRANS_API_URL,
     MIDTRANS_SNAP_URL,
     KURS_DOLAR,
-    PROMO_CHANNEL
+    PROMO_CHANNEL,
+    PROFIT_PERCENT
 )
 
 from database import (
@@ -64,6 +65,7 @@ from database import (
 import midtransclient
 
 from provider import (
+    check_api as check_5sim_api,
     get_balance as get_5sim_balance,
     get_products,
     get_all_products,
@@ -83,6 +85,7 @@ from aggregator import (
 )
 
 from smsman import (
+    check_api as check_smsman_api,
     get_balance as get_smsman_balance,
     get_country_items as get_smsman_country_items,
     buy_number as buy_smsman_number,
@@ -91,6 +94,7 @@ from smsman import (
 )
 
 from smspool import (
+    check_api as check_smspool_api,
     get_balance as get_smspool_balance,
     get_prices as get_smspool_prices,
     get_suggested_countries as get_smspool_suggested_countries,
@@ -1854,6 +1858,9 @@ async def show_service_country_page(
         ])
         keyboard.append(nav)
     keyboard.append([
+        InlineKeyboardButton("🔎 Cari Negara", callback_data=f"otp_country_search:{server}:{service}")
+    ])
+    keyboard.append([
         InlineKeyboardButton("↩️ Kembali", callback_data=f"otp_server:{server}"),
         InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")
     ])
@@ -2051,6 +2058,10 @@ async def show_country_page(
         keyboard.append(
             navigation
         )
+
+    keyboard.append([
+        InlineKeyboardButton("🔎 Cari Negara", callback_data="otp_country_search:legacy:")
+    ])
 
     keyboard.append([
 
@@ -3028,6 +3039,43 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             server,
             service,
             0
+        )
+        return
+
+    # =====================================================
+    # SEARCH NEGARA PER SERVICE / AGGREGATOR
+    # =====================================================
+
+    if data == "otp_country_search:legacy:":
+        context.user_data["waiting_otp_country_search"] = True
+        context.user_data["otp_country_search_server"] = "legacy"
+        context.user_data["otp_country_search_service"] = ""
+        await query.edit_message_text(
+            "🔎 <b>SEARCH NEGARA</b>\n\nKetik nama negara yang ingin dicari.\nContoh: <code>Indonesia</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Kembali", callback_data="order")
+            ]])
+        )
+        return
+
+    if data.startswith("otp_country_search:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            await query.answer("Data pencarian tidak valid.", show_alert=True)
+            return
+        server, service = parts[1], parts[2]
+        context.user_data["waiting_otp_country_search"] = True
+        context.user_data["otp_country_search_server"] = server
+        context.user_data["otp_country_search_service"] = service
+        await query.edit_message_text(
+            "🔎 <b>SEARCH NEGARA</b>\n\n"
+            "Ketik nama negara yang ingin dicari.\n"
+            "Contoh: <code>Indonesia</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Kembali", callback_data=f"otp_service_countries:{server}:{service}:0")
+            ]])
         )
         return
 
@@ -4661,33 +4709,43 @@ async def admin_callback(
 
     elif query.data == "admin_provider":
 
-        provider_balance = (
-            await asyncio.to_thread(
-                get_5sim_balance
-            )
+        # Check all three providers concurrently so the admin panel stays fast.
+        checks = await asyncio.gather(
+            asyncio.to_thread(check_5sim_api),
+            asyncio.to_thread(check_smspool_api),
+            asyncio.to_thread(check_smsman_api),
+            return_exceptions=True,
+        )
+        balances = await asyncio.gather(
+            asyncio.to_thread(get_5sim_balance),
+            asyncio.to_thread(get_smspool_balance),
+            asyncio.to_thread(get_smsman_balance),
+            return_exceptions=True,
         )
 
+        def ok(result):
+            return isinstance(result, dict) and bool(result.get("success"))
+
+        def money(value):
+            try:
+                return float(value)
+            except Exception:
+                return 0.0
+
+        b1, b2, b3 = [money(x) for x in balances]
+        s1 = "🟢 CONNECTED" if ok(checks[0]) else "🔴 OFFLINE"
+        s2 = "🟢 CONNECTED" if ok(checks[1]) else "🔴 OFFLINE"
+        s3 = "🟢 CONNECTED" if ok(checks[2]) else "🔴 OFFLINE"
+
         await query.edit_message_text(
-
-            "💰 <b>5SIM PROVIDER</b>\n\n"
-
-            "🟢 Status: "
-            "<b>CONNECTED</b>\n\n"
-
-            f"💵 Saldo 5SIM: "
-            f"<b>${provider_balance:.2f}</b>\n\n"
-
-            "💱 Kurs: "
-            "<b>Rp17.649,80 / USD</b>\n"
-
-            "📈 Margin: <b>20%</b>",
-
+            "💰 <b>PROVIDER STATUS</b>\n\n"
+            f"⚡ <b>Server 1</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
+            f"⚡ <b>Server 2</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
+            f"⚡ <b>Server 3</b>\n{s3}\n💵 Saldo: <b>{b3:.4f}</b> (currency provider)\n\n"
+            f"💱 Kurs: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
+            f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
             parse_mode="HTML",
-
-            reply_markup=InlineKeyboardMarkup(
-                back
-            )
-
+            reply_markup=InlineKeyboardMarkup(back)
         )
 
     elif query.data == "admin_stats":
@@ -4868,6 +4926,76 @@ async def text_handler(
 
     if not update.message:
 
+        return
+
+    # Search negara dari menu pemilihan negara.
+    if context.user_data.get("waiting_otp_country_search", False):
+        context.user_data["waiting_otp_country_search"] = False
+        server = context.user_data.get("otp_country_search_server", "5sim")
+        service = context.user_data.get("otp_country_search_service", "")
+        keyword = update.message.text.strip().lower()
+
+        try:
+            if server == "aggregator":
+                items = await asyncio.to_thread(get_aggregated_countries, service)
+            elif server == "legacy":
+                raw = await asyncio.to_thread(get_all_countries)
+                items = []
+                for code, data in (raw.items() if isinstance(raw, dict) else []):
+                    name = data.get("text_en", code) if isinstance(data, dict) else str(data)
+                    items.append({"country": str(code), "name": str(name), "cost": 0, "stock": 1})
+            else:
+                items = await asyncio.to_thread(get_service_countries, server, service)
+        except Exception:
+            items = []
+
+        matches = []
+        for item in items or []:
+            name = str(item.get("name") or item.get("country_name") or item.get("country") or "")
+            code = str(item.get("country") or "")
+            if keyword in name.lower() or keyword in code.lower():
+                matches.append(item)
+
+        if not matches:
+            await update.message.reply_text(
+                "❌ Negara tidak ditemukan atau sedang tidak tersedia.\n\nCoba nama negara lain.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔎 Cari Lagi", callback_data=f"otp_country_search:{server}:{service}"),
+                    InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:{server}:{service}:0")
+                ]])
+            )
+            return
+
+        keyboard = []
+        for item in matches[:30]:
+            name = str(item.get("name") or item.get("country_name") or item.get("country"))
+            country = str(item.get("country") or name)
+            cost = float(item.get("cost") or 0)
+            stock = int(item.get("stock") or 0)
+            price = hitung_harga_jual(cost) if cost > 0 else 0
+            if server == "aggregator":
+                label = f"🌍 {name} | 💰 mulai {format_rupiah(price)} | 📦 {stock}"
+                cb = f"otp_quotes:{service}:{country}"
+            elif server == "legacy":
+                label = f"🌍 {name}"
+                cb = f"otp_country:{country}"
+            else:
+                label = f"🌍 {name} | 💰 {format_rupiah(price)} | 📦 {stock}"
+                cb = f"otp_buy:{server}:{service}:{country}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
+
+        back_cb = "order" if server == "legacy" else f"otp_service_countries:{server}:{service}:0"
+        keyboard.append([
+            InlineKeyboardButton("🔎 Cari Lagi", callback_data=f"otp_country_search:{server}:{service}"),
+            InlineKeyboardButton("⬅️ Negara", callback_data=back_cb)
+        ])
+        await update.message.reply_text(
+            "🔎 <b>HASIL PENCARIAN NEGARA</b>\n\n"
+            f"Kata kunci: <code>{keyword}</code>\n"
+            f"Ditemukan: <b>{len(matches)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     # Search layanan OTP dari menu service.
