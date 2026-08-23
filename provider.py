@@ -181,9 +181,13 @@ def get_prices(
     country=None,
     product=None
 ):
+    """Get 5SIM guest prices.
 
+    This endpoint is public and supports filtering by product/country.
+    Errors are logged so Railway logs show the real provider problem
+    instead of silently turning an API failure into "stock empty".
+    """
     try:
-
         params = {}
 
         if country:
@@ -198,15 +202,29 @@ def get_prices(
                 "Accept": "application/json"
             },
             params=params,
-            timeout=30
+            timeout=15
         )
 
-        response.raise_for_status()
+        if response.status_code != 200:
+            print(
+                "[5SIM] prices error "
+                f"HTTP {response.status_code}: {response.text[:500]}"
+            )
+            return {}
 
-        return response.json()
+        data = response.json()
 
-    except Exception:
+        if not isinstance(data, dict):
+            print(
+                "[5SIM] prices returned unexpected format: "
+                f"{type(data).__name__}"
+            )
+            return {}
 
+        return data
+
+    except Exception as error:
+        print(f"[5SIM] prices request error: {error}")
         return {}
 
 
