@@ -306,3 +306,353 @@ def complete_deposit(deposit_id, payment_reference=None):
         )
 
         return (True, telegram_id, amount, after)
+
+# =========================================================
+# CREATE PENDING OTP ORDER
+# =========================================================
+
+def create_pending_order(
+    telegram_id,
+    order_id,
+    country,
+    service,
+    sell_price
+):
+
+    with get_db() as db:
+
+        user = db.execute(
+            """
+            SELECT balance
+            FROM users
+            WHERE telegram_id = %s
+            FOR UPDATE
+            """,
+            (telegram_id,)
+        ).fetchone()
+
+        if not user:
+
+            raise ValueError(
+                "User belum terdaftar."
+            )
+
+        balance_before = int(
+            user["balance"]
+        )
+
+        if balance_before < sell_price:
+
+            raise ValueError(
+                "Saldo tidak cukup."
+            )
+
+        balance_after = (
+            balance_before -
+            sell_price
+        )
+
+        # Potong saldo
+        db.execute(
+            """
+            UPDATE users
+            SET balance = %s
+            WHERE telegram_id = %s
+            """,
+            (
+                balance_after,
+                telegram_id
+            )
+        )
+
+        # Ledger
+        db.execute(
+            """
+            INSERT INTO ledger
+            (
+                telegram_id,
+                amount,
+                balance_before,
+                balance_after,
+                transaction_type,
+                reference,
+                description,
+                created_at
+            )
+            VALUES
+            (%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                telegram_id,
+                -sell_price,
+                balance_before,
+                balance_after,
+                "ORDER_OTP",
+                order_id,
+                f"Order OTP {service}",
+                now()
+            )
+        )
+
+        # Order
+        db.execute(
+            """
+            INSERT INTO orders
+            (
+                order_id,
+                telegram_id,
+                country,
+                service,
+                sell_price,
+                provider_cost,
+                status,
+                provider_order_id,
+                refund_status,
+                created_at
+            )
+            VALUES
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                order_id,
+                telegram_id,
+                country,
+                service,
+                sell_price,
+                0,
+                "PENDING",
+                None,
+                "NONE",
+                now()
+            )
+        )
+
+        return balance_after
+
+
+# =========================================================
+# SAVE 5SIM ORDER
+# =========================================================
+
+def save_provider_order(
+    order_id,
+    provider_order_id,
+    provider_cost
+):
+
+    with get_db() as db:
+
+        db.execute(
+            """
+            UPDATE orders
+            SET
+                provider_order_id = %s,
+                provider_cost = %s
+            WHERE order_id = %s
+            """,
+            (
+                str(provider_order_id),
+                int(provider_cost),
+                order_id
+            )
+        )
+
+
+# =========================================================
+# GET ORDER
+# =========================================================
+
+def get_order(
+    order_id
+):
+
+    with get_db() as db:
+
+        return db.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE order_id = %s
+            """,
+            (order_id,)
+        ).fetchone()
+
+
+# =========================================================
+# MARK ORDER SUCCESS
+# =========================================================
+
+def mark_order_success(
+    order_id
+):
+
+    with get_db() as db:
+
+        result = db.execute(
+            """
+            UPDATE orders
+            SET
+                status = 'SUCCESS',
+                completed_at = %s
+            WHERE order_id = %s
+            AND status = 'PENDING'
+            """,
+            (
+                now(),
+                order_id
+            )
+        )
+
+        return result.rowcount > 0
+
+
+# =========================================================
+# REFUND ORDER
+# =========================================================
+
+def refund_order(
+    order_id,
+    reason="Refund order OTP"
+):
+
+    with get_db() as db:
+
+        order = db.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE order_id = %s
+            FOR UPDATE
+            """,
+            (order_id,)
+        ).fetchone()
+
+        if not order:
+
+            raise ValueError(
+                "Order tidak ditemukan."
+            )
+
+        # Jangan refund dua kali
+        if order["refund_status"] == "REFUNDED":
+
+            user = db.execute(
+                """
+                SELECT balance
+                FROM users
+                WHERE telegram_id = %s
+                """,
+                (
+                    order["telegram_id"],
+                )
+            ).fetchone()
+
+            return {
+                "refunded": False,
+                "already_refunded": True,
+                "balance":
+                    user["balance"]
+                    if user
+                    else 0
+            }
+
+        if order["status"] == "SUCCESS":
+
+            raise ValueError(
+                "Order sudah berhasil dan tidak bisa direfund."
+            )
+
+        user = db.execute(
+            """
+            SELECT balance
+            FROM users
+            WHERE telegram_id = %s
+            FOR UPDATE
+            """,
+            (
+                order["telegram_id"],
+            )
+        ).fetchone()
+
+        if not user:
+
+            raise ValueError(
+                "User tidak ditemukan."
+            )
+
+        balance_before = int(
+            user["balance"]
+        )
+
+        balance_after = (
+            balance_before +
+            int(order["sell_price"])
+        )
+
+        # Kembalikan saldo
+        db.execute(
+            """
+            UPDATE users
+            SET balance = %s
+            WHERE telegram_id = %s
+            """,
+            (
+                balance_after,
+                order["telegram_id"]
+            )
+        )
+
+        # Ledger refund
+        db.execute(
+            """
+            INSERT INTO ledger
+            (
+                telegram_id,
+                amount,
+                balance_before,
+                balance_after,
+                transaction_type,
+                reference,
+                description,
+                created_at
+            )
+            VALUES
+            (%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                order["telegram_id"],
+                order["sell_price"],
+                balance_before,
+                balance_after,
+                "ORDER_REFUND",
+                order_id,
+                reason,
+                now()
+            )
+        )
+
+        # Tandai refund
+        db.execute(
+            """
+            UPDATE orders
+            SET
+                status = 'REFUNDED',
+                refund_status = 'REFUNDED',
+                completed_at = %s
+            WHERE order_id = %s
+            """,
+            (
+                now(),
+                order_id
+            )
+        )
+
+        return {
+            "refunded": True,
+            "already_refunded": False,
+            "balance": balance_after,
+            "telegram_id":
+                order["telegram_id"],
+            "amount":
+                order["sell_price"]
+        }
