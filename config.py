@@ -82,6 +82,33 @@ MIDTRANS_SNAP_URL = (
     "https://app.midtrans.com/snap"
 )
 
+# =========================================================
+# 5SIM CONFIGURATION
+# =========================================================
+
+FIVESIM_API_KEY = os.getenv(
+    "FIVESIM_API_KEY",
+    ""
+).strip()
+
+
+# Kurs internal USD -> IDR
+KURS_DOLAR = float(
+    os.getenv(
+        "KURS_DOLAR",
+        "17649.80"
+    )
+)
+
+
+# Margin reseller
+PROFIT_PERCENT = float(
+    os.getenv(
+        "PROFIT_PERCENT",
+        "20"
+    )
+)
+
 
 # =========================================================
 # VALIDATION
@@ -116,6 +143,10 @@ if not MIDTRANS_CLIENT_KEY:
         "MIDTRANS_CLIENT_KEY belum diatur di environment."
     )
 
+if not FIVESIM_API_KEY:
+    raise RuntimeError(
+        "FIVESIM_API_KEY belum diatur di environment."
+    )
 
 # =========================================================
 # CONVERT ADMIN ID
