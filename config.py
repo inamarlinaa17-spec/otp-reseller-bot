@@ -102,7 +102,7 @@ KURS_DOLAR = float(
 PROFIT_PERCENT = float(
     os.getenv(
         "PROFIT_PERCENT",
-        "10"
+        "7"
     )
 )
 

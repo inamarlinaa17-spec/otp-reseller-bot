@@ -149,14 +149,16 @@ SERVICES_PER_PAGE = 16
 
 OTP_SERVERS = {
 
+    # Nama provider sengaja tidak ditampilkan ke user.
+    # Mapping internal tetap memakai key provider untuk routing/order.
     "5sim":
-        "⚡ Server 1 — HIGH STOCK",
+        "⚡ Server 1",
 
     "smspool":
-        "⚡ Server 2 — FULL TEXT",
+        "⚡ Server 2",
 
     "aggregator":
-        "🔥 Price Aggregator — 5SIM + SMSPool"
+        "🔥 Price Aggregator"
 
 }
 
@@ -1155,7 +1157,7 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
-                "🔥 Price Aggregator — 5SIM + SMSPool",
+                "🔥 Price Aggregator",
                 callback_data="otp_server:aggregator"
             )
         ],
@@ -1734,6 +1736,32 @@ async def show_service_country_page(
                     )
                 )
             ])
+
+    # Navigasi halaman negara + tombol kembali ke daftar server.
+    if total_pages > 1:
+        prev_page = max(0, page - 1)
+        next_page = min(total_pages - 1, page + 1)
+        keyboard.append([
+            InlineKeyboardButton(
+                "◀️",
+                callback_data=f"otp_service_countries:{server}:{service}:{prev_page}"
+            ),
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}",
+                callback_data="otp_noop"
+            ),
+            InlineKeyboardButton(
+                "▶️",
+                callback_data=f"otp_service_countries:{server}:{service}:{next_page}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "↩️ Kembali",
+            callback_data=f"otp_server:{server}"
+        )
+    ])
 
     await query.edit_message_text(
         "🌍 <b>PILIH NEGARA</b>\n\n"
@@ -2323,7 +2351,7 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
             "❌ <b>Stok tidak tersedia</b>\n\n"
             f"🌍 Negara: <b>{country}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
-            "Tidak ada quote aktif dari 5SIM maupun SMSPool.",
+            "Tidak ada quote aktif saat ini.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_quotes:{service}:{country}")
@@ -2342,11 +2370,11 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
             pool=q.get("pool"), cost_usd=q["cost_usd"], stock=q["stock"]
         )
         sell = hitung_harga_jual(q["cost_usd"])
-        label = "5SIM" if q["provider"] == "5sim" else "SMSPool"
-        extra = q.get("operator") if q["provider"] == "5sim" else (f"Pool {q.get('pool')}" if q.get("pool") else "AUTO")
+        # Provider disembunyikan dari UI; backend tetap menyimpan provider
+        # untuk menentukan jalur pembelian saat quote dipilih.
         keyboard.append([
             InlineKeyboardButton(
-                f"💰 {format_rupiah(sell)} | 📦 {q['stock']} | {label} · {extra}",
+                f"💰 {format_rupiah(sell)} | 📦 {q['stock']}",
                 callback_data=f"otp_quote:{quote_id}"
             )
         ])
@@ -2360,7 +2388,7 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
         "✨ <b>HARGA TERBAIK</b>\n\n"
         f"🌍 Negara: <b>{country}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
-        "Pilih harga/provider yang ingin digunakan:",
+        "Pilih harga yang ingin digunakan:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2375,7 +2403,7 @@ async def process_otp_order(
     service,
     quote=None
 ):
-    """Order OTP dari provider terpilih dengan margin 10%."""
+    """Order OTP dari provider terpilih dengan margin default 7%."""
 
     service_label = dict(OTP_SERVICES).get(service, service)
 
@@ -2719,9 +2747,9 @@ Isi saldo terlebih dahulu melalui menu <b>Deposit</b>.
 Pilih server OTP atau gunakan Price Aggregator.
 
 3️⃣ <b>Pilih Server</b>
-├ Server 1 → 5SIM
-├ Server 2 → SMSPOOL
-└ Price Aggregator → gabungkan quote 5SIM + SMSPOOL
+├ Server 1
+├ Server 2
+└ Price Aggregator → mencari harga terbaik
 
 4️⃣ <b>Pilih layanan</b>
 Bot menampilkan layanan OTP seperti WhatsApp, Telegram, Shopee, TikTok, Facebook, Instagram, Google, Vercel, UangMe, Grab, DANA, Gojek, OVO, Any Other, dan lainnya.
