@@ -54,7 +54,9 @@ from database import (
     save_provider_order,
     get_order,
     mark_order_success,
-    refund_order
+    refund_order,
+    save_otp_quote,
+    get_otp_quote
 )
 
 import midtransclient
@@ -71,6 +73,8 @@ from provider import (
     get_sms,
     cancel_number
 )
+
+from aggregator import get_aggregated_countries, get_aggregated_quotes
 
 from smspool import (
     get_balance as get_smspool_balance,
@@ -149,7 +153,10 @@ OTP_SERVERS = {
         "⚡ Server 1 — HIGH STOCK",
 
     "smspool":
-        "⚡ Server 2 — FULL TEXT"
+        "⚡ Server 2 — FULL TEXT",
+
+    "aggregator":
+        "🔥 Price Aggregator — 5SIM + SMSPool"
 
 }
 
@@ -1148,6 +1155,13 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
+                "🔥 Price Aggregator — 5SIM + SMSPool",
+                callback_data="otp_server:aggregator"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
                 "🏠 Menu Utama",
                 callback_data="user_home"
             )
@@ -1531,6 +1545,9 @@ def _smspool_country_name_map():
 
 
 def get_service_countries(server, service):
+    if server == "aggregator":
+        return get_aggregated_countries(service)
+
     if server == "5sim":
         return _country_items_5sim(service)
 
@@ -1691,61 +1708,32 @@ async def show_service_country_page(
     ]
 
     keyboard = []
-    for item in page_items:
-        price = hitung_harga_jual(item["cost"])
-        keyboard.append([
-            InlineKeyboardButton(
-                (
-                    f"🌍 {item['name']}\n"
-                    f"💰 {format_rupiah(price)}"
-                    f"  |  📦 {item['stock']}"
-                ),
-                callback_data=(
-                    f"otp_buy:{server}:{service}:"
-                    f"{item['country']}"
-                )
-            )
-        ])
 
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(
-                "⬅️",
-                callback_data=(
-                    f"otp_service_countries:{server}:"
-                    f"{service}:{page - 1}"
+    if server == "aggregator":
+        # Each country opens a quote page. We do not buy directly from the country button.
+        for item in page_items:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🌍 {item['name']}",
+                    callback_data=f"otp_quotes:{service}:{item['country']}"
                 )
-            )
-        )
-    nav.append(
-        InlineKeyboardButton(
-            f"{page + 1}/{total_pages}",
-            callback_data="otp_noop"
-        )
-    )
-    if page < total_pages - 1:
-        nav.append(
-            InlineKeyboardButton(
-                "➡️",
-                callback_data=(
-                    f"otp_service_countries:{server}:"
-                    f"{service}:{page + 1}"
+            ])
+    else:
+        for item in page_items:
+            price = hitung_harga_jual(item["cost"])
+            keyboard.append([
+                InlineKeyboardButton(
+                    (
+                        f"🌍 {item['name']}\n"
+                        f"💰 {format_rupiah(price)}"
+                        f"  |  📦 {item['stock']}"
+                    ),
+                    callback_data=(
+                        f"otp_buy:{server}:{service}:"
+                        f"{item['country']}"
+                    )
                 )
-            )
-        )
-    keyboard.append(nav)
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "⬅️ Pilih Layanan",
-            callback_data=f"otp_server:{server}"
-        ),
-        InlineKeyboardButton(
-            "🏠 Menu",
-            callback_data="user_home"
-        )
-    ])
+            ])
 
     await query.edit_message_text(
         "🌍 <b>PILIH NEGARA</b>\n\n"
@@ -2311,13 +2299,81 @@ async def show_product_page(
 # =========================================================
 
 
+async def show_aggregated_quotes_page(query, user_id, service, country):
+    service_label = dict(OTP_SERVICES).get(service, service)
+    try:
+        quotes = await asyncio.wait_for(
+            asyncio.to_thread(get_aggregated_quotes, country, service),
+            timeout=25
+        )
+    except asyncio.TimeoutError:
+        await query.edit_message_text(
+            "⚠️ <b>Provider terlalu lama merespons.</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_quotes:{service}:{country}")
+            ], [
+                InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
+            ]])
+        )
+        return
+
+    if not quotes:
+        await query.edit_message_text(
+            "❌ <b>Stok tidak tersedia</b>\n\n"
+            f"🌍 Negara: <b>{country}</b>\n"
+            f"📱 Layanan: <b>{service_label}</b>\n\n"
+            "Tidak ada quote aktif dari 5SIM maupun SMSPool.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_quotes:{service}:{country}")
+            ], [
+                InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
+            ]])
+        )
+        return
+
+    keyboard = []
+    for q in quotes:
+        quote_id = uuid.uuid4().hex[:10].upper()
+        save_otp_quote(
+            quote_id=quote_id, telegram_id=user_id, provider=q["provider"],
+            country=q["country"], service=q["service"], operator=q.get("operator"),
+            pool=q.get("pool"), cost_usd=q["cost_usd"], stock=q["stock"]
+        )
+        sell = hitung_harga_jual(q["cost_usd"])
+        label = "5SIM" if q["provider"] == "5sim" else "SMSPool"
+        extra = q.get("operator") if q["provider"] == "5sim" else (f"Pool {q.get('pool')}" if q.get("pool") else "AUTO")
+        keyboard.append([
+            InlineKeyboardButton(
+                f"💰 {format_rupiah(sell)} | 📦 {q['stock']} | {label} · {extra}",
+                callback_data=f"otp_quote:{quote_id}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_quotes:{service}:{country}"),
+        InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
+    ])
+
+    await query.edit_message_text(
+        "✨ <b>HARGA TERBAIK</b>\n\n"
+        f"🌍 Negara: <b>{country}</b>\n"
+        f"📱 Layanan: <b>{service_label}</b>\n\n"
+        "Pilih harga/provider yang ingin digunakan:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def process_otp_order(
     query,
     user_id,
     context,
     server,
     country,
-    service
+    service,
+    quote=None
 ):
     """Order OTP dari provider terpilih dengan margin 10%."""
 
@@ -2326,7 +2382,13 @@ async def process_otp_order(
     # -----------------------------------------------------
     # AMBIL HARGA/STOK TERKINI
     # -----------------------------------------------------
-    if server == "5sim":
+    if quote is not None:
+        server = quote["provider"]
+        country = quote["country"]
+        service = quote["service"]
+        operator = quote.get("operator") or "any"
+        provider_cost_usd = float(quote["cost_usd"])
+    elif server == "5sim":
         operator_info = await asyncio.to_thread(
             get_cheapest_operator,
             country,
@@ -2510,11 +2572,20 @@ async def process_otp_order(
             if found and found.get("id") is not None
             else service
         )
-        result = await asyncio.to_thread(
-            buy_smspool_number,
-            country,
-            smspool_service
-        )
+        if quote is not None:
+            result = await asyncio.to_thread(
+                buy_smspool_number,
+                country,
+                smspool_service,
+                quote.get("pool"),
+                float(quote["cost_usd"])
+            )
+        else:
+            result = await asyncio.to_thread(
+                buy_smspool_number,
+                country,
+                smspool_service
+            )
         provider_order_id = (
             result.get("order_id") if result else None
         )
@@ -2645,11 +2716,12 @@ async def user_callback(
 Isi saldo terlebih dahulu melalui menu <b>Deposit</b>.
 
 2️⃣ <b>Order OTP</b>
-Pilih server OTP terlebih dahulu.
+Pilih server OTP atau gunakan Price Aggregator.
 
 3️⃣ <b>Pilih Server</b>
 ├ Server 1 → 5SIM
-└ Server 2 → SMSPOOL
+├ Server 2 → SMSPOOL
+└ Price Aggregator → gabungkan quote 5SIM + SMSPOOL
 
 4️⃣ <b>Pilih layanan</b>
 Bot menampilkan layanan OTP seperti WhatsApp, Telegram, Shopee, TikTok, Facebook, Instagram, Google, Vercel, UangMe, Grab, DANA, Gojek, OVO, Any Other, dan lainnya.
@@ -2881,6 +2953,30 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
     if data == "otp_noop":
         await query.answer()
+        return
+
+    # =====================================================
+    # PRICE AGGREGATOR -> PILIH QUOTE
+    # =====================================================
+
+    if data.startswith("otp_quotes:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            await query.answer("Data quote tidak valid.", show_alert=True)
+            return
+        _, service, country = parts
+        await show_aggregated_quotes_page(query, user_id, service, country)
+        return
+
+    if data.startswith("otp_quote:"):
+        quote_id = data.split(":", 1)[1]
+        quote = await asyncio.to_thread(get_otp_quote, quote_id, user_id)
+        if not quote:
+            await query.answer("Quote sudah tidak tersedia. Silakan refresh.", show_alert=True)
+            return
+        await process_otp_order(
+            query, user_id, context, quote["provider"], quote["country"], quote["service"], quote=quote
+        )
         return
 
     # =====================================================

@@ -85,6 +85,21 @@ def init_database():
         """)
 
         db.execute("""
+            CREATE TABLE IF NOT EXISTS otp_quotes (
+                quote_id TEXT PRIMARY KEY,
+                telegram_id BIGINT NOT NULL,
+                provider TEXT NOT NULL,
+                country TEXT NOT NULL,
+                service TEXT NOT NULL,
+                operator TEXT,
+                pool TEXT,
+                cost_usd DOUBLE PRECISION NOT NULL,
+                stock BIGINT NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        db.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 id BIGSERIAL PRIMARY KEY,
                 order_id TEXT UNIQUE NOT NULL,
@@ -816,6 +831,55 @@ def save_provider_order(
                 order_id
             )
         )
+
+
+# =========================================================
+# OTP PRICE QUOTES
+# =========================================================
+
+def save_otp_quote(
+    quote_id,
+    telegram_id,
+    provider,
+    country,
+    service,
+    operator=None,
+    pool=None,
+    cost_usd=0,
+    stock=0
+):
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO otp_quotes
+            (quote_id, telegram_id, provider, country, service, operator, pool, cost_usd, stock, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (quote_id) DO UPDATE SET
+                telegram_id=EXCLUDED.telegram_id,
+                provider=EXCLUDED.provider,
+                country=EXCLUDED.country,
+                service=EXCLUDED.service,
+                operator=EXCLUDED.operator,
+                pool=EXCLUDED.pool,
+                cost_usd=EXCLUDED.cost_usd,
+                stock=EXCLUDED.stock,
+                created_at=EXCLUDED.created_at
+            """,
+            (quote_id, telegram_id, provider, country, service, operator, pool, float(cost_usd), int(stock), now())
+        )
+
+
+def get_otp_quote(quote_id, telegram_id=None):
+    with get_db() as db:
+        if telegram_id is None:
+            return db.execute(
+                "SELECT * FROM otp_quotes WHERE quote_id = %s",
+                (quote_id,)
+            ).fetchone()
+        return db.execute(
+            "SELECT * FROM otp_quotes WHERE quote_id = %s AND telegram_id = %s",
+            (quote_id, telegram_id)
+        ).fetchone()
 
 
 # =========================================================
