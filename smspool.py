@@ -150,16 +150,22 @@ def get_balance():
 # =========================================================
 
 def get_all_countries():
+    """Return the current SMSPool country list.
 
-    result = post_request(
-        "/country/list"
-    )
-
-    if not result:
-
-        return {}
-
-    return result
+    SMSPool's current public API uses /country/retrieve_all.
+    The old /country/list endpoint is not the documented endpoint.
+    """
+    try:
+        response = requests.get(
+            f"{BASE_URL}/country/retrieve_all",
+            headers=get_headers(),
+            timeout=20
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as error:
+        print(f"[SMSPOOL] country list error: {error}")
+        return []
 
 
 # =========================================================
@@ -167,16 +173,18 @@ def get_all_countries():
 # =========================================================
 
 def get_services():
-
-    result = post_request(
-        "/service/list"
-    )
-
-    if not result:
-
-        return {}
-
-    return result
+    """Return the current SMSPool service list."""
+    try:
+        response = requests.get(
+            f"{BASE_URL}/service/retrieve_all",
+            headers=get_headers(),
+            timeout=20
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as error:
+        print(f"[SMSPOOL] service list error: {error}")
+        return []
 
 
 # =========================================================
@@ -184,37 +192,48 @@ def get_services():
 # =========================================================
 
 def get_all_services():
-
     return get_services()
 
 
 # =========================================================
-# GET PRICES
+# GET PRICES / STOCK
 # =========================================================
 
 def get_prices(
     country=None,
     service=None
 ):
+    """Return SMSPool one-time SMS stock records.
 
+    The current documented endpoint is /sms/all_stock.  It returns
+    records containing country, service, pool, stock and price.
+    Country and service are optional filters.
+    """
     data = {}
 
-    if country:
+    if country is not None and str(country).strip():
+        data["country"] = str(country).strip()
 
-        data["country"] = country
-
-    if service:
-
-        data["service"] = service
+    if service is not None and str(service).strip():
+        data["service"] = str(service).strip()
 
     result = post_request(
-        "/request/price",
-        data=data
+        "/sms/all_stock",
+        data=data,
+        timeout=30
     )
 
     if not result:
+        return []
 
-        return {}
+    # API errors are dicts with success=0; callers should treat them
+    # as an empty stock result rather than trying to parse them as rows.
+    if isinstance(result, dict) and str(result.get("success", "1")) == "0":
+        print(
+            "[SMSPOOL] stock error: "
+            f"{result.get('type') or result.get('message') or result}"
+        )
+        return []
 
     return result
 
@@ -243,122 +262,53 @@ def normalize_service_name(
 def find_service(
     service_name
 ):
+    """Find an SMSPool service by exact/partial name or ID.
 
+    SMSPool's current service-list response uses uppercase ``ID``.
+    The old code only checked lowercase ``id``, so it could fail to
+    resolve a service ID and then query stock with the wrong value.
+    """
     services = get_services()
 
     if not services:
-
         return None
 
-    target = (
-        normalize_service_name(
-            service_name
-        ).lower()
-    )
+    target = normalize_service_name(service_name).lower()
 
-    # -----------------------------------------------------
-    # FORMAT DICT
-    #
-    # {
-    #     "1": "WhatsApp",
-    #     "2": "Telegram"
-    # }
-    # -----------------------------------------------------
+    if isinstance(services, dict):
+        iterable = services.items()
+        for service_id, value in iterable:
+            if isinstance(value, dict):
+                sid = value.get("ID", value.get("id", value.get("service_id", service_id)))
+                name = value.get("name", value.get("service", str(value)))
+            else:
+                sid = service_id
+                name = value
 
-    if isinstance(
-        services,
-        dict
-    ):
+            if str(sid).lower() == target or str(name).lower() == target:
+                return {"id": sid, "name": str(name)}
+            if target and target in str(name).lower():
+                return {"id": sid, "name": str(name)}
 
-        for service_id, name in (
-            services.items()
-        ):
-
-            if str(
-                name
-            ).lower() == target:
-
-                return {
-                    "id":
-                        service_id,
-
-                    "name":
-                        name
-                }
-
-            if target in str(
-                name
-            ).lower():
-
-                return {
-                    "id":
-                        service_id,
-
-                    "name":
-                        name
-                }
-
-    # -----------------------------------------------------
-    # FORMAT LIST
-    #
-    # [
-    #     {
-    #         "id": 1,
-    #         "name": "WhatsApp"
-    #     }
-    # ]
-    # -----------------------------------------------------
-
-    elif isinstance(
-        services,
-        list
-    ):
-
+    elif isinstance(services, list):
         for item in services:
-
-            if not isinstance(
-                item,
-                dict
-            ):
-
+            if not isinstance(item, dict):
                 continue
 
-            name = str(
-                item.get(
-                    "name",
-                    item.get(
-                        "service",
-                        ""
-                    )
-                )
-            )
-
             service_id = item.get(
-                "id",
-                item.get(
-                    "service_id"
-                )
+                "ID",
+                item.get("id", item.get("service_id"))
+            )
+            name = item.get(
+                "name",
+                item.get("service", "")
             )
 
-            if name.lower() == target:
+            if str(service_id).lower() == target or str(name).lower() == target:
+                return {"id": service_id, "name": str(name)}
 
-                return {
-                    "id":
-                        service_id,
-
-                    "name":
-                        name
-                }
-
-            if target in name.lower():
-
-                return {
-                    "id":
-                        service_id,
-
-                    "name":
-                        name
-                }
+            if target and target in str(name).lower():
+                return {"id": service_id, "name": str(name)}
 
     return None
 
@@ -580,99 +530,47 @@ def get_order(
 def get_sms(
     order_id
 ):
-
+    """Check one SMSPool order using the documented /sms/check endpoint."""
     result = post_request(
-        "/request/active",
-        data={
-            "orderid":
-                order_id
-        }
+        "/sms/check",
+        data={"orderid": order_id},
+        timeout=20
     )
 
     if not result:
-
         return {
-            "response":
-                "ERROR",
-
-            "message":
-                "Respons SMSPOOL kosong."
+            "response": "ERROR",
+            "message": "Respons SMSPOOL kosong."
         }
 
+    if not isinstance(result, dict):
+        return {
+            "response": "WAITING",
+            "raw": result
+        }
 
-    # -----------------------------------------------------
-    # Normalisasi response
-    # -----------------------------------------------------
+    status = str(result.get("status", ""))
 
-    if isinstance(
-        result,
-        dict
-    ):
+    # Current SMSPool status: 1=pending, 3=complete, 6=refunded.
+    if status == "3":
+        code = result.get("sms") or result.get("code") or result.get("otp")
+        if code:
+            return {
+                "response": "SUCCESS",
+                "code": str(code),
+                "raw": result
+            }
 
-        # OTP langsung
-        for key in [
-            "code",
-            "otp",
-            "sms",
-            "sms_code"
-        ]:
-
-            value = result.get(
-                key
-            )
-
-            if value:
-
-                return {
-
-                    "response":
-                        "SUCCESS",
-
-                    "code":
-                        str(value),
-
-                    "raw":
-                        result
-                }
-
-
-        # SMSPool terkadang mengembalikan
-        # SMS dalam field message/text.
-        for key in [
-            "message",
-            "text"
-        ]:
-
-            value = result.get(
-                key
-            )
-
-            if value:
-
-                return {
-
-                    "response":
-                        "SMS",
-
-                    "message":
-                        str(value),
-
-                    "raw":
-                        result
-                }
-
-
-    # -----------------------------------------------------
-    # BELUM ADA SMS
-    # -----------------------------------------------------
+    if status == "6":
+        return {
+            "response": "ERROR",
+            "message": result.get("message", "Order SMSPOOL telah direfund."),
+            "raw": result
+        }
 
     return {
-
-        "response":
-            "WAITING",
-
-        "raw":
-            result
+        "response": "WAITING",
+        "raw": result
     }
 
 
@@ -685,7 +583,7 @@ def cancel_number(
 ):
 
     result = post_request(
-        "/request/cancel",
+        "/sms/cancel",
         data={
             "orderid":
                 order_id
@@ -816,114 +714,43 @@ def release_number(
 def get_available_countries(
     service
 ):
+    """Return countries with stock for a service using the stock endpoint."""
+    found = find_service(service)
+    lookup_service = found.get("id") if found and found.get("id") is not None else service
+    rows = get_prices(service=lookup_service)
 
-    countries = get_all_countries()
-
-    if not countries:
-
+    if not isinstance(rows, list):
         return []
 
-
     result = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
 
-
-    # -----------------------------------------------------
-    # Ambil daftar country
-    # -----------------------------------------------------
-
-    if isinstance(
-        countries,
-        dict
-    ):
-
-        iterable = (
-            countries.items()
+        country_id = item.get("country")
+        country_name = (
+            item.get("country_name")
+            or item.get("name")
+            or item.get("short_name")
+            or country_id
         )
+        price = item.get("price", item.get("cost", item.get("amount")))
+        stock = item.get("stock", item.get("count", item.get("available", 0)))
 
-        for country_id, country_info in iterable:
+        try:
+            price = float(price or 0)
+            stock = int(stock or 0)
+        except Exception:
+            continue
 
-            country_name = str(
-                country_info
-            )
-
-            price_data = get_prices(
-                country=country_id,
-                service=service
-            )
-
-            if not price_data:
-
-                continue
-
+        if country_id is not None and price > 0 and stock > 0:
             result.append({
-
-                "country":
-                    str(country_id),
-
-                "name":
-                    country_name,
-
-                "price":
-                    price_data
-
+                "country": str(country_id),
+                "name": str(country_name),
+                "price": price,
+                "stock": stock,
+                "pool": item.get("pool")
             })
-
-
-    elif isinstance(
-        countries,
-        list
-    ):
-
-        for item in countries:
-
-            if not isinstance(
-                item,
-                dict
-            ):
-
-                continue
-
-            country_id = item.get(
-                "id",
-                item.get(
-                    "country"
-                )
-            )
-
-            country_name = item.get(
-                "name",
-                item.get(
-                    "country_name",
-                    str(country_id)
-                )
-            )
-
-            if not country_id:
-
-                continue
-
-            price_data = get_prices(
-                country=country_id,
-                service=service
-            )
-
-            if not price_data:
-
-                continue
-
-            result.append({
-
-                "country":
-                    str(country_id),
-
-                "name":
-                    str(country_name),
-
-                "price":
-                    price_data
-
-            })
-
 
     return result
 
