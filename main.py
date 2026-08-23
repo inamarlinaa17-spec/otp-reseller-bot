@@ -7,7 +7,7 @@ import threading
 import hashlib
 import hmac
 from datetime import datetime
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import asyncio
 import pytz
@@ -61,6 +61,7 @@ from provider import (
     get_sms,
     cancel_number
 )
+
 
 # =========================================================
 # VALIDASI MIDTRANS
@@ -838,13 +839,6 @@ def health_check():
 
 async def user_start(update_or_query):
 
-    # -----------------------------------------------------
-    # INI PERBAIKAN UTAMA
-    #
-    # Jangan pakai hasattr(message), karena CallbackQuery
-    # juga memiliki .message.
-    # -----------------------------------------------------
-
     if isinstance(update_or_query, Update):
 
         user = update_or_query.effective_user
@@ -857,7 +851,6 @@ async def user_start(update_or_query):
 
     else:
 
-        # CallbackQuery
         user = update_or_query.from_user
 
         send = (
@@ -942,7 +935,6 @@ async def start(update, context):
 
     else:
 
-        # Pastikan mode deposit bersih
         context.chat_data[
             "waiting_deposit"
         ] = False
@@ -1012,113 +1004,494 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
 
     elif query.data == "order":
 
-    countries = await asyncio.to_thread(
-        get_all_countries
-    )
+        countries = await asyncio.to_thread(
+            get_all_countries
+        )
 
-    if not countries:
+        if not countries:
 
-        await query.edit_message_text(
-            "❌ <b>Provider 5SIM tidak dapat dihubungi.</b>\n\n"
-            "Silakan coba lagi beberapa saat.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Kembali",
-                        callback_data="user_home"
+            await query.edit_message_text(
+                "❌ <b>Provider 5SIM tidak dapat dihubungi.</b>\n\n"
+                "Silakan coba lagi beberapa saat.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Kembali",
+                            callback_data="user_home"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        keyboard = []
+
+        items = []
+
+        for country_code, country_data in countries.items():
+
+            if isinstance(country_data, dict):
+
+                name = country_data.get(
+                    "text_en",
+                    country_code
+                )
+
+            else:
+
+                name = str(
+                    country_data
+                )
+
+            items.append(
+                (
+                    country_code,
+                    name
+                )
+            )
+
+        items.sort(
+            key=lambda item:
+                item[1].lower()
+        )
+
+        # Tampilkan 20 negara pertama
+        for country_code, name in items[:20]:
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🌍 {name}",
+                    callback_data=(
+                        f"otp_country:{country_code}"
                     )
-                ]
+                )
             ])
-        )
-
-        return
-
-    keyboard = []
-
-    items = []
-
-    for country_code, country_data in countries.items():
-
-        if isinstance(country_data, dict):
-
-            name = country_data.get(
-                "text_en",
-                country_code
-            )
-
-        else:
-
-            name = str(
-                country_data
-            )
-
-        items.append(
-            (
-                country_code,
-                name
-            )
-        )
-
-    items.sort(
-        key=lambda item:
-            item[1].lower()
-    )
-
-    # Tampilkan 20 negara pertama
-    for country_code, name in items[:20]:
 
         keyboard.append([
             InlineKeyboardButton(
-                f"🌍 {name}",
-                callback_data=(
-                    f"otp_country:{country_code}"
-                )
+                "🏠 Menu Utama",
+                callback_data="user_home"
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "🏠 Menu Utama",
-            callback_data="user_home"
+        await query.edit_message_text(
+            "📱 <b>ORDER OTP</b>\n\n"
+            "Pilih negara nomor:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
         )
-    ])
 
-    await query.edit_message_text(
-        "📱 <b>ORDER OTP</b>\n\n"
-        "Pilih negara nomor:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-    )
+    # =====================================================
+    # PILIH NEGARA
+    # =====================================================
 
     elif query.data.startswith(
-    "otp_country:"
-):
+        "otp_country:"
+    ):
 
-    country = query.data.split(
-        ":",
-        1
-    )[1]
+        country = query.data.split(
+            ":",
+            1
+        )[1]
 
-    products = await asyncio.to_thread(
-        get_products,
-        country,
-        "any"
-    )
+        products = await asyncio.to_thread(
+            get_products,
+            country,
+            "any"
+        )
 
-    if not products:
+        if not products:
+
+            await query.edit_message_text(
+                "❌ <b>Tidak ada layanan tersedia.</b>\n\n"
+                "Coba pilih negara lain.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Pilih Negara",
+                            callback_data="order"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🏠 Menu Utama",
+                            callback_data="user_home"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        keyboard = []
+
+        for product, info in products.items():
+
+            if not isinstance(
+                info,
+                dict
+            ):
+                continue
+
+            category = str(
+                info.get(
+                    "Category",
+                    ""
+                )
+            ).lower()
+
+            if category != "activation":
+                continue
+
+            qty = int(
+                info.get(
+                    "Qty",
+                    0
+                ) or 0
+            )
+
+            price = float(
+                info.get(
+                    "Price",
+                    0
+                ) or 0
+            )
+
+            if qty <= 0:
+                continue
+
+            sell_price = hitung_harga_jual(
+                price
+            )
+
+            if sell_price <= 0:
+                continue
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    (
+                        f"📱 {product} — "
+                        f"{format_rupiah(sell_price)}"
+                    ),
+                    callback_data=(
+                        f"otp_product:"
+                        f"{country}:"
+                        f"{product}"
+                    )
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "⬅️ Pilih Negara",
+                callback_data="order"
+            )
+        ])
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "🏠 Menu Utama",
+                callback_data="user_home"
+            )
+        ])
+
+        if len(keyboard) <= 2:
+
+            await query.edit_message_text(
+                "❌ <b>Tidak ada stok OTP.</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Pilih Negara",
+                            callback_data="order"
+                        )
+                    ]
+                ])
+            )
+
+            return
 
         await query.edit_message_text(
-            "❌ <b>Tidak ada layanan tersedia.</b>\n\n"
-            "Coba pilih negara lain.",
+            f"🌍 Negara: <b>{country}</b>\n\n"
+            "📱 <b>Pilih layanan:</b>\n\n"
+            "Harga sudah termasuk margin reseller "
+            "20%.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+    # =====================================================
+    # PILIH PRODUCT
+    # =====================================================
+
+    elif query.data.startswith(
+        "otp_product:"
+    ):
+
+        parts = query.data.split(
+            ":",
+            2
+        )
+
+        if len(parts) != 3:
+
+            await query.edit_message_text(
+                "❌ Data order tidak valid."
+            )
+
+            return
+
+        country = parts[1]
+        product = parts[2]
+
+        # Cari operator termurah
+        operator_info = await asyncio.to_thread(
+            get_cheapest_operator,
+            country,
+            product
+        )
+
+        if not operator_info:
+
+            await query.edit_message_text(
+                "❌ <b>Stok habis.</b>\n\n"
+                "Nomor untuk layanan ini "
+                "sedang tidak tersedia.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Kembali",
+                            callback_data=(
+                                f"otp_country:{country}"
+                            )
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        operator = operator_info[
+            "operator"
+        ]
+
+        provider_cost_usd = float(
+            operator_info["cost"]
+        )
+
+        sell_price = hitung_harga_jual(
+            provider_cost_usd
+        )
+
+        current_balance = get_balance(
+            user_id
+        )
+
+        if current_balance < sell_price:
+
+            await query.edit_message_text(
+                "❌ <b>Saldo tidak cukup.</b>\n\n"
+                f"💰 Harga: "
+                f"<b>{format_rupiah(sell_price)}</b>\n"
+                f"💳 Saldo: "
+                f"<b>{format_rupiah(current_balance)}</b>\n\n"
+                "Silakan deposit terlebih dahulu.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "💳 Deposit",
+                            callback_data="user_deposit"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Kembali",
+                            callback_data=(
+                                f"otp_country:{country}"
+                            )
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        await query.edit_message_text(
+            "⏳ <b>Memproses order...</b>\n\n"
+            f"🌍 Negara: <b>{country}</b>\n"
+            f"📱 Layanan: <b>{product}</b>\n"
+            f"💰 Harga: "
+            f"<b>{format_rupiah(sell_price)}</b>",
+            parse_mode="HTML"
+        )
+
+        # ID internal bot
+        order_id = (
+            "OTP-" +
+            uuid.uuid4().hex[:12].upper()
+        )
+
+        # Potong saldo + buat order internal
+        try:
+
+            balance_after = create_pending_order(
+                telegram_id=user_id,
+                order_id=order_id,
+                country=country,
+                service=product,
+                sell_price=sell_price
+            )
+
+        except ValueError as error:
+
+            await query.edit_message_text(
+                f"❌ <b>Order gagal.</b>\n\n"
+                f"{error}",
+                parse_mode="HTML"
+            )
+
+            return
+
+        # Beli nomor di 5SIM
+        result = await asyncio.to_thread(
+            buy_number,
+            country,
+            product,
+            operator
+        )
+
+        if (
+            not result
+            or
+            result.get("response") == "ERROR"
+        ):
+
+            try:
+
+                refund = refund_order(
+                    order_id,
+                    "Pembelian nomor 5SIM gagal."
+                )
+
+            except Exception as error:
+
+                logger.exception(
+                    "Refund gagal: %s",
+                    order_id
+                )
+
+                await query.edit_message_text(
+                    "⚠️ <b>Provider gagal dan refund "
+                    "otomatis mengalami masalah.</b>\n\n"
+                    f"Order: <code>{order_id}</code>\n"
+                    f"Error: <code>{error}</code>",
+                    parse_mode="HTML"
+                )
+
+                return
+
+            await query.edit_message_text(
+                "❌ <b>Nomor tidak tersedia.</b>\n\n"
+                f"🧾 Order: "
+                f"<code>{order_id}</code>\n"
+                f"💸 Refund: "
+                f"<b>{format_rupiah(sell_price)}</b>\n"
+                f"💰 Saldo: "
+                f"<b>{format_rupiah(refund['balance'])}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Order Lagi",
+                            callback_data="order"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🏠 Menu Utama",
+                            callback_data="user_home"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        provider_order_id = result.get(
+            "id"
+        )
+
+        phone = result.get(
+            "phone"
+        )
+
+        if not provider_order_id or not phone:
+
+            refund_order(
+                order_id,
+                "Respons 5SIM tidak lengkap."
+            )
+
+            await query.edit_message_text(
+                "❌ <b>Respons provider tidak valid.</b>\n\n"
+                "Saldo sudah dikembalikan.",
+                parse_mode="HTML"
+            )
+
+            return
+
+        provider_cost_rp = int(
+            round(
+                provider_cost_usd *
+                17649.80
+            )
+        )
+
+        save_provider_order(
+            order_id,
+            provider_order_id,
+            provider_cost_rp
+        )
+
+        await query.edit_message_text(
+            "✅ <b>ORDER BERHASIL</b>\n\n"
+            f"🧾 Order: "
+            f"<code>{order_id}</code>\n"
+            f"🌍 Negara: <b>{country}</b>\n"
+            f"📱 Layanan: <b>{product}</b>\n\n"
+            f"📞 Nomor:\n"
+            f"<code>{phone}</code>\n\n"
+            f"💰 Harga: "
+            f"<b>{format_rupiah(sell_price)}</b>\n"
+            f"💳 Sisa saldo: "
+            f"<b>{format_rupiah(balance_after)}</b>\n\n"
+            "⏳ <b>Menunggu SMS OTP...</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "⬅️ Pilih Negara",
-                        callback_data="order"
+                        "🔄 Cek OTP",
+                        callback_data=(
+                            f"otp_check:{order_id}"
+                        )
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Batal / Refund",
+                        callback_data=(
+                            f"otp_cancel:{order_id}"
+                        )
                     )
                 ],
                 [
@@ -1130,269 +1503,208 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    keyboard = []
-
-    for product, info in products.items():
-
-        if not isinstance(
-            info,
-            dict
-        ):
-            continue
-
-        category = str(
-            info.get(
-                "Category",
-                ""
-            )
-        ).lower()
-
-        if category != "activation":
-            continue
-
-        qty = int(
-            info.get(
-                "Qty",
-                0
-            ) or 0
-        )
-
-        price = float(
-            info.get(
-                "Price",
-                0
-            ) or 0
-        )
-
-        if qty <= 0:
-            continue
-
-        sell_price = hitung_harga_jual(
-            price
-        )
-
-        if sell_price <= 0:
-            continue
-
-        keyboard.append([
-            InlineKeyboardButton(
-                (
-                    f"📱 {product} — "
-                    f"{format_rupiah(sell_price)}"
-                ),
-                callback_data=(
-                    f"otp_product:"
-                    f"{country}:"
-                    f"{product}"
-                )
-            )
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "⬅️ Pilih Negara",
-            callback_data="order"
-        )
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "🏠 Menu Utama",
-            callback_data="user_home"
-        )
-    ])
-
-    if len(keyboard) <= 2:
-
-        await query.edit_message_text(
-            "❌ <b>Tidak ada stok OTP.</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Pilih Negara",
-                        callback_data="order"
-                    )
-                ]
-            ])
-        )
-
-        return
-
-    await query.edit_message_text(
-        f"🌍 Negara: <b>{country}</b>\n\n"
-        "📱 <b>Pilih layanan:</b>\n\n"
-        "Harga sudah termasuk margin reseller "
-        "20%.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-    )
+    # =====================================================
+    # CEK OTP
+    # =====================================================
 
     elif query.data.startswith(
-    "otp_product:"
-):
+        "otp_check:"
+    ):
 
-    parts = query.data.split(
-        ":",
-        2
-    )
+        order_id = query.data.split(
+            ":",
+            1
+        )[1]
 
-    if len(parts) != 3:
-
-        await query.edit_message_text(
-            "❌ Data order tidak valid."
+        order = get_order(
+            order_id
         )
 
-        return
+        if not order:
 
-    country = parts[1]
-    product = parts[2]
+            await query.answer(
+                "Order tidak ditemukan.",
+                show_alert=True
+            )
 
-    # Cari operator termurah
-    operator_info = await asyncio.to_thread(
-        get_cheapest_operator,
-        country,
-        product
-    )
+            return
 
-    if not operator_info:
+        if order["telegram_id"] != user_id:
 
-        await query.edit_message_text(
-            "❌ <b>Stok habis.</b>\n\n"
-            "Nomor untuk layanan ini "
-            "sedang tidak tersedia.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Kembali",
-                        callback_data=(
-                            f"otp_country:{country}"
-                        )
+            await query.answer(
+                "Order ini bukan milik kamu.",
+                show_alert=True
+            )
+
+            return
+
+        if order["status"] != "PENDING":
+
+            await query.answer(
+                f"Status: {order['status']}",
+                show_alert=True
+            )
+
+            return
+
+        provider_order_id = (
+            order["provider_order_id"]
+        )
+
+        if not provider_order_id:
+
+            await query.answer(
+                "Order masih diproses.",
+                show_alert=True
+            )
+
+            return
+
+        data = await asyncio.to_thread(
+            get_sms,
+            provider_order_id
+        )
+
+        if (
+            not data
+            or
+            data.get("response") == "ERROR"
+        ):
+
+            await query.answer(
+                "Gagal mengecek OTP.",
+                show_alert=True
+            )
+
+            return
+
+        sms_list = data.get(
+            "sms",
+            []
+        )
+
+        if sms_list:
+
+            sms = sms_list[0]
+
+            code = sms.get(
+                "code"
+            )
+
+            text = sms.get(
+                "text",
+                ""
+            )
+
+            if code:
+
+                success = mark_order_success(
+                    order_id
+                )
+
+                if success:
+
+                    await query.edit_message_text(
+                        "🎉 <b>OTP DITERIMA</b>\n\n"
+                        f"🧾 Order: "
+                        f"<code>{order_id}</code>\n\n"
+                        f"🔐 OTP:\n"
+                        f"<code>{code}</code>\n\n"
+                        f"📨 SMS:\n"
+                        f"<code>{text}</code>",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton(
+                                    "🏠 Menu Utama",
+                                    callback_data="user_home"
+                                )
+                            ]
+                        ])
                     )
-                ]
-            ])
+
+                return
+
+        await query.answer(
+            "⏳ OTP belum masuk. Coba lagi.",
+            show_alert=True
         )
 
-        return
+    # =====================================================
+    # CANCEL / REFUND ORDER
+    # =====================================================
 
-    operator = operator_info[
-        "operator"
-    ]
+    elif query.data.startswith(
+        "otp_cancel:"
+    ):
 
-    provider_cost_usd = float(
-        operator_info["cost"]
-    )
+        order_id = query.data.split(
+            ":",
+            1
+        )[1]
 
-    sell_price = hitung_harga_jual(
-        provider_cost_usd
-    )
+        order = get_order(
+            order_id
+        )
 
-    current_balance = get_balance(
-        user_id
-    )
+        if not order:
 
-    if current_balance < sell_price:
+            await query.answer(
+                "Order tidak ditemukan.",
+                show_alert=True
+            )
+
+            return
+
+        if order["telegram_id"] != user_id:
+
+            await query.answer(
+                "Order ini bukan milik kamu.",
+                show_alert=True
+            )
+
+            return
+
+        if order["status"] != "PENDING":
+
+            await query.answer(
+                f"Order sudah {order['status']}.",
+                show_alert=True
+            )
+
+            return
+
+        provider_order_id = (
+            order["provider_order_id"]
+        )
 
         await query.edit_message_text(
-            "❌ <b>Saldo tidak cukup.</b>\n\n"
-            f"💰 Harga: "
-            f"<b>{format_rupiah(sell_price)}</b>\n"
-            f"💳 Saldo: "
-            f"<b>{format_rupiah(current_balance)}</b>\n\n"
-            "Silakan deposit terlebih dahulu.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "💳 Deposit",
-                        callback_data="user_deposit"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Kembali",
-                        callback_data=(
-                            f"otp_country:{country}"
-                        )
-                    )
-                ]
-            ])
-        )
-
-        return
-
-    await query.edit_message_text(
-        "⏳ <b>Memproses order...</b>\n\n"
-        f"🌍 Negara: <b>{country}</b>\n"
-        f"📱 Layanan: <b>{product}</b>\n"
-        f"💰 Harga: "
-        f"<b>{format_rupiah(sell_price)}</b>",
-        parse_mode="HTML"
-    )
-
-    # ID internal bot
-    order_id = (
-        "OTP-" +
-        uuid.uuid4().hex[:12].upper()
-    )
-
-    # Potong saldo + buat order internal
-    try:
-
-        balance_after = create_pending_order(
-            telegram_id=user_id,
-            order_id=order_id,
-            country=country,
-            service=product,
-            sell_price=sell_price
-        )
-
-    except ValueError as error:
-
-        await query.edit_message_text(
-            f"❌ <b>Order gagal.</b>\n\n"
-            f"{error}",
+            "⏳ <b>Membatalkan order...</b>",
             parse_mode="HTML"
         )
 
-        return
+        if provider_order_id:
 
-    # Beli nomor di 5SIM
-    result = await asyncio.to_thread(
-        buy_number,
-        country,
-        product,
-        operator
-    )
-
-    if (
-        not result
-        or
-        result.get("response") == "ERROR"
-    ):
+            await asyncio.to_thread(
+                cancel_number,
+                provider_order_id
+            )
 
         try:
 
-            refund = refund_order(
+            result = refund_order(
                 order_id,
-                "Pembelian nomor 5SIM gagal."
+                "User membatalkan order OTP."
             )
 
         except Exception as error:
 
             logger.exception(
-                "Refund gagal: %s",
-                order_id
+                "Refund gagal."
             )
 
             await query.edit_message_text(
-                "⚠️ <b>Provider gagal dan refund "
-                "otomatis mengalami masalah.</b>\n\n"
+                "❌ <b>Refund gagal diproses.</b>\n\n"
                 f"Order: <code>{order_id}</code>\n"
                 f"Error: <code>{error}</code>",
                 parse_mode="HTML"
@@ -1401,18 +1713,18 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             return
 
         await query.edit_message_text(
-            "❌ <b>Nomor tidak tersedia.</b>\n\n"
+            "✅ <b>ORDER DIBATALKAN</b>\n\n"
             f"🧾 Order: "
             f"<code>{order_id}</code>\n"
             f"💸 Refund: "
-            f"<b>{format_rupiah(sell_price)}</b>\n"
-            f"💰 Saldo: "
-            f"<b>{format_rupiah(refund['balance'])}</b>",
+            f"<b>{format_rupiah(order['sell_price'])}</b>\n"
+            f"💰 Saldo sekarang: "
+            f"<b>{format_rupiah(result['balance'])}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "🔄 Order Lagi",
+                        "📱 Order Lagi",
                         callback_data="order"
                     )
                 ],
@@ -1425,317 +1737,12 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             ])
         )
 
-        return
-
-    provider_order_id = result.get(
-        "id"
-    )
-
-    phone = result.get(
-        "phone"
-    )
-
-    if not provider_order_id or not phone:
-
-        refund_order(
-            order_id,
-            "Respons 5SIM tidak lengkap."
-        )
-
-        await query.edit_message_text(
-            "❌ <b>Respons provider tidak valid.</b>\n\n"
-            "Saldo sudah dikembalikan.",
-            parse_mode="HTML"
-        )
-
-        return
-
-    provider_cost_rp = int(
-        round(
-            provider_cost_usd *
-            17649.80
-        )
-    )
-
-    save_provider_order(
-        order_id,
-        provider_order_id,
-        provider_cost_rp
-    )
-
-    await query.edit_message_text(
-        "✅ <b>ORDER BERHASIL</b>\n\n"
-        f"🧾 Order: "
-        f"<code>{order_id}</code>\n"
-        f"🌍 Negara: <b>{country}</b>\n"
-        f"📱 Layanan: <b>{product}</b>\n\n"
-        f"📞 Nomor:\n"
-        f"<code>{phone}</code>\n\n"
-        f"💰 Harga: "
-        f"<b>{format_rupiah(sell_price)}</b>\n"
-        f"💳 Sisa saldo: "
-        f"<b>{format_rupiah(balance_after)}</b>\n\n"
-        "⏳ <b>Menunggu SMS OTP...</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔄 Cek OTP",
-                    callback_data=(
-                        f"otp_check:{order_id}"
-                    )
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ Batal / Refund",
-                    callback_data=(
-                        f"otp_cancel:{order_id}"
-                    )
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🏠 Menu Utama",
-                    callback_data="user_home"
-                )
-            ]
-        ])
-    )
-
-    elif query.data.startswith(
-    "otp_check:"
-):
-
-    order_id = query.data.split(
-        ":",
-        1
-    )[1]
-
-    order = get_order(
-        order_id
-    )
-
-    if not order:
-
-        await query.answer(
-            "Order tidak ditemukan.",
-            show_alert=True
-        )
-
-        return
-
-    if order["telegram_id"] != user_id:
-
-        await query.answer(
-            "Order ini bukan milik kamu.",
-            show_alert=True
-        )
-
-        return
-
-    if order["status"] != "PENDING":
-
-        await query.answer(
-            f"Status: {order['status']}",
-            show_alert=True
-        )
-
-        return
-
-    provider_order_id = (
-        order["provider_order_id"]
-    )
-
-    if not provider_order_id:
-
-        await query.answer(
-            "Order masih diproses.",
-            show_alert=True
-        )
-
-        return
-
-    data = await asyncio.to_thread(
-        get_sms,
-        provider_order_id
-    )
-
-    if (
-        not data
-        or
-        data.get("response") == "ERROR"
-    ):
-
-        await query.answer(
-            "Gagal mengecek OTP.",
-            show_alert=True
-        )
-
-        return
-
-    sms_list = data.get(
-        "sms",
-        []
-    )
-
-    if sms_list:
-
-        sms = sms_list[0]
-
-        code = sms.get(
-            "code"
-        )
-
-        text = sms.get(
-            "text",
-            ""
-        )
-
-        if code:
-
-            success = mark_order_success(
-                order_id
-            )
-
-            if success:
-
-                await query.edit_message_text(
-                    "🎉 <b>OTP DITERIMA</b>\n\n"
-                    f"🧾 Order: "
-                    f"<code>{order_id}</code>\n\n"
-                    f"🔐 OTP:\n"
-                    f"<code>{code}</code>\n\n"
-                    f"📨 SMS:\n"
-                    f"<code>{text}</code>",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "🏠 Menu Utama",
-                                callback_data="user_home"
-                            )
-                        ]
-                    ])
-                )
-
-            return
-
-    await query.answer(
-        "⏳ OTP belum masuk. Coba lagi.",
-        show_alert=True
-    )
-
-    elif query.data.startswith(
-    "otp_cancel:"
-):
-
-    order_id = query.data.split(
-        ":",
-        1
-    )[1]
-
-    order = get_order(
-        order_id
-    )
-
-    if not order:
-
-        await query.answer(
-            "Order tidak ditemukan.",
-            show_alert=True
-        )
-
-        return
-
-    if order["telegram_id"] != user_id:
-
-        await query.answer(
-            "Order ini bukan milik kamu.",
-            show_alert=True
-        )
-
-        return
-
-    if order["status"] != "PENDING":
-
-        await query.answer(
-            f"Order sudah {order['status']}.",
-            show_alert=True
-        )
-
-        return
-
-    provider_order_id = (
-        order["provider_order_id"]
-    )
-
-    await query.edit_message_text(
-        "⏳ <b>Membatalkan order...</b>",
-        parse_mode="HTML"
-    )
-
-    if provider_order_id:
-
-        await asyncio.to_thread(
-            cancel_number,
-            provider_order_id
-        )
-
-    try:
-
-        result = refund_order(
-            order_id,
-            "User membatalkan order OTP."
-        )
-
-    except Exception as error:
-
-        logger.exception(
-            "Refund gagal."
-        )
-
-        await query.edit_message_text(
-            "❌ <b>Refund gagal diproses.</b>\n\n"
-            f"Order: <code>{order_id}</code>\n"
-            f"Error: <code>{error}</code>",
-            parse_mode="HTML"
-        )
-
-        return
-
-    await query.edit_message_text(
-        "✅ <b>ORDER DIBATALKAN</b>\n\n"
-        f"🧾 Order: "
-        f"<code>{order_id}</code>\n"
-        f"💸 Refund: "
-        f"<b>{format_rupiah(order['sell_price'])}</b>\n"
-        f"💰 Saldo sekarang: "
-        f"<b>{format_rupiah(result['balance'])}</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "📱 Order Lagi",
-                    callback_data="order"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🏠 Menu Utama",
-                    callback_data="user_home"
-                )
-            ]
-        ])
-    )
-
     # =====================================================
     # DEPOSIT
     # =====================================================
 
     elif query.data == "user_deposit":
 
-        # Aktifkan mode menunggu nominal
         context.chat_data[
             "waiting_deposit"
         ] = True
@@ -1751,9 +1758,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             "10000\n"
             "25000\n\n"
             "Ketik nominal sekarang.",
-
             parse_mode="HTML",
-
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1770,7 +1775,6 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
 
     elif query.data == "cancel_deposit":
 
-        # MATIKAN MODE INPUT
         context.chat_data[
             "waiting_deposit"
         ] = False
@@ -1897,9 +1901,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             f"Link kamu:\n"
             f"<code>{ref_link}</code>\n\n"
             f"Dapet 10% dari deposit teman",
-
             parse_mode="HTML",
-
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1919,9 +1921,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
         await query.edit_message_text(
             "💬 <b>Contact CS</b>\n\n"
             "Hubungi: @AdminLu",
-
             parse_mode="HTML",
-
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1959,9 +1959,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             await query.edit_message_text(
                 "❌ Kamu tidak punya "
                 "deposit pending.",
-
                 parse_mode="HTML",
-
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -1977,7 +1975,6 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
         await query.edit_message_text(
             "⏳ Mengecek pembayaran "
             "ke Midtrans...",
-
             parse_mode="HTML"
         )
 
@@ -1991,9 +1988,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             await query.edit_message_text(
                 "❌ Gagal cek ke Midtrans.\n\n"
                 "Coba lagi beberapa detik.",
-
                 parse_mode="HTML",
-
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -2040,9 +2035,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                     f"<b>{format_rupiah(result['amount'])}</b>\n"
                     f"💳 Saldo sekarang: "
                     f"<b>{format_rupiah(result['new_balance'])}</b>",
-
                     parse_mode="HTML",
-
                     reply_markup=InlineKeyboardMarkup([
                         [
                             InlineKeyboardButton(
@@ -2073,9 +2066,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                     "berhasil diproses.</b>\n\n"
                     "💰 Saldo sekarang: "
                     f"<b>{format_rupiah(get_balance(user_id))}</b>",
-
                     parse_mode="HTML",
-
                     reply_markup=InlineKeyboardMarkup([
                         [
                             InlineKeyboardButton(
@@ -2112,9 +2103,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
             await query.edit_message_text(
                 "❌ <b>Deposit Expired</b>\n\n"
                 "Silakan buat invoice baru.",
-
                 parse_mode="HTML",
-
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -2142,9 +2131,7 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
                 f"{str(transaction_status).upper()}</b>\n\n"
                 "Belum dibayar.\n"
                 "Klik cek lagi setelah bayar.",
-
                 parse_mode="HTML",
-
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -2167,7 +2154,6 @@ Gunakan nomor segera setelah order untuk meningkatkan kemungkinan OTP masuk."""
 
     elif query.data == "user_home":
 
-        # PASTIKAN MODE INPUT DEPOSIT MATI
         context.chat_data[
             "waiting_deposit"
         ] = False
@@ -2204,9 +2190,7 @@ async def admin_callback(query):
         await query.edit_message_text(
             f"👥 <b>USERS</b>\n\n"
             f"Total user: <b>{total}</b>",
-
             parse_mode="HTML",
-
             reply_markup=InlineKeyboardMarkup(
                 back
             )
@@ -2244,9 +2228,7 @@ async def admin_callback(query):
             f"Total transaksi: <b>{total}</b>\n"
             f"Pending: <b>{pending}</b>\n"
             f"Success: <b>{success}</b>",
-
             parse_mode="HTML",
-
             reply_markup=InlineKeyboardMarkup(
                 back
             )
@@ -2284,9 +2266,7 @@ async def admin_callback(query):
             f"Total order: <b>{total}</b>\n"
             f"Pending: <b>{pending}</b>\n"
             f"Success: <b>{success}</b>",
-
             parse_mode="HTML",
-
             reply_markup=InlineKeyboardMarkup(
                 back
             )
@@ -2294,25 +2274,23 @@ async def admin_callback(query):
 
     elif query.data == "admin_provider":
 
-    provider_balance = await asyncio.to_thread(
-        get_5sim_balance
-    )
-
-    await query.edit_message_text(
-        "💰 <b>5SIM PROVIDER</b>\n\n"
-        "🟢 Status: <b>CONNECTED</b>\n\n"
-        f"💵 Saldo 5SIM: "
-        f"<b>${provider_balance:.2f}</b>\n\n"
-        "💱 Kurs: "
-        f"<b>Rp17.649,80 / USD</b>\n"
-        "📈 Margin: <b>20%</b>",
-
-        parse_mode="HTML",
-
-        reply_markup=InlineKeyboardMarkup(
-            back
+        provider_balance = await asyncio.to_thread(
+            get_5sim_balance
         )
-    )
+
+        await query.edit_message_text(
+            "💰 <b>5SIM PROVIDER</b>\n\n"
+            "🟢 Status: <b>CONNECTED</b>\n\n"
+            f"💵 Saldo 5SIM: "
+            f"<b>${provider_balance:.2f}</b>\n\n"
+            "💱 Kurs: "
+            f"<b>Rp17.649,80 / USD</b>\n"
+            "📈 Margin: <b>20%</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                back
+            )
+        )
 
     elif query.data == "admin_stats":
 
@@ -2357,9 +2335,7 @@ async def admin_callback(query):
             f"📦 Orders: <b>{orders}</b>\n"
             f"💰 Total saldo user: "
             f"<b>{format_rupiah(balance)}</b>",
-
             parse_mode="HTML",
-
             reply_markup=InlineKeyboardMarkup(
                 back
             )
@@ -2370,9 +2346,7 @@ async def admin_callback(query):
         await query.edit_message_text(
             "👑 <b>ADMIN PANEL</b>\n\n"
             "Pilih menu:",
-
             parse_mode="HTML",
-
             reply_markup=admin_menu()
         )
 
@@ -2485,7 +2459,7 @@ async def text_handler(
     user = update.effective_user
 
     # -----------------------------------------------------
-    # MATIKAN MODE SEBELUM PROSES
+    # MATIKAN MODE INPUT SEBELUM PROSES
     # -----------------------------------------------------
 
     context.chat_data[
