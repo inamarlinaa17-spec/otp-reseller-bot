@@ -642,8 +642,15 @@ def get_aggregated_quotes(country, service):
 
 
 def get_aggregated_countries(service):
-    """Return one cheapest live quote per country across all three providers."""
-    countries = []
+    """
+    Return one display row per country across ALL providers.
+
+    The displayed price is the cheapest live quote, while the displayed
+    stock is the combined stock from every live provider quote for that
+    country.  This lets the country menu show the real aggregator picture
+    without exposing which provider supplied the cheapest quote.
+    """
+    grouped = {}
 
     for q in _all_quotes(service):
         name = str(q.get("country_name") or q.get("country") or "").strip()
@@ -652,24 +659,26 @@ def get_aggregated_countries(service):
         if not name or cost <= 0 or stock <= 0:
             continue
 
-        candidate = {
-            "country": name,
-            "name": name,
-            "cost": cost,
-            "stock": stock,
-            "provider": q.get("provider"),
-        }
-
-        existing_index = next(
-            (i for i, item in enumerate(countries) if _same_country(item["name"], name)),
+        existing = next(
+            (item for item in grouped.values() if _same_country(item["name"], name)),
             None,
         )
 
-        if existing_index is None:
-            countries.append(candidate)
-        elif cost < _num(countries[existing_index]["cost"]):
-            countries[existing_index] = candidate
+        if existing is None:
+            grouped[name] = {
+                "country": name,
+                "name": name,
+                "cost": cost,
+                "stock": stock,
+            }
+        else:
+            # Combine stock from every provider/quote for this country.
+            existing["stock"] += stock
+            # Keep only the cheapest price for the country display.
+            if cost < _num(existing["cost"]):
+                existing["cost"] = cost
 
+    countries = list(grouped.values())
     return sorted(
         countries,
         key=lambda x: (

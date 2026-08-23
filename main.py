@@ -1779,12 +1779,10 @@ async def show_service_country_page(
         for item, best in zip(page_items, quote_rows):
             if best:
                 price = hitung_harga_jual(best["cost_usd"])
-                provider_label = {
-                    "5sim": "S1",
-                    "smspool": "S2",
-                    "smsman": "S3",
-                }.get(best.get("provider"), best.get("provider", "?"))
-                label = f"🌍 {item['name']}  |  💰 {format_rupiah(price)}  |  📦 {best['stock']}  |  ⚡ {provider_label}"
+                # The country menu is an aggregator view: price = cheapest
+                # live quote, stock = combined stock from all providers.
+                # Never expose the underlying provider here.
+                label = f"🌍 {item['name']}  |  💰 mulai {format_rupiah(price)}  |  📦 {item['stock']}"
             else:
                 label = f"🌍 {item['name']}  |  ❌ Tidak tersedia"
             keyboard.append([
@@ -2432,14 +2430,16 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
             country_name=q.get("country_name") or country
         )
         sell = hitung_harga_jual(q["cost_usd"])
-        provider_label = {
-            "5sim": "⚡ Server 1 (5SIM)",
-            "smspool": "⚡ Server 2 (SMSPool)",
-            "smsman": "⚡ Server 3 (SMS-Man)",
-        }.get(q.get("provider"), str(q.get("provider", "Provider")))
+        # Keep provider identities private. Users only see the internal
+        # server number, never 5SIM / SMSPool / SMS-Man.
+        server_label = {
+            "5sim": "⚡ Server 1",
+            "smspool": "⚡ Server 2",
+            "smsman": "⚡ Server 3",
+        }.get(q.get("provider"), "⚡ Server")
         keyboard.append([
             InlineKeyboardButton(
-                f"{provider_label} | 💰 {format_rupiah(sell)} | 📦 {q['stock']}",
+                f"{server_label} | 💰 {format_rupiah(sell)} | 📦 {q['stock']}",
                 callback_data=f"otp_quote:{quote_id}"
             )
         ])
