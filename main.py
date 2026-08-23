@@ -4378,54 +4378,45 @@ Jika order dapat dibatalkan, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        if transaction_status in [
+                if transaction_status in [
             "expire",
             "cancel"
         ]:
-
             with get_db() as db:
-
                 db.execute(
-
                     """
                     UPDATE deposits
                     SET status = 'EXPIRED'
                     WHERE deposit_id = %s
                     AND status = 'PENDING'
                     """,
-
                     (
                         deposit[
                             "deposit_id"
                         ],
                     )
-
                 )
 
             await query.edit_message_text(
-
                 "❌ <b>Deposit Expired</b>\n\n"
                 "Silakan buat invoice baru.",
-
                 parse_mode="HTML",
-
                 reply_markup=InlineKeyboardMarkup([
-
                     [
                         InlineKeyboardButton(
                             "💳 Deposit Lagi",
                             callback_data="user_deposit"
                         )
                     ],
-
                     [
                         InlineKeyboardButton(
                             "🏠 Menu Utama",
                             callback_data="user_home"
                         )
                     ]
-
                 ])
+            )
+
 
             return
 
