@@ -48,15 +48,10 @@ def post_request(
     try:
 
         response = requests.post(
-
             f"{BASE_URL}{endpoint}",
-
             data=data,
-
             headers=get_headers(),
-
             timeout=timeout
-
         )
 
         try:
@@ -91,7 +86,8 @@ def check_api():
 
         return {
             "success": False,
-            "error": "SMSPOOL_API_KEY belum diatur."
+            "error":
+                "SMSPOOL_API_KEY belum diatur."
         }
 
     result = post_request(
@@ -102,7 +98,8 @@ def check_api():
 
         return {
             "success": False,
-            "error": "Respons SMSPOOL kosong."
+            "error":
+                "Respons SMSPOOL kosong."
         }
 
     return {
@@ -127,8 +124,6 @@ def get_balance():
 
     try:
 
-        # Beberapa response SMSPool
-        # mengembalikan balance langsung.
         if isinstance(result, dict):
 
             for key in [
@@ -213,11 +208,8 @@ def get_prices(
         data["service"] = service
 
     result = post_request(
-
         "/request/price",
-
         data=data
-
     )
 
     if not result:
@@ -264,16 +256,19 @@ def find_service(
         ).lower()
     )
 
+    # -----------------------------------------------------
+    # FORMAT DICT
+    #
+    # {
+    #     "1": "WhatsApp",
+    #     "2": "Telegram"
+    # }
+    # -----------------------------------------------------
+
     if isinstance(
         services,
         dict
     ):
-
-        # Format:
-        # {
-        #   "1": "WhatsApp",
-        #   ...
-        # }
 
         for service_id, name in (
             services.items()
@@ -302,6 +297,17 @@ def find_service(
                     "name":
                         name
                 }
+
+    # -----------------------------------------------------
+    # FORMAT LIST
+    #
+    # [
+    #     {
+    #         "id": 1,
+    #         "name": "WhatsApp"
+    #     }
+    # ]
+    # -----------------------------------------------------
 
     elif isinstance(
         services,
@@ -399,41 +405,28 @@ def hitung_harga_jual(
         return 0
 
     harga_modal_rp = (
-
-        harga_dolar
-        *
+        harga_dolar *
         KURS_DOLAR
-
     )
 
     keuntungan = (
-
-        harga_modal_rp
-        *
+        harga_modal_rp *
         (
-            PROFIT_PERCENT
-            /
+            PROFIT_PERCENT /
             100
         )
-
     )
 
     harga_jual = (
-
-        harga_modal_rp
-        +
+        harga_modal_rp +
         keuntungan
-
     )
 
+    # Pembulatan Rp100
     return int(
-
         round(
             harga_jual / 100
-        )
-        *
-        100
-
+        ) * 100
     )
 
 
@@ -449,13 +442,11 @@ def buy_number(
 ):
 
     data = {
-
         "country":
             country,
 
         "service":
             service
-
     }
 
     if pool is not None:
@@ -469,13 +460,9 @@ def buy_number(
     data["activation_type"] = "SMS"
 
     result = post_request(
-
         "/purchase/sms",
-
         data=data,
-
         timeout=30
-
     )
 
     if not result:
@@ -488,9 +475,10 @@ def buy_number(
                 "Respons SMSPOOL kosong."
         }
 
-    # -----------------------------------------------------
-    # BERHASIL
-    # -----------------------------------------------------
+
+    # =====================================================
+    # SUCCESS
+    # =====================================================
 
     if str(
         result.get(
@@ -520,35 +508,23 @@ def buy_number(
                     )
                 ),
 
-            "order_id":
-                result.get(
-                    "order_id"
-                ),
-
-            "country":
-                result.get(
-                    "country"
-                ),
-
-            "service":
-                result.get(
-                    "service"
-                ),
-
             "cost":
                 result.get(
                     "cost",
-                    0
+                    result.get(
+                        "price",
+                        0
+                    )
                 ),
 
             "raw":
                 result
-
         }
 
-    # -----------------------------------------------------
-    # GAGAL
-    # -----------------------------------------------------
+
+    # =====================================================
+    # ERROR
+    # =====================================================
 
     return {
 
@@ -556,13 +532,49 @@ def buy_number(
             "ERROR",
 
         "message":
-            result
+            result.get(
+                "message",
+                result.get(
+                    "error",
+                    "Gagal membeli nomor SMSPool."
+                )
+            ),
 
+        "raw":
+            result
     }
+
+# =========================================================
+# CHECK ORDER / OTP
+# =========================================================
+
+def get_order(
+    order_id
+):
+
+    result = post_request(
+        "/request/active",
+        data={
+            "orderid":
+                order_id
+        }
+    )
+
+    if not result:
+
+        return {
+            "response":
+                "ERROR",
+
+            "message":
+                "Respons SMSPOOL kosong."
+        }
+
+    return result
 
 
 # =========================================================
-# CHECK OTP
+# GET SMS / OTP
 # =========================================================
 
 def get_sms(
@@ -570,153 +582,102 @@ def get_sms(
 ):
 
     result = post_request(
-
-        "/sms/check",
-
+        "/request/active",
         data={
-
             "orderid":
                 order_id
-
-        },
-
-        timeout=20
-
+        }
     )
 
     if not result:
 
         return {
-
             "response":
                 "ERROR",
 
             "message":
                 "Respons SMSPOOL kosong."
-
         }
 
-    try:
-
-        status = int(
-            result.get(
-                "status",
-                0
-            )
-        )
-
-    except Exception:
-
-        status = 0
 
     # -----------------------------------------------------
-    # COMPLETE
+    # Normalisasi response
     # -----------------------------------------------------
 
-    if status == 3:
+    if isinstance(
+        result,
+        dict
+    ):
 
-        code = result.get(
+        # OTP langsung
+        for key in [
+            "code",
+            "otp",
             "sms",
-            ""
-        )
+            "sms_code"
+        ]:
 
-        full_sms = result.get(
-            "full_sms",
-            ""
-        )
+            value = result.get(
+                key
+            )
 
-        return {
+            if value:
 
-            "response":
-                "SUCCESS",
+                return {
 
-            "status":
-                status,
-
-            "sms": [
-
-                {
+                    "response":
+                        "SUCCESS",
 
                     "code":
-                        str(code),
+                        str(value),
 
-                    "text":
-                        str(
-                            full_sms
-                        )
-
+                    "raw":
+                        result
                 }
 
-            ],
 
-            "code":
-                str(code),
+        # SMSPool terkadang mengembalikan
+        # SMS dalam field message/text.
+        for key in [
+            "message",
+            "text"
+        ]:
 
-            "full_sms":
-                str(full_sms),
+            value = result.get(
+                key
+            )
 
-            "raw":
-                result
+            if value:
 
-        }
+                return {
 
-    # -----------------------------------------------------
-    # REFUNDED
-    # -----------------------------------------------------
+                    "response":
+                        "SMS",
 
-    if status == 6:
+                    "message":
+                        str(value),
 
-        return {
+                    "raw":
+                        result
+                }
 
-            "response":
-                "REFUNDED",
-
-            "status":
-                status,
-
-            "message":
-                result.get(
-                    "message",
-                    "Order sudah direfund."
-                ),
-
-            "raw":
-                result
-
-        }
 
     # -----------------------------------------------------
-    # PENDING
+    # BELUM ADA SMS
     # -----------------------------------------------------
 
     return {
 
         "response":
-            "PENDING",
-
-        "status":
-            status,
-
-        "sms": [],
-
-        "time_left":
-            result.get(
-                "time_left"
-            ),
-
-        "expiration":
-            result.get(
-                "expiration"
-            ),
+            "WAITING",
 
         "raw":
             result
-
     }
 
 
 # =========================================================
-# CANCEL NUMBER
+# CANCEL ORDER
 # =========================================================
 
 def cancel_number(
@@ -724,18 +685,12 @@ def cancel_number(
 ):
 
     result = post_request(
-
-        "/sms/cancel",
-
+        "/request/cancel",
         data={
-
             "orderid":
                 order_id
-
         },
-
-        timeout=20
-
+        timeout=30
     )
 
     if not result:
@@ -747,8 +702,76 @@ def cancel_number(
 
             "message":
                 "Respons SMSPOOL kosong."
-
         }
+
+
+    success = str(
+        result.get(
+            "success",
+            0
+        )
+    )
+
+
+    if success == "1":
+
+        return {
+
+            "response":
+                "SUCCESS",
+
+            "raw":
+                result
+        }
+
+
+    return {
+
+        "response":
+            "ERROR",
+
+        "message":
+            result.get(
+                "message",
+                result.get(
+                    "error",
+                    "Gagal membatalkan order."
+                )
+            ),
+
+        "raw":
+            result
+    }
+
+
+# =========================================================
+# RELEASE ORDER
+# =========================================================
+
+def release_number(
+    order_id
+):
+
+    result = post_request(
+        "/request/release",
+        data={
+            "orderid":
+                order_id
+        },
+        timeout=30
+    )
+
+    if not result:
+
+        return {
+
+            "response":
+                "ERROR",
+
+            "message":
+                "Respons SMSPOOL kosong."
+        }
+
 
     if str(
         result.get(
@@ -762,16 +785,10 @@ def cancel_number(
             "response":
                 "SUCCESS",
 
-            "message":
-                result.get(
-                    "message",
-                    "Order berhasil dibatalkan."
-                ),
-
             "raw":
                 result
-
         }
+
 
     return {
 
@@ -779,69 +796,164 @@ def cancel_number(
             "ERROR",
 
         "message":
-            result
+            result.get(
+                "message",
+                result.get(
+                    "error",
+                    "Gagal release order."
+                )
+            ),
 
+        "raw":
+            result
     }
 
 
 # =========================================================
-# ACTIVE ORDERS
+# GET AVAILABLE COUNTRIES FOR SERVICE
 # =========================================================
 
-def get_active_orders():
+def get_available_countries(
+    service
+):
 
-    result = post_request(
+    countries = get_all_countries()
 
-        "/request/active",
-
-        timeout=20
-
-    )
-
-    if not result:
+    if not countries:
 
         return []
 
+
+    result = []
+
+
+    # -----------------------------------------------------
+    # Ambil daftar country
+    # -----------------------------------------------------
+
     if isinstance(
-        result,
+        countries,
+        dict
+    ):
+
+        iterable = (
+            countries.items()
+        )
+
+        for country_id, country_info in iterable:
+
+            country_name = str(
+                country_info
+            )
+
+            price_data = get_prices(
+                country=country_id,
+                service=service
+            )
+
+            if not price_data:
+
+                continue
+
+            result.append({
+
+                "country":
+                    str(country_id),
+
+                "name":
+                    country_name,
+
+                "price":
+                    price_data
+
+            })
+
+
+    elif isinstance(
+        countries,
         list
     ):
 
-        return result
+        for item in countries:
 
-    return []
+            if not isinstance(
+                item,
+                dict
+            ):
 
+                continue
 
-# =========================================================
-# GET ORDER
-# =========================================================
+            country_id = item.get(
+                "id",
+                item.get(
+                    "country"
+                )
+            )
 
-def get_order(
-    order_id
-):
+            country_name = item.get(
+                "name",
+                item.get(
+                    "country_name",
+                    str(country_id)
+                )
+            )
 
-    result = post_request(
+            if not country_id:
 
-        "/sms/check",
+                continue
 
-        data={
+            price_data = get_prices(
+                country=country_id,
+                service=service
+            )
 
-            "orderid":
-                order_id
+            if not price_data:
 
-        },
+                continue
 
-        timeout=20
+            result.append({
 
-    )
+                "country":
+                    str(country_id),
+
+                "name":
+                    str(country_name),
+
+                "price":
+                    price_data
+
+            })
+
 
     return result
+
+
+# =========================================================
+# GET AVAILABLE SERVICE COUNTRIES
+# =========================================================
+
+def get_service_countries(
+    service
+):
+
+    return get_available_countries(
+        service
+    )
 
 
 # =========================================================
 # PROVIDER NAME
 # =========================================================
 
-def get_provider_name():
+def provider_name():
 
     return "SMSPOOL"
+
+
+# =========================================================
+# PROVIDER KEY
+# =========================================================
+
+def provider_key():
+
+    return "smspool"
