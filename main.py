@@ -63,6 +63,7 @@ from provider import (
     get_balance as get_5sim_balance,
     get_products,
     get_all_products,
+    get_prices,
     get_all_countries,
     get_cheapest_operator,
     hitung_harga_jual,
@@ -74,6 +75,7 @@ from provider import (
 from smspool import (
     get_balance as get_smspool_balance,
     get_prices as get_smspool_prices,
+    get_suggested_countries as get_smspool_suggested_countries,
     get_all_countries as get_smspool_countries,
     get_all_services as get_smspool_services,
     find_service as find_smspool_service,
@@ -1204,9 +1206,11 @@ def get_service_catalog(server):
         for key, value in iterable:
             if isinstance(value, dict):
                 code = str(
-                    value.get("name")
-                    or value.get("service")
+                    value.get("ID")
                     or value.get("id")
+                    or value.get("service_id")
+                    or value.get("name")
+                    or value.get("service")
                     or key
                 ).strip()
                 label = str(
@@ -1460,6 +1464,33 @@ def _flatten_smspool_prices(data, fallback_service):
     return result
 
 
+def _flatten_smspool_suggested_countries(data):
+    result = []
+    if not isinstance(data, list):
+        return result
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        country = item.get("country_id") or item.get("country") or item.get("ID")
+        name = item.get("name") or item.get("country_name") or item.get("short_name") or str(country or "")
+        price = item.get("price") or item.get("cost")
+        try:
+            cost = float(price or 0)
+        except Exception:
+            continue
+        if country is not None and cost > 0:
+            result.append({
+                "country": str(country),
+                "name": str(name),
+                "cost": cost,
+                # suggested_countries tidak mengembalikan stock count;
+                # gunakan 1 sebagai indikator bahwa provider menyarankan negara ini.
+                "stock": 1
+            })
+    return result
+
+
 def _smspool_country_name_map():
     data = get_smspool_countries()
     mapping = {}
@@ -1503,6 +1534,9 @@ def get_service_countries(server, service):
     if server == "5sim":
         return _country_items_5sim(service)
 
+    # SMSPool: gunakan endpoint all_stock yang mengembalikan country,
+    # service, stock dan price. Jika kosong/error, coba suggested_countries
+    # sebagai fallback sehingga menu negara + harga tetap dapat ditampilkan.
     found = find_smspool_service(service)
     lookup_service = (
         found.get("id")
@@ -1513,10 +1547,19 @@ def get_service_countries(server, service):
     data = get_smspool_prices(service=lookup_service)
     items = _flatten_smspool_prices(data, service)
 
+    if not items:
+        try:
+            suggested = get_smspool_suggested_countries(lookup_service)
+            items = _flatten_smspool_suggested_countries(suggested)
+        except Exception as error:
+            logger.warning(
+                "SMSPool suggested countries fallback failed: %s", error
+            )
+
     names = _smspool_country_name_map()
     for item in items:
         item["name"] = names.get(
-            item["country"],
+            str(item["country"]),
             item["name"]
         )
 
