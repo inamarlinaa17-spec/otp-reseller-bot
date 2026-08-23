@@ -121,6 +121,101 @@ snap = midtransclient.Snap(
 
 COUNTRIES_PER_PAGE = 12
 PRODUCTS_PER_PAGE = 12
+SERVICES_PER_PAGE = 8
+
+
+# =========================================================
+# SERVER OTP
+# =========================================================
+
+OTP_SERVERS = {
+
+    "5sim":
+        "🟢 Server 1 — 5SIM",
+
+    "smspool":
+        "🔵 Server 2 — SMSPOOL"
+
+}
+
+
+# =========================================================
+# DAFTAR LAYANAN OTP
+# =========================================================
+
+OTP_SERVICES = [
+
+    (
+        "whatsapp",
+        "📱 WhatsApp"
+    ),
+
+    (
+        "telegram",
+        "✈️ Telegram"
+    ),
+
+    (
+        "shopee",
+        "🛒 Shopee"
+    ),
+
+    (
+        "tiktok",
+        "🎵 TikTok"
+    ),
+
+    (
+        "facebook",
+        "📘 Facebook"
+    ),
+
+    (
+        "instagram",
+        "📸 Instagram"
+    ),
+
+    (
+        "google",
+        "🔎 Google / Gmail / YouTube"
+    ),
+
+    (
+        "vercel",
+        "▲ Vercel"
+    ),
+
+    (
+        "uangme",
+        "💰 UangMe"
+    ),
+
+    (
+        "grab",
+        "🚕 Grab"
+    ),
+
+    (
+        "dana",
+        "💳 DANA"
+    ),
+
+    (
+        "gojek",
+        "🟢 Gojek"
+    ),
+
+    (
+        "any",
+        "🌐 Any Other"
+    ),
+
+    (
+        "ovo",
+        "💜 OVO"
+    )
+
+]
 
 
 # =========================================================
@@ -136,7 +231,9 @@ def format_rupiah(amount):
 
     return (
         f"Rp{int(amount):,}"
-        .replace(",", ".")
+    ).replace(
+        ",",
+        "."
     )
 
 
@@ -1001,6 +1098,210 @@ async def start(
 
 
 # =========================================================
+# PILIH SERVER OTP
+# =========================================================
+
+async def show_server_page(
+    query
+):
+
+    keyboard = [
+
+        [
+            InlineKeyboardButton(
+                OTP_SERVERS["5sim"],
+                callback_data="otp_server:5sim"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                OTP_SERVERS["smspool"],
+                callback_data="otp_server:smspool"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🏠 Menu Utama",
+                callback_data="user_home"
+            )
+        ]
+
+    ]
+
+    await query.edit_message_text(
+
+        "📱 <b>ORDER OTP</b>\n\n"
+        "Pilih server OTP yang ingin digunakan:",
+
+        parse_mode="HTML",
+
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
+
+    )
+
+
+# =========================================================
+# PILIH LAYANAN OTP
+# =========================================================
+
+async def show_service_page(
+    query,
+    server,
+    page=0
+):
+
+    total_pages = (
+
+        len(OTP_SERVICES)
+        +
+        SERVICES_PER_PAGE
+        - 1
+
+    ) // SERVICES_PER_PAGE
+
+    if page < 0:
+
+        page = 0
+
+    if page >= total_pages:
+
+        page = total_pages - 1
+
+    start_index = (
+
+        page *
+        SERVICES_PER_PAGE
+
+    )
+
+    end_index = (
+
+        start_index +
+        SERVICES_PER_PAGE
+
+    )
+
+    page_items = OTP_SERVICES[
+        start_index:end_index
+    ]
+
+    keyboard = []
+
+    for service_code, service_name in page_items:
+
+        keyboard.append([
+
+            InlineKeyboardButton(
+
+                service_name,
+
+                callback_data=(
+                    f"otp_service:"
+                    f"{server}:"
+                    f"{service_code}"
+                )
+
+            )
+
+        ])
+
+    navigation = []
+
+    if page > 0:
+
+        navigation.append(
+
+            InlineKeyboardButton(
+
+                "⬅️ Sebelumnya",
+
+                callback_data=(
+                    f"otp_services:"
+                    f"{server}:"
+                    f"{page - 1}"
+                )
+
+            )
+
+        )
+
+    if page < total_pages - 1:
+
+        navigation.append(
+
+            InlineKeyboardButton(
+
+                "Berikutnya ➡️",
+
+                callback_data=(
+                    f"otp_services:"
+                    f"{server}:"
+                    f"{page + 1}"
+                )
+
+            )
+
+        )
+
+    if navigation:
+
+        keyboard.append(
+            navigation
+        )
+
+    keyboard.append([
+
+        InlineKeyboardButton(
+
+            "⬅️ Pilih Server",
+
+            callback_data="order"
+
+        )
+
+    ])
+
+    keyboard.append([
+
+        InlineKeyboardButton(
+
+            "🏠 Menu Utama",
+
+            callback_data="user_home"
+
+        )
+
+    ])
+
+    server_name = OTP_SERVERS.get(
+        server,
+        server
+    )
+
+    await query.edit_message_text(
+
+        f"📱 <b>PILIH LAYANAN OTP</b>\n\n"
+
+        f"🖥 Server: "
+        f"<b>{server_name}</b>\n\n"
+
+        f"Halaman <b>{page + 1}</b> "
+        f"dari <b>{total_pages}</b>",
+
+        parse_mode="HTML",
+
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
+
+    )
+
+
+# =========================================================
 # TAMPILKAN NEGARA
 # =========================================================
 
@@ -1577,23 +1878,31 @@ async def user_callback(
 Isi saldo terlebih dahulu melalui menu <b>Deposit</b>.
 
 2️⃣ <b>Order OTP</b>
-Pilih negara kemudian pilih layanan/aplikasi OTP yang tersedia.
+Pilih server OTP terlebih dahulu.
 
-3️⃣ <b>Pilih layanan</b>
-Bot menampilkan:
-├ Harga jual
-└ Stock nomor yang tersedia
+3️⃣ <b>Pilih Server</b>
+├ Server 1 → 5SIM
+└ Server 2 → SMSPOOL
 
-4️⃣ <b>Gunakan Nomor</b>
+4️⃣ <b>Pilih layanan</b>
+Bot menampilkan layanan OTP seperti WhatsApp, Telegram, Shopee, TikTok, Facebook, Instagram, Google, Vercel, UangMe, Grab, DANA, Gojek, OVO, Any Other, dan lainnya.
+
+5️⃣ <b>Pilih Negara</b>
+Untuk server 5SIM, pilih negara nomor yang tersedia.
+
+6️⃣ <b>Pilih layanan/provider</b>
+Pilih layanan yang memiliki stok.
+
+7️⃣ <b>Gunakan Nomor</b>
 Setelah order berhasil, nomor diberikan oleh bot.
 
-5️⃣ <b>Menunggu SMS</b>
+8️⃣ <b>Menunggu SMS</b>
 Masukkan nomor tersebut ke aplikasi tujuan dan tunggu OTP.
 
-6️⃣ <b>Cek OTP</b>
+9️⃣ <b>Cek OTP</b>
 Tekan tombol <b>🔄 Cek OTP</b> sampai SMS masuk.
 
-7️⃣ <b>Refund</b>
+🔟 <b>Refund</b>
 Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         await query.edit_message_text(
@@ -1623,9 +1932,197 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
     if data == "order":
 
-        await show_country_page(
+        await show_server_page(
+            query
+        )
+
+        return
+
+    # =====================================================
+    # PILIH SERVER
+    # =====================================================
+
+    if data.startswith(
+        "otp_server:"
+    ):
+
+        server = data.split(
+            ":",
+            1
+        )[1]
+
+        if server not in OTP_SERVERS:
+
+            await query.answer(
+                "Server tidak valid.",
+                show_alert=True
+            )
+
+            return
+
+        await show_service_page(
+
             query,
+
+            server,
+
             0
+
+        )
+
+        return
+
+    # =====================================================
+    # SERVICE PAGE
+    # =====================================================
+
+    if data.startswith(
+        "otp_services:"
+    ):
+
+        parts = data.split(
+            ":",
+            2
+        )
+
+        if len(parts) != 3:
+
+            await query.answer(
+                "Data layanan tidak valid.",
+                show_alert=True
+            )
+
+            return
+
+        server = parts[1]
+
+        try:
+
+            page = int(
+                parts[2]
+            )
+
+        except Exception:
+
+            page = 0
+
+        await show_service_page(
+
+            query,
+
+            server,
+
+            page
+
+        )
+
+        return
+
+    # =====================================================
+    # PILIH SERVICE
+    # =====================================================
+
+    if data.startswith(
+        "otp_service:"
+    ):
+
+        parts = data.split(
+            ":",
+            2
+        )
+
+        if len(parts) != 3:
+
+            await query.answer(
+                "Data layanan tidak valid.",
+                show_alert=True
+            )
+
+            return
+
+        server = parts[1]
+
+        service = parts[2]
+
+        context.user_data[
+            "otp_server"
+        ] = server
+
+        context.user_data[
+            "otp_service"
+        ] = service
+
+        # -------------------------------------------------
+        # SERVER 1 — 5SIM
+        # -------------------------------------------------
+
+        if server == "5sim":
+
+            await show_country_page(
+
+                query,
+
+                0
+
+            )
+
+            return
+
+        # -------------------------------------------------
+        # SERVER 2 — SMSPOOL
+        # -------------------------------------------------
+
+        if server == "smspool":
+
+            await query.edit_message_text(
+
+                "🔵 <b>SMSPOOL</b>\n\n"
+
+                f"📱 Layanan: "
+                f"<b>{service.upper()}</b>\n\n"
+
+                "Server 2 — SMSPOOL dipilih.\n\n"
+
+                "Modul SMSPOOL akan menggunakan "
+                "layanan yang sudah dipilih "
+                "untuk proses nomor dan OTP.",
+
+                parse_mode="HTML",
+
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Pilih Layanan",
+                            callback_data=(
+                                "otp_server:smspool"
+                            )
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Pilih Server",
+                            callback_data="order"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "🏠 Menu Utama",
+                            callback_data="user_home"
+                        )
+                    ]
+
+                ])
+
+            )
+
+            return
+
+        await query.answer(
+            "Server tidak tersedia.",
+            show_alert=True
         )
 
         return
