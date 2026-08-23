@@ -2395,7 +2395,8 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
         save_otp_quote(
             quote_id=quote_id, telegram_id=user_id, provider=q["provider"],
             country=q["country"], service=q["service"], operator=q.get("operator"),
-            pool=q.get("pool"), cost_usd=q["cost_usd"], stock=q["stock"]
+            pool=q.get("pool"), cost_usd=q["cost_usd"], stock=q["stock"],
+            country_name=q.get("country_name") or country
         )
         sell = hitung_harga_jual(q["cost_usd"])
         keyboard.append([
@@ -2432,6 +2433,7 @@ async def process_otp_order(
     """Order OTP dari provider terpilih dengan margin sesuai PROFIT_PERCENT (default 7%)."""
 
     service_label = dict(OTP_SERVICES).get(service, service)
+    display_country = country
 
     # -----------------------------------------------------
     # AMBIL HARGA/STOK TERKINI
@@ -2439,6 +2441,7 @@ async def process_otp_order(
     if quote is not None:
         server = quote["provider"]
         country = quote["country"]
+        display_country = quote.get("country_name") or country
         service = quote["service"]
         operator = quote.get("operator") or "any"
         provider_cost_usd = float(quote["cost_usd"])
@@ -2556,7 +2559,7 @@ async def process_otp_order(
     if current_balance < sell_price:
         await query.edit_message_text(
             "❌ <b>Saldo tidak cukup.</b>\n\n"
-            f"🌍 Negara: <b>{country}</b>\n"
+            f"🌍 Negara: <b>{display_country}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
             f"💰 Harga: <b>{format_rupiah(sell_price)}</b>\n"
             f"💳 Saldo: <b>{format_rupiah(current_balance)}</b>",

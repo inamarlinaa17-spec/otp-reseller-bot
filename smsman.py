@@ -15,9 +15,13 @@ def _get(path, params=None):
     try:
         r = requests.get(f"{BASE_URL}/{path}", params=params, timeout=20)
         if r.status_code != 200:
-            logger.warning("[SMSMAN] HTTP %s: %s", r.status_code, r.text[:300])
+            logger.warning("[SMSMAN] HTTP %s: %s", r.status_code, r.text[:500])
             return None
-        return r.json()
+        data = r.json()
+        if isinstance(data, dict) and data.get("success") is False:
+            logger.warning("[SMSMAN] API error: %s", data)
+            return None
+        return data
     except Exception as exc:
         logger.warning("[SMSMAN] request error: %s", exc)
         return None
@@ -67,11 +71,14 @@ SERVICE_ALIASES = {
 
 def find_country(country):
     target = _norm(country)
+    target_id = str(country).strip()
     for item in get_countries():
         if not isinstance(item, dict):
             continue
         cid = item.get("id") or item.get("country_id")
         names = [item.get("title"), item.get("name"), item.get("name_en"), item.get("country")]
+        if cid is not None and str(cid).strip() == target_id:
+            return {"id": str(cid), "name": next((str(x) for x in names if x), str(country))}
         if any(_norm(x) == target for x in names if x):
             return {"id": str(cid), "name": next((str(x) for x in names if x), str(country))}
     return None
@@ -179,7 +186,7 @@ def get_country_items(service):
             continue
         name = str(c.get("title") or c.get("name_en") or c.get("name") or cid)
         result.append({
-            "country": name,
+            "country": cid,
             "name": name,
             "cost": _price_to_usd(cost_raw),
             "stock": stock,

@@ -90,6 +90,7 @@ def init_database():
                 telegram_id BIGINT NOT NULL,
                 provider TEXT NOT NULL,
                 country TEXT NOT NULL,
+                country_name TEXT,
                 service TEXT NOT NULL,
                 operator TEXT,
                 pool TEXT,
@@ -97,6 +98,10 @@ def init_database():
                 stock BIGINT NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
+        """)
+
+        db.execute("""
+            ALTER TABLE otp_quotes ADD COLUMN IF NOT EXISTS country_name TEXT
         """)
 
         db.execute("""
@@ -846,18 +851,20 @@ def save_otp_quote(
     operator=None,
     pool=None,
     cost_usd=0,
-    stock=0
+    stock=0,
+    country_name=None
 ):
     with get_db() as db:
         db.execute(
             """
             INSERT INTO otp_quotes
-            (quote_id, telegram_id, provider, country, service, operator, pool, cost_usd, stock, created_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (quote_id, telegram_id, provider, country, country_name, service, operator, pool, cost_usd, stock, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (quote_id) DO UPDATE SET
                 telegram_id=EXCLUDED.telegram_id,
                 provider=EXCLUDED.provider,
                 country=EXCLUDED.country,
+                country_name=EXCLUDED.country_name,
                 service=EXCLUDED.service,
                 operator=EXCLUDED.operator,
                 pool=EXCLUDED.pool,
@@ -865,7 +872,7 @@ def save_otp_quote(
                 stock=EXCLUDED.stock,
                 created_at=EXCLUDED.created_at
             """,
-            (quote_id, telegram_id, provider, country, service, operator, pool, float(cost_usd), int(stock), now())
+            (quote_id, telegram_id, provider, country, country_name, service, operator, pool, float(cost_usd), int(stock), now())
         )
 
 

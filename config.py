@@ -185,6 +185,9 @@ if not SMSPOOL_API_KEY:
         "SMSPOOL_API_KEY belum diatur di environment."
     )
 
+if not SMSMAN_API_KEY:
+    print("[SMSMAN] SMSMAN_API_KEY belum diatur; Server 3 dan aggregator tidak akan memiliki stok SMS-Man.")
+
 
 # =========================================================
 # CONVERT ADMIN ID
