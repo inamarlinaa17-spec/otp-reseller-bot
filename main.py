@@ -82,6 +82,8 @@ from aggregator import (
     get_aggregated_countries,
     get_aggregated_quotes,
     get_aggregator_service_catalog,
+    _operator_label,
+    _is_displayable_operator,
 )
 
 from smsman import (
@@ -2436,7 +2438,11 @@ async def show_product_page(
 
 
 async def show_aggregated_operator_page(query, service, country):
-    """MOCHI-style aggregator step: country -> operator -> prices/stocks."""
+    """MOCHI-style aggregator step: country -> carrier -> price/stock.
+
+    Only real carrier/operator labels are shown individually. Provider
+    internals such as 5SIM virtual pools stay inside the catch-all option.
+    """
     service_label = dict(OTP_SERVICES).get(service, service)
     try:
         quotes = await asyncio.wait_for(
@@ -2469,42 +2475,76 @@ async def show_aggregated_operator_page(query, service, country):
         )
         return
 
+    # Group only genuine operator/carrier names. AUTO/virtual pools remain
+    # available through "Semua Operator (Acak)" and are never exposed.
     groups = {}
+    has_real_operator = False
     for q in quotes:
-        operator = str(q.get("operator") or "AUTO").strip() or "AUTO"
-        key = operator.lower()
-        group = groups.setdefault(key, {"operator": operator, "stock": 0, "cost": None})
+        raw_operator = q.get("operator") or "AUTO"
+        operator_label = _operator_label(raw_operator)
+        if not _is_displayable_operator(operator_label):
+            continue
+
+        has_real_operator = True
+        key = _norm(operator_label)
+        group = groups.setdefault(
+            key,
+            {"operator": operator_label, "stock": 0, "cost": None}
+        )
         group["stock"] += int(q.get("stock") or 0)
         cost = float(q.get("cost_usd") or 0)
         if cost > 0 and (group["cost"] is None or cost < group["cost"]):
             group["cost"] = cost
 
-    operators = sorted(groups.values(), key=lambda x: (x["cost"] if x["cost"] is not None else 999999, x["operator"]))
+    operators = sorted(
+        groups.values(),
+        key=lambda x: (
+            x["cost"] if x["cost"] is not None else 999999,
+            x["operator"]
+        )
+    )
+
     keyboard = []
     for item in operators:
-        op = item["operator"]
-        display = "Semua / Otomatis" if op.upper() == "AUTO" else op.replace("_", " ").title()
         price = hitung_harga_jual(item["cost"]) if item["cost"] else 0
         keyboard.append([
             InlineKeyboardButton(
-                f"📡 {display}  |  💰 mulai {format_rupiah(price)}  |  📦 {item['stock']}",
-                callback_data=f"otp_operator:{service}:{country}:{op}"
+                f"📡 {item['operator']} | 💰 mulai {format_rupiah(price)} | 📦 {item['stock']}",
+                callback_data=f"otp_operator:{service}:{country}:{item['operator']}"
             )
         ])
 
+    # Match the requested MOCHI-style catch-all button.
     keyboard.append([
-        InlineKeyboardButton("🌐 Semua Operator", callback_data=f"otp_quotes:{service}:{country}"),
+        InlineKeyboardButton(
+            "🌐 Semua Operator (Acak)",
+            callback_data=f"otp_quotes:{service}:{country}"
+        )
     ])
     keyboard.append([
-        InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_operators:{service}:{country}"),
-        InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
+        InlineKeyboardButton(
+            "🔄 Refresh",
+            callback_data=f"otp_operators:{service}:{country}"
+        ),
+        InlineKeyboardButton(
+            "⬅️ Negara",
+            callback_data=f"otp_service_countries:aggregator:{service}:0"
+        )
     ])
+
+    if not has_real_operator:
+        intro = (
+            "📡 <b>Operator spesifik belum diberikan oleh provider untuk negara ini.</b>\n"
+            "Gunakan <b>Semua Operator (Acak)</b> untuk memilih otomatis dari seluruh stok aktif.\n\n"
+        )
+    else:
+        intro = "📡 <b>Pilih operator untuk melihat harga dan stok yang tersedia:</b>\n\n"
 
     await query.edit_message_text(
         "✨ <b>LAYANAN TERPILIH</b>\n\n"
         f"📱 Layanan: <b>{service_label}</b>\n"
         f"🌍 Negara: <b>{country}</b>\n\n"
-        "📡 <b>Pilih operator</b> untuk melihat harga dan stok yang tersedia:",
+        f"{intro}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2553,7 +2593,8 @@ async def show_aggregated_quotes_page(query, user_id, service, country, operator
         quote_id = uuid.uuid4().hex[:10].upper()
         save_otp_quote(
             quote_id=quote_id, telegram_id=user_id, provider=q["provider"],
-            country=q["country"], service=q["service"], operator=q.get("operator"),
+            country=q["country"], service=q["service"],
+            operator=q.get("provider_operator") or q.get("operator"),
             pool=q.get("pool"), cost_usd=q["cost_usd"], stock=q["stock"],
             country_name=q.get("country_name") or country
         )
@@ -2613,7 +2654,7 @@ async def process_otp_order(
         country = quote["country"]
         display_country = quote.get("country_name") or country
         service = quote["service"]
-        operator = quote.get("operator") or "any"
+        operator = quote.get("provider_operator") or quote.get("operator") or "any"
         provider_cost_usd = float(quote["cost_usd"])
     elif server == "5sim":
         operator_info = await asyncio.to_thread(

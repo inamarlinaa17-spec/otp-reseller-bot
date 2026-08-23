@@ -87,6 +87,53 @@ def _title_country(value):
     return str(value or "").replace("_", " ").replace("-", " ").title()
 
 
+# User-facing operator normalization. Provider names/IDs are never shown.
+_OPERATOR_DISPLAY_ALIASES = {
+    "telkomsel": "Telkomsel",
+    "indosat": "Indosat",
+    "isat": "Indosat",
+    "axis": "Axis",
+    "three": "Three",
+    "3": "Three",
+    "tri": "Three",
+    "smartfren": "Smartfren",
+    "byu": "By.U",
+    "by.u": "By.U",
+    "xl": "XL",
+    "xl axiata": "XL",
+    "vodafone": "Vodafone",
+    "orange": "Orange",
+    "t mobile": "T-Mobile",
+    "tmobile": "T-Mobile",
+}
+
+
+def _operator_label(value):
+    raw = str(value or "").strip()
+    key = _norm(raw)
+    if key in {"", "auto", "any", "all", "automatic", "otomatis"}:
+        return "AUTO"
+    if key in _OPERATOR_DISPLAY_ALIASES:
+        return _OPERATOR_DISPLAY_ALIASES[key]
+    return raw.replace("_", " ").strip().title()
+
+
+def _is_displayable_operator(value):
+    """Return True only for real carrier/operator labels.
+
+    5SIM can expose virtual pools such as virtual58. Those are useful for
+    the aggregator, but they are not mobile operator names. Keep them in
+    the catch-all/automatic pool so the user never sees provider internals.
+    """
+    raw = str(value or "").strip()
+    key = _norm(raw)
+    if not key or key in {"auto", "any", "all", "automatic", "otomatis"}:
+        return False
+    if key.startswith("virtual") or key.startswith("pool"):
+        return False
+    return True
+
+
 def _country_aliases(value):
     key = _norm(value)
     aliases = {key}
@@ -427,7 +474,8 @@ def _5sim_all_quotes(service):
                 "country_name": _title_country(cid),
                 "service": provider_service,  # provider-specific service code
                 "service_name": str(service),
-                "operator": str(operator),
+                "operator": _operator_label(operator),
+                "provider_operator": str(operator),
                 "pool": None,
                 "cost_usd": cost,
                 "stock": stock,
@@ -510,7 +558,14 @@ def _smspool_all_quotes(service):
             ),
             "service": str(lookup_service),
             "service_name": str(service),
-            "operator": "AUTO",
+            "operator": _operator_label(
+                value.get("operator")
+                or value.get("operator_name")
+                or value.get("carrier")
+                or value.get("carrier_name")
+                or value.get("network")
+                or "AUTO"
+            ),
             "pool": (
                 str(value.get("pool"))
                 if value.get("pool") is not None
@@ -621,7 +676,13 @@ def _smsman_all_quotes(service):
             "country_name": str(item.get("name") or item.get("country") or cid),
             "service": str(app_code),
             "service_name": str(service),
-            "operator": "AUTO",
+            "operator": _operator_label(
+                item.get("operator")
+                or item.get("operator_name")
+                or item.get("carrier")
+                or item.get("carrier_name")
+                or "AUTO"
+            ),
             "pool": None,
             "cost_usd": cost,
             "stock": stock,
