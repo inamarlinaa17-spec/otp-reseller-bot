@@ -61,10 +61,6 @@ MIDTRANS_MERCHANT_ID = os.getenv(
 # =========================================================
 # FORCE PRODUCTION MODE
 # =========================================================
-#
-# Bot ini dikunci menggunakan Midtrans Production.
-# Tidak menggunakan Sandbox.
-#
 
 MIDTRANS_IS_PRODUCTION = True
 
@@ -81,6 +77,7 @@ MIDTRANS_API_URL = (
 MIDTRANS_SNAP_URL = (
     "https://app.midtrans.com/snap"
 )
+
 
 # =========================================================
 # 5SIM CONFIGURATION
@@ -109,6 +106,7 @@ PROFIT_PERCENT = float(
     )
 )
 
+
 # =========================================================
 # SMSPOOL CONFIGURATION
 # =========================================================
@@ -117,6 +115,7 @@ SMSPOOL_API_KEY = os.getenv(
     "SMSPOOL_API_KEY",
     ""
 ).strip()
+
 
 # =========================================================
 # VALIDATION
@@ -151,10 +150,18 @@ if not MIDTRANS_CLIENT_KEY:
         "MIDTRANS_CLIENT_KEY belum diatur di environment."
     )
 
+
 if not FIVESIM_API_KEY:
     raise RuntimeError(
         "FIVESIM_API_KEY belum diatur di environment."
     )
+
+
+if not SMSPOOL_API_KEY:
+    raise RuntimeError(
+        "SMSPOOL_API_KEY belum diatur di environment."
+    )
+
 
 # =========================================================
 # CONVERT ADMIN ID
