@@ -177,7 +177,7 @@ OTP_SERVERS = {
         "⚡ Server 3",
 
     "aggregator":
-        "🔥 Price Aggregator"
+        "🔥 Multi Server"
 
 }
 
@@ -1219,16 +1219,18 @@ async def show_server_page(
     ]
 
     await query.edit_message_text(
-
-        "📱 <b>ORDER OTP</b>\n\n"
-        "Pilih server OTP yang ingin digunakan:",
-
+        "🌟 <b>PILIH SERVER OTP</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚡ <b>SERVER 1 — HIGH STOCK</b>\n"
+        "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
+        "⚡ <b>SERVER 2 — HARGA LEBIH RENDAH</b>\n"
+        "Harga umumnya lebih rendah dari Server 1.\n\n"
+        "⚡ <b>SERVER 3 — STOCK & VARIAN</b>\n"
+        "Stock banyak dengan pilihan harga yang bervariasi.\n\n"
+        "🔥 <b>MULTI SERVER</b> — Pilihan banyak negara, layanan, operator, serta harga/stok dari beberapa server sekaligus.\n\n"
+        "Silakan pilih server melalui tombol di bawah ini:",
         parse_mode="HTML",
-
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -1828,7 +1830,7 @@ async def show_service_country_page(
             keyboard.append([
                 InlineKeyboardButton(
                     label,
-                    callback_data=f"otp_quotes:{service}:{item['country']}"
+                    callback_data=f"otp_operators:{service}:{item['country']}"
                 )
             ])
     else:
@@ -2433,7 +2435,82 @@ async def show_product_page(
 # =========================================================
 
 
-async def show_aggregated_quotes_page(query, user_id, service, country):
+async def show_aggregated_operator_page(query, service, country):
+    """MOCHI-style aggregator step: country -> operator -> prices/stocks."""
+    service_label = dict(OTP_SERVICES).get(service, service)
+    try:
+        quotes = await asyncio.wait_for(
+            asyncio.to_thread(get_aggregated_quotes, country, service),
+            timeout=25
+        )
+    except asyncio.TimeoutError:
+        await query.edit_message_text(
+            "⚠️ <b>Provider terlalu lama merespons.</b>\n\n"
+            "Silakan refresh dan coba lagi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_operators:{service}:{country}")
+            ], [
+                InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
+            ]])
+        )
+        return
+
+    if not quotes:
+        await query.edit_message_text(
+            "❌ <b>Stok tidak tersedia</b>\n\n"
+            f"🌍 Negara: <b>{country}</b>\n"
+            f"📱 Layanan: <b>{service_label}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_operators:{service}:{country}"),
+                InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
+            ]])
+        )
+        return
+
+    groups = {}
+    for q in quotes:
+        operator = str(q.get("operator") or "AUTO").strip() or "AUTO"
+        key = operator.lower()
+        group = groups.setdefault(key, {"operator": operator, "stock": 0, "cost": None})
+        group["stock"] += int(q.get("stock") or 0)
+        cost = float(q.get("cost_usd") or 0)
+        if cost > 0 and (group["cost"] is None or cost < group["cost"]):
+            group["cost"] = cost
+
+    operators = sorted(groups.values(), key=lambda x: (x["cost"] if x["cost"] is not None else 999999, x["operator"]))
+    keyboard = []
+    for item in operators:
+        op = item["operator"]
+        display = "Semua / Otomatis" if op.upper() == "AUTO" else op.replace("_", " ").title()
+        price = hitung_harga_jual(item["cost"]) if item["cost"] else 0
+        keyboard.append([
+            InlineKeyboardButton(
+                f"📡 {display}  |  💰 mulai {format_rupiah(price)}  |  📦 {item['stock']}",
+                callback_data=f"otp_operator:{service}:{country}:{op}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("🌐 Semua Operator", callback_data=f"otp_quotes:{service}:{country}"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_operators:{service}:{country}"),
+        InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
+    ])
+
+    await query.edit_message_text(
+        "✨ <b>LAYANAN TERPILIH</b>\n\n"
+        f"📱 Layanan: <b>{service_label}</b>\n"
+        f"🌍 Negara: <b>{country}</b>\n\n"
+        "📡 <b>Pilih operator</b> untuk melihat harga dan stok yang tersedia:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_aggregated_quotes_page(query, user_id, service, country, operator=None):
     service_label = dict(OTP_SERVICES).get(service, service)
     try:
         quotes = await asyncio.wait_for(
@@ -2451,6 +2528,10 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
             ]])
         )
         return
+
+    if operator and operator.upper() != "ALL":
+        operator_key = operator.strip().lower()
+        quotes = [q for q in quotes if str(q.get("operator") or "AUTO").strip().lower() == operator_key]
 
     if not quotes:
         await query.edit_message_text(
@@ -2493,13 +2574,17 @@ async def show_aggregated_quotes_page(query, user_id, service, country):
 
     keyboard.append([
         InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_quotes:{service}:{country}"),
+        InlineKeyboardButton("📡 Operator", callback_data=f"otp_operators:{service}:{country}"),
         InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:aggregator:{service}:0")
     ])
 
+    operator_label = ("Semua Operator" if not operator or operator.upper() == "ALL"
+                      else ("Semua / Otomatis" if operator.upper() == "AUTO" else operator.replace("_", " ").title()))
     await query.edit_message_text(
         "✨ <b>HARGA TERBAIK</b>\n\n"
         f"🌍 Negara: <b>{country}</b>\n"
-        f"📱 Layanan: <b>{service_label}</b>\n\n"
+        f"📱 Layanan: <b>{service_label}</b>\n"
+        f"📡 Operator: <b>{operator_label}</b>\n\n"
         "Pilih harga yang ingin digunakan:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -2869,7 +2954,7 @@ Pilih server OTP atau gunakan Price Aggregator.
 ├ Server 1
 ├ Server 2
 ├ Server 3
-└ Price Aggregator → mencari harga & stok terbaik dari seluruh server
+└ Multi Server → mencari harga, stok, negara, layanan, dan operator dari seluruh server
 
 4️⃣ <b>Pilih layanan</b>
 Bot menampilkan layanan OTP seperti WhatsApp, Telegram, Shopee, TikTok, Facebook, Instagram, Google, Vercel, UangMe, Grab, DANA, Gojek, OVO, Any Other, dan lainnya.
@@ -3141,7 +3226,29 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         return
 
     # =====================================================
-    # PRICE AGGREGATOR -> PILIH QUOTE
+    # MULTI SERVER -> PILIH OPERATOR
+    # =====================================================
+
+    if data.startswith("otp_operators:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            await query.answer("Data operator tidak valid.", show_alert=True)
+            return
+        _, service, country = parts
+        await show_aggregated_operator_page(query, service, country)
+        return
+
+    if data.startswith("otp_operator:"):
+        parts = data.split(":", 3)
+        if len(parts) != 4:
+            await query.answer("Data operator tidak valid.", show_alert=True)
+            return
+        _, service, country, operator = parts
+        await show_aggregated_quotes_page(query, user_id, service, country, operator=operator)
+        return
+
+    # =====================================================
+    # PRICE AGGREGATOR / MULTI SERVER -> PILIH QUOTE
     # =====================================================
 
     if data.startswith("otp_quotes:"):
@@ -4975,7 +5082,7 @@ async def text_handler(
             price = hitung_harga_jual(cost) if cost > 0 else 0
             if server == "aggregator":
                 label = f"🌍 {name} | 💰 mulai {format_rupiah(price)} | 📦 {stock}"
-                cb = f"otp_quotes:{service}:{country}"
+                cb = f"otp_operators:{service}:{country}"
             elif server == "legacy":
                 label = f"🌍 {name}"
                 cb = f"otp_country:{country}"
