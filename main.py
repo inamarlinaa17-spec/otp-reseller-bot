@@ -84,17 +84,16 @@ from provider import (
 
 
 
-from smspool import (
-    check_api as check_smspool_api,
-    get_balance as get_smspool_balance,
-    get_prices as get_smspool_prices,
-    get_suggested_countries as get_smspool_suggested_countries,
-    get_all_countries as get_smspool_countries,
-    get_all_services as get_smspool_services,
-    find_service as find_smspool_service,
-    buy_number as buy_smspool_number,
-    get_sms as get_smspool_sms,
-    cancel_number as cancel_smspool_number
+from rumahotp import (
+    check_api as check_rumahotp_api,
+    get_balance as get_rumahotp_balance,
+    get_services as get_rumahotp_services,
+    find_service as find_rumahotp_service,
+    get_all_quotes as get_rumahotp_all_quotes,
+    get_cheapest_quote as get_rumahotp_cheapest_quote,
+    buy_number as buy_rumahotp_number,
+    get_sms as get_rumahotp_sms,
+    cancel_number as cancel_rumahotp_number
 )
 
 
@@ -157,14 +156,8 @@ SERVICES_PER_PAGE = 16
 # =========================================================
 
 OTP_SERVERS = {
-
-    "5sim":
-        "⚡ Server 1",
-
-    "smspool":
-        "⚡ Server 2",
-
-
+    "5sim": "⚡ Server 1",
+    "rumahotp": "⚡ Server 2",
 }
 
 
@@ -1187,8 +1180,8 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
-                OTP_SERVERS["smspool"],
-                callback_data="otp_server:smspool"
+                OTP_SERVERS["rumahotp"],
+                callback_data="otp_server:rumahotp"
             )
         ],
 
@@ -1206,8 +1199,8 @@ async def show_server_page(
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "⚡ <b>SERVER 1 — HIGH STOCK</b>\n"
         "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
-        "⚡ <b>SERVER 2 — HARGA LEBIH RENDAH</b>\n"
-        "Harga umumnya lebih rendah dari Server 1.\n\n"
+        "⚡ <b>SERVER 2 — RUMAHOTP</b>\n"
+        "Stok dan harga diambil langsung dari RumahOTP.\n\n"
         "Silakan pilih server melalui tombol di bawah ini:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1255,7 +1248,7 @@ def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
 
 
 def get_service_catalog(server):
-    """Katalog layanan dari provider Server 1 (5SIM) atau Server 2 (SMSPool)."""
+    """Katalog layanan dari provider Server 1 (5SIM) atau Server 2 (RumahOTP)."""
     catalog = list(OTP_SERVICES)
     seen = {code.lower() for code, _ in catalog}
 
@@ -1275,12 +1268,15 @@ def get_service_catalog(server):
                     catalog.append((code, code.replace("_", " ").title()))
                     seen.add(code.lower())
 
-    elif server == "smspool":
-        _merge_service_catalog(
-            catalog, seen, get_smspool_services(),
-            ("ID", "id", "service_id", "name", "service"),
-            ("name", "service", "title")
-        )
+    elif server == "rumahotp":
+        for item in get_rumahotp_services() or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("service_code") or item.get("id") or "").strip()
+            label = str(item.get("service_name") or item.get("name") or code).strip()
+            if code and code.lower() not in seen:
+                catalog.append((code, label))
+                seen.add(code.lower())
 
 
     return catalog
@@ -1424,271 +1420,45 @@ def _country_items_5sim(service):
     return items
 
 
-def _flatten_smspool_prices(data, fallback_service):
-    """Normalize SMSPool /sms/all_stock rows and keep REAL stock counts.
-
-    SMSPool returns one row per country/service/pool.  The bot should show
-    the total available stock for a country and the cheapest pool price,
-    rather than fabricating a stock value of 1 when a field is missing.
-    """
-    rows = []
-
-    if isinstance(data, list):
-        rows = [item for item in data if isinstance(item, dict)]
-    elif isinstance(data, dict):
-        # Be tolerant of wrapped API responses.
-        for key in ("data", "results", "stock", "items"):
-            value = data.get(key)
-            if isinstance(value, list):
-                rows = [item for item in value if isinstance(item, dict)]
-                break
-
-    if not rows:
-        return []
-
-    aggregated = {}
-    for item in rows:
-        country = (
-            item.get("country")
-            or item.get("country_id")
-            or item.get("country_name")
-            or item.get("short_name")
-            or item.get("cc")
-        )
-        country_name = (
-            item.get("country_name")
-            or item.get("name")
-            or item.get("short_name")
-            or country
-        )
-        cost = (
-            item.get("price")
-            or item.get("cost")
-            or item.get("amount")
-        )
-        stock = (
-            item.get("stock")
-            if item.get("stock") is not None
-            else item.get("count")
-        )
-        if stock is None:
-            stock = item.get("available")
-        if stock is None:
-            stock = item.get("quantity")
-        if stock is None:
-            stock = item.get("qty")
-
+def _country_items_rumahotp(service):
+    """Collapse live RumahOTP quotes into one cheapest row per country."""
+    quotes = get_rumahotp_all_quotes(service) or []
+    grouped = {}
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
         try:
-            cost = float(cost or 0)
-            stock = int(float(stock or 0))
+            cost = float(q.get("cost_usd") or 0)
+            stock = int(float(q.get("stock") or 0))
         except Exception:
             continue
-
-        if country is None or cost <= 0 or stock <= 0:
+        if cost <= 0 or stock <= 0:
             continue
-
-        key = str(country)
-        entry = aggregated.get(key)
-        if entry is None:
-            aggregated[key] = {
-                "country": key,
-                "name": str(country_name),
+        country_id = str(q.get("country") or q.get("country_name") or "").strip()
+        name = str(q.get("country_name") or country_id).strip()
+        if not country_id:
+            continue
+        key = country_id.lower()
+        if key not in grouped:
+            grouped[key] = {
+                "country": country_id,
+                "name": name,
                 "cost": cost,
                 "stock": stock,
             }
         else:
-            # Multiple pools can exist for one country/service.  Show the
-            # cheapest available price and the combined active stock.
-            entry["stock"] += stock
-            if cost < entry["cost"]:
-                entry["cost"] = cost
-                entry["name"] = str(country_name)
-
-    return list(aggregated.values())
-
-def _flatten_smspool_suggested_countries(data):
-    """Deprecated: suggested countries do not provide real stock counts."""
-    return []
-
-
-def _smspool_country_name_map():
-    data = get_smspool_countries()
-    mapping = {}
-
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if isinstance(value, dict):
-                name = (
-                    value.get("name")
-                    or value.get("country")
-                    or value.get("text")
-                    or value.get("country_name")
-                )
-                if name:
-                    mapping[str(key)] = str(name)
-            elif value:
-                mapping[str(key)] = str(value)
-
-    elif isinstance(data, list):
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            key = (
-                item.get("ID")
-                or item.get("id")
-                or item.get("country")
-                or item.get("code")
-            )
-            name = (
-                item.get("name")
-                or item.get("country_name")
-                or item.get("country")
-            )
-            if key and name:
-                mapping[str(key)] = str(name)
-
-    return mapping
+            grouped[key]["stock"] += stock
+            if cost < grouped[key]["cost"]:
+                grouped[key]["cost"] = cost
+                grouped[key]["name"] = name
+    return list(grouped.values())
 
 
 def get_service_countries(server, service):
     if server == "5sim":
         return _country_items_5sim(service)
-
-    # =====================================================
-    # SMSPool — REAL STOCK FIRST
-    # =====================================================
-    # SMSPool's /sms/all_stock is the only source used for the stock
-    # number shown in the bot.  The suggested-country endpoint is used
-    # only as a candidate list when the filtered all_stock request does
-    # not return rows (for example when a provider-side filter behaves
-    # differently for a service alias).
-    found = find_smspool_service(service)
-
-    service_candidates = []
-    if found:
-        if found.get("id") is not None:
-            service_candidates.append(str(found["id"]))
-        if found.get("name"):
-            service_candidates.append(str(found["name"]))
-    service_candidates.append(str(service))
-
-    seen_services = set()
-    service_candidates = [
-        value for value in service_candidates
-        if value and not (
-            value.strip().lower() in seen_services
-            or seen_services.add(value.strip().lower())
-        )
-    ]
-
-    # 1) Direct filtered stock requests.
-    for lookup_service in service_candidates:
-        data = get_smspool_prices(service=lookup_service)
-        items = _flatten_smspool_prices(data, service)
-        if items:
-            names = _smspool_country_name_map()
-            for item in items:
-                item["name"] = names.get(str(item["country"]), item["name"])
-            return items
-
-    # 2) Full stock table, then filter locally by service ID/name.
-    data = get_smspool_prices()
-    rows = data if isinstance(data, list) else []
-    if rows:
-        target_ids = set()
-        target_names = {str(service).strip().lower()}
-        if found:
-            if found.get("id") is not None:
-                target_ids.add(str(found["id"]))
-            if found.get("name"):
-                target_names.add(str(found["name"]).strip().lower())
-
-        filtered = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            sid = row.get("service_id")
-            if sid is None:
-                sid = row.get("service")
-            sname = row.get("service_name")
-            if sname is None:
-                sname = row.get("name")
-
-            if (sid is not None and str(sid) in target_ids) or (
-                sname is not None and str(sname).strip().lower() in target_names
-            ):
-                filtered.append(row)
-
-        items = _flatten_smspool_prices(filtered, service)
-        if items:
-            names = _smspool_country_name_map()
-            for item in items:
-                item["name"] = names.get(str(item["country"]), item["name"])
-            return items
-
-    # 3) Candidate-country fallback.
-    # Suggested countries contain country_id/name/price/pool, but no
-    # reliable stock counter.  Therefore NEVER display a fake stock
-    # value.  Each candidate is verified against /sms/all_stock before
-    # being shown.
-    for lookup_service in service_candidates:
-        suggestions = get_smspool_suggested_countries(lookup_service)
-        if not suggestions:
-            continue
-
-        verified = {}
-        for candidate in suggestions:
-            if not isinstance(candidate, dict):
-                continue
-
-            country_id = (
-                candidate.get("country_id")
-                or candidate.get("country")
-                or candidate.get("ID")
-                or candidate.get("id")
-            )
-            if country_id is None:
-                continue
-
-            # Verify actual stock for this country/service.  Try the
-            # provider service ID/name first, then the candidate's pool
-            # as a last compatibility option.
-            country_rows = []
-            for service_value in service_candidates:
-                country_rows = get_smspool_prices(
-                    country=country_id,
-                    service=service_value
-                )
-                if country_rows:
-                    break
-
-            if not country_rows:
-                continue
-
-            items = _flatten_smspool_prices(country_rows, service)
-            for item in items:
-                if str(item["country"]) != str(country_id):
-                    continue
-                name = (
-                    candidate.get("name")
-                    or candidate.get("country_name")
-                    or candidate.get("short_name")
-                    or item.get("name")
-                )
-                item["name"] = str(name)
-                key = str(item["country"])
-                old = verified.get(key)
-                if old is None or item["cost"] < old["cost"]:
-                    verified[key] = item
-
-        if verified:
-            return list(verified.values())
-
-    logger.warning(
-        "SMSPool returned no real stock for service=%s (resolved=%s)",
-        service,
-        found
-    )
+    if server == "rumahotp":
+        return _country_items_rumahotp(service)
     return []
 
 
@@ -2596,64 +2366,29 @@ async def process_otp_order(
         operator = operator_info["operator"]
         provider_cost_usd = float(operator_info["cost"])
 
-    elif server == "smspool":
-        found = await asyncio.to_thread(
-            find_smspool_service,
-            service
-        )
-        lookup_service = (
-            found.get("id")
-            if found and found.get("id") is not None
-            else service
-        )
-
-        price_data = await asyncio.to_thread(
-            get_smspool_prices,
+    elif server == "rumahotp":
+        quote = await asyncio.to_thread(
+            get_rumahotp_cheapest_quote,
             country,
-            lookup_service
-        )
-        quotes = _flatten_smspool_prices(
-            price_data,
             service
         )
-
-        # Jika response memakai country sebagai key, pilih quote pertama.
-        quote = None
-        for q in quotes:
-            if str(q["country"]).lower() == str(country).lower():
-                quote = q
-                break
-        if quote is None and quotes:
-            quote = quotes[0]
-
         if not quote:
             await query.edit_message_text(
-                "❌ <b>Harga/stok SMSPOOL tidak tersedia.</b>\n\n"
+                "❌ <b>Harga/stok RumahOTP tidak tersedia.</b>\n\n"
                 f"🌍 Negara: <b>{country}</b>\n"
                 f"📱 Layanan: <b>{service_label}</b>\n\n"
                 "Silakan refresh atau pilih negara lain.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "🔄 Refresh",
-                            callback_data=(
-                                f"otp_service:{server}:{service}"
-                            )
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Pilih Layanan",
-                            callback_data=f"otp_server:{server}"
-                        )
-                    ]
+                    [InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_service:{server}:{service}")],
+                    [InlineKeyboardButton("⬅️ Pilih Layanan", callback_data=f"otp_server:{server}")]
                 ])
             )
             return
-
-        operator = "AUTO"
-        provider_cost_usd = float(quote["cost"])
+        country = quote.get("country") or country
+        display_country = quote.get("country_name") or display_country
+        operator = quote.get("provider_operator") or "any"
+        provider_cost_usd = float(quote.get("cost_usd") or 0)
     else:
         await query.answer("Server tidak tersedia.", show_alert=True)
         return
@@ -2726,40 +2461,36 @@ async def process_otp_order(
         phone = result.get("phone") if result else None
         provider_error = not result or result.get("response") == "ERROR"
         error_reason = "Pembelian nomor 5SIM gagal."
-    else:
-        found = await asyncio.to_thread(find_smspool_service, service)
-        smspool_service = (
-            found.get("id")
-            if found and found.get("id") is not None
-            else service
+    elif server == "rumahotp":
+        metadata = None
+        if quote and quote.get("pool"):
+            try:
+                metadata = json.loads(quote.get("pool") or "{}")
+            except Exception:
+                metadata = None
+        result = await asyncio.to_thread(
+            buy_rumahotp_number,
+            country,
+            service,
+            operator,
+            metadata
         )
-        if quote is not None:
-            result = await asyncio.to_thread(
-                buy_smspool_number,
-                country,
-                smspool_service,
-                quote.get("pool"),
-                float(quote["cost_usd"])
-            )
-        else:
-            result = await asyncio.to_thread(
-                buy_smspool_number,
-                country,
-                smspool_service
-            )
         provider_order_id = (
-            result.get("order_id") if result else None
+            result.get("order_id") or result.get("id") if result else None
         )
         phone = (
-            result.get("phone")
-            or result.get("number")
+            result.get("phone") or result.get("number")
             if result else None
         )
         provider_error = (
-            not result
-            or result.get("response") == "ERROR"
+            not result or result.get("response") == "ERROR"
         )
-        error_reason = "Pembelian nomor SMSPOOL gagal."
+        error_reason = "Pembelian nomor RumahOTP gagal."
+    else:
+        provider_error = True
+        provider_order_id = None
+        phone = None
+        error_reason = "Server OTP tidak tersedia."
 
     if provider_error:
         try:
@@ -3771,8 +3502,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             or "5sim"
         )
 
-        if provider == "smspool":
-            sms_checker = get_smspool_sms
+        if provider == "rumahotp":
+            sms_checker = get_rumahotp_sms
         else:
             sms_checker = get_sms
 
@@ -3930,8 +3661,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 or "5sim"
             )
 
-            if provider == "smspool":
-                canceler = cancel_smspool_number
+            if provider == "rumahotp":
+                canceler = cancel_rumahotp_number
             else:
                 canceler = cancel_number
 
@@ -4737,12 +4468,12 @@ async def admin_callback(
         # Check the two configured providers concurrently so the admin panel stays fast.
         checks = await asyncio.gather(
             asyncio.to_thread(check_5sim_api),
-            asyncio.to_thread(check_smspool_api),
+            asyncio.to_thread(check_rumahotp_api),
             return_exceptions=True,
         )
         balances = await asyncio.gather(
             asyncio.to_thread(get_5sim_balance),
-            asyncio.to_thread(get_smspool_balance),
+            asyncio.to_thread(get_rumahotp_balance),
             return_exceptions=True,
         )
 
@@ -5533,7 +5264,7 @@ def run():
     )
 
     application.add_handler(CommandHandler("server1", lambda u, c: command_server(u, c, "5sim")))
-    application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "smspool")))
+    application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "rumahotp")))
     application.add_handler(CommandHandler("deposit", command_deposit))
     application.add_handler(CommandHandler("checkin", perform_checkin))
 

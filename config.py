@@ -108,11 +108,11 @@ PROFIT_PERCENT = float(
 
 
 # =========================================================
-# SMSPOOL CONFIGURATION
+# RUMAHOTP CONFIGURATION
 # =========================================================
 
-SMSPOOL_API_KEY = os.getenv(
-    "SMSPOOL_API_KEY",
+RUMAHOTP_API_KEY = os.getenv(
+    "RUMAHOTP_API_KEY",
     ""
 ).strip()
 
@@ -173,9 +173,9 @@ if not FIVESIM_API_KEY:
     )
 
 
-if not SMSPOOL_API_KEY:
+if not RUMAHOTP_API_KEY:
     raise RuntimeError(
-        "SMSPOOL_API_KEY belum diatur di environment."
+        "RUMAHOTP_API_KEY belum diatur di environment."
     )
 
 

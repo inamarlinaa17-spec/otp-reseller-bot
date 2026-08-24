@@ -97,7 +97,8 @@ def find_country(country, service_id):
     for item in get_countries(service_id):
         name = str(item.get("name") or "").strip()
         iso = str(item.get("iso_code") or "").strip().lower()
-        if name.lower() in wanted or iso in wanted or target == name.lower():
+        number_id = str(item.get("number_id") or "").strip()
+        if name.lower() in wanted or iso in wanted or target == name.lower() or (number_id and target == number_id):
             return item
     return None
 
@@ -209,3 +210,21 @@ def get_sms(order_id):
 def cancel_number(order_id):
     data=_get("/v1/orders/set_status", {"order_id":order_id,"status":"cancel"})
     return {"response":"OK"} if data.get("success") else {"response":"ERROR", "error":(data.get("error") or {}).get("message","Cancel RumahOTP gagal.")}
+
+
+def get_cheapest_quote(country, service):
+    """Return the cheapest live RumahOTP quote for a country/service."""
+    quotes = get_all_quotes(service)
+    target = str(country or "").strip().lower()
+    matches = []
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
+        if target in {
+            str(q.get("country") or "").strip().lower(),
+            str(q.get("country_name") or "").strip().lower(),
+        }:
+            matches.append(q)
+    if not matches:
+        return None
+    return min(matches, key=lambda x: float(x.get("cost_usd") or 0))
