@@ -12,6 +12,10 @@ from smspool import (
     get_all_services as get_smspool_services,
     get_suggested_countries as get_smspool_suggested_countries,
 )
+from rumahotp import (
+    get_all_quotes as get_rumahotp_all_quotes,
+    get_operator_quotes as get_rumahotp_operator_quotes,
+)
 from smsman import (
     get_country_items as get_smsman_country_items,
     get_countries as get_smsman_countries,
@@ -264,6 +268,7 @@ def get_aggregator_service_catalog():
         ("5SIM", get_5sim_products),
         ("SMSPool", get_smspool_services),
         ("SMS-Man", get_smsman_applications),
+        ("RumahOTP", lambda: [{"service_code": x.get("service_code"), "service_name": x.get("service_name")} for x in __import__("rumahotp").get_services()]),
     )
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(loader): name for name, loader in loaders}
@@ -748,6 +753,7 @@ def _all_quotes(service):
         ("5SIM", _5sim_all_quotes),
         ("SMSPool", _smspool_all_quotes),
         ("SMS-Man", _smsman_all_quotes),
+        ("RumahOTP", get_rumahotp_all_quotes),
     )
 
     # Provider calls are independent, so never wait for them sequentially.
@@ -769,20 +775,28 @@ def _all_quotes(service):
     return results
 
 
-def get_aggregated_quotes(country, service):
-    """Return every live provider quote for one display country, cheapest first."""
-    matches = [
-        q for q in _all_quotes(service)
-        if _same_country(q.get("country_name"), country)
-    ]
-    return sorted(
-        matches,
-        key=lambda q: (
-            _num(q.get("cost_usd")),
-            -_int(q.get("stock")),
-            q.get("provider") or "",
-        ),
-    )
+def get_aggregated_quotes(country, service, operator=None):
+    """Return live provider quotes for one country, optionally for an operator."""
+    matches = [q for q in _all_quotes(service) if _same_country(q.get("country_name"), country)]
+    if operator and str(operator).upper() not in {"ALL", "AUTO", "ANY"}:
+        wanted = _norm(operator)
+        # RumahOTP exposes operator IDs only after country/provider selection.
+        try:
+            for q in get_rumahotp_operator_quotes(country, service):
+                if _norm(q.get("operator")) == wanted:
+                    matches.append(q)
+        except Exception:
+            logger.exception("[AGGREGATOR] RumahOTP operator lookup failed")
+        matches = [q for q in matches if _norm(q.get("operator")) == wanted]
+    return sorted(matches, key=lambda q: (_num(q.get("cost_usd")), -_int(q.get("stock")), q.get("provider") or ""))
+
+
+def get_rumahotp_operator_quotes_for_country(country, service):
+    try:
+        return get_rumahotp_operator_quotes(country, service)
+    except Exception:
+        logger.exception("[AGGREGATOR] RumahOTP operator lookup failed")
+        return []
 
 
 def get_aggregated_countries(service):

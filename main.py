@@ -88,6 +88,15 @@ from aggregator import (
     get_aggregator_service_catalog,
     _operator_label,
     _is_displayable_operator,
+    get_rumahotp_operator_quotes_for_country,
+)
+
+from rumahotp import (
+    check_api as check_rumahotp_api,
+    get_balance as get_rumahotp_balance,
+    buy_number as buy_rumahotp_number,
+    get_sms as get_rumahotp_sms,
+    cancel_number as cancel_rumahotp_number,
 )
 
 from smsman import (
@@ -183,7 +192,10 @@ OTP_SERVERS = {
         "⚡ Server 3",
 
     "aggregator":
-        "🔥 Multi Server"
+        "🔥 Multi Server",
+
+    "rumahotp":
+        "⚡ Server 4 — RumahOTP"
 
 }
 
@@ -2582,7 +2594,7 @@ async def show_aggregated_operator_page(query, service, country):
     service_label = dict(OTP_SERVICES).get(service, service)
     try:
         quotes = await asyncio.wait_for(
-            asyncio.to_thread(get_aggregated_quotes, country, service),
+            asyncio.to_thread(get_aggregated_quotes, country, service, operator),
             timeout=25
         )
     except asyncio.TimeoutError:
@@ -2631,6 +2643,22 @@ async def show_aggregated_operator_page(query, service, country):
         cost = float(q.get("cost_usd") or 0)
         if cost > 0 and (group["cost"] is None or cost < group["cost"]):
             group["cost"] = cost
+
+    # RumahOTP exposes real carrier names through a dedicated operator endpoint.
+    try:
+        rumah_quotes = await asyncio.to_thread(get_rumahotp_operator_quotes_for_country, country, service)
+        for q in rumah_quotes:
+            label = _operator_label(q.get("operator"))
+            if not _is_displayable_operator(label):
+                continue
+            key = _norm(label)
+            group = groups.setdefault(key, {"operator": label, "stock": 0, "cost": None})
+            group["stock"] += int(q.get("stock") or 0)
+            cost = float(q.get("cost_usd") or 0)
+            if cost > 0 and (group["cost"] is None or cost < group["cost"]):
+                group["cost"] = cost
+    except Exception:
+        logger.exception("RumahOTP operator list failed")
 
     operators = sorted(
         groups.values(),
@@ -2968,6 +2996,12 @@ async def process_otp_order(
         phone = result.get("phone") if result else None
         provider_error = not result or result.get("response") == "ERROR"
         error_reason = "Pembelian nomor 5SIM gagal."
+    elif server == "rumahotp":
+        result = await asyncio.to_thread(buy_rumahotp_number, country, service, operator, json.loads(quote.get("pool") or "{}") if quote and quote.get("pool") else None)
+        provider_order_id = result.get("order_id") or result.get("id") if result else None
+        phone = result.get("phone") or result.get("number") if result else None
+        provider_error = not result or result.get("response") == "ERROR"
+        error_reason = "Pembelian nomor RumahOTP gagal."
     elif server == "smsman":
         result = await asyncio.to_thread(buy_smsman_number, country, service)
         provider_order_id = result.get("order_id") if result else None
@@ -4071,6 +4105,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             sms_checker = get_smspool_sms
         elif provider == "smsman":
             sms_checker = get_smsman_sms
+        elif provider == "rumahotp":
+            sms_checker = get_rumahotp_sms
         else:
             sms_checker = get_sms
 
@@ -4232,6 +4268,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 canceler = cancel_smspool_number
             elif provider == "smsman":
                 canceler = cancel_smsman_number
+            elif provider == "rumahotp":
+                canceler = cancel_rumahotp_number
             else:
                 canceler = cancel_number
 
@@ -5039,12 +5077,14 @@ async def admin_callback(
             asyncio.to_thread(check_5sim_api),
             asyncio.to_thread(check_smspool_api),
             asyncio.to_thread(check_smsman_api),
+            asyncio.to_thread(check_rumahotp_api),
             return_exceptions=True,
         )
         balances = await asyncio.gather(
             asyncio.to_thread(get_5sim_balance),
             asyncio.to_thread(get_smspool_balance),
             asyncio.to_thread(get_smsman_balance),
+            asyncio.to_thread(get_rumahotp_balance),
             return_exceptions=True,
         )
 
@@ -5057,16 +5097,18 @@ async def admin_callback(
             except Exception:
                 return 0.0
 
-        b1, b2, b3 = [money(x) for x in balances]
+        b1, b2, b3, b4 = [money(x) for x in balances]
         s1 = "🟢 CONNECTED" if ok(checks[0]) else "🔴 OFFLINE"
         s2 = "🟢 CONNECTED" if ok(checks[1]) else "🔴 OFFLINE"
         s3 = "🟢 CONNECTED" if ok(checks[2]) else "🔴 OFFLINE"
+        s4 = "🟢 CONNECTED" if ok(checks[3]) else "🔴 OFFLINE / API KEY BELUM DIATUR"
 
         await query.edit_message_text(
             "💰 <b>PROVIDER STATUS</b>\n\n"
             f"⚡ <b>Server 1</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
             f"⚡ <b>Server 2</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
             f"⚡ <b>Server 3</b>\n{s3}\n💵 Saldo: <b>{b3:.4f}</b> (currency provider)\n\n"
+            f"⚡ <b>Server 4 — RumahOTP</b>\n{s4}\n💵 Saldo: <b>Rp{b4:,.0f}</b>\n\n"
             f"💱 Kurs: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
             f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
             parse_mode="HTML",

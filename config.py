@@ -130,6 +130,16 @@ SMSMAN_API_KEY = os.getenv(
 
 
 # =========================================================
+# RUMAHOTP CONFIGURATION
+# =========================================================
+
+RUMAHOTP_API_KEY = os.getenv(
+    "RUMAHOTP_API_KEY",
+    ""
+).strip()
+
+
+# =========================================================
 # TELEGRAM PROMO CHANNEL
 # =========================================================
 # Configure this in Railway Variables:
