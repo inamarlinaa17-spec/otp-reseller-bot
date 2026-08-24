@@ -99,15 +99,6 @@ from rumahotp import (
     cancel_number as cancel_rumahotp_number,
 )
 
-from smsman import (
-    check_api as check_smsman_api,
-    get_balance as get_smsman_balance,
-    get_country_items as get_smsman_country_items,
-    buy_number as buy_smsman_number,
-    get_sms as get_smsman_sms,
-    cancel_number as cancel_smsman_number
-)
-
 from smspool import (
     check_api as check_smspool_api,
     get_balance as get_smspool_balance,
@@ -182,20 +173,20 @@ SERVICES_PER_PAGE = 16
 
 OTP_SERVERS = {
 
-    "5sim":
+    # Server 1 = RumahOTP
+    "rumahotp":
         "⚡ Server 1",
 
+    # Server 2 = SMSPool
     "smspool":
         "⚡ Server 2",
 
-    "smsman":
+    # Server 3 = 5SIM
+    "5sim":
         "⚡ Server 3",
 
     "aggregator":
-        "🔥 Multi Server",
-
-    "rumahotp":
-        "⚡ Server 4 — RumahOTP"
+        "🔥 Multi Server"
 
 }
 
@@ -1212,8 +1203,8 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
-                OTP_SERVERS["5sim"],
-                callback_data="otp_server:5sim"
+                OTP_SERVERS["rumahotp"],
+                callback_data="otp_server:rumahotp"
             )
         ],
 
@@ -1226,8 +1217,8 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
-                OTP_SERVERS["smsman"],
-                callback_data="otp_server:smsman"
+                OTP_SERVERS["5sim"],
+                callback_data="otp_server:5sim"
             )
         ],
 
@@ -1304,14 +1295,13 @@ def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
 
 
 def get_service_catalog(server):
-    """Katalog layanan. Aggregator memakai UNION layanan 5SIM + SMSPool + SMS-Man."""
+    """Katalog layanan untuk provider dan Multi Server."""
     catalog = list(OTP_SERVICES)
     seen = {code.lower() for code, _ in catalog}
 
     if server == "aggregator":
         # Aggregator memakai satu canonical key per layanan. Saat order,
-        # aggregator.py menerjemahkan key tersebut ke ID layanan masing-masing
-        # provider. Jadi tidak lagi mengirim ID 5SIM ke SMSPool/SMS-Man.
+        # aggregator.py menerjemahkan key tersebut ke ID layanan masing-masing provider.
         try:
             return get_aggregator_service_catalog()
         except Exception:
@@ -1340,13 +1330,7 @@ def get_service_catalog(server):
             ("name", "service", "title")
         )
 
-    elif server == "smsman":
-        from smsman import get_applications
-        _merge_service_catalog(
-            catalog, seen, get_applications(),
-            ("code", "id", "application_id", "name", "service"),
-            ("name", "title", "service", "code")
-        )
+
 
     return catalog
 
@@ -1678,8 +1662,6 @@ def get_service_countries(server, service):
     if server == "5sim":
         return _country_items_5sim(service)
 
-    if server == "smsman":
-        return get_smsman_country_items(service)
 
     # SMSPool: gunakan endpoint all_stock yang mengembalikan country,
     # service, stock dan price. Jika kosong/error, coba suggested_countries
@@ -1784,15 +1766,26 @@ async def show_service_country_page(
         )
         return
 
-    # Indonesia diprioritaskan
-    items.sort(
-        key=lambda x: (
-            0 if str(x["name"]).lower() == "indonesia"
-            or str(x["country"]).lower() == "indonesia"
-            else 1,
-            str(x["name"]).lower()
+    # Multi Server: urutkan negara dari harga termurah ke termahal.
+    # Jika harga sama, gunakan stok terbesar lalu nama negara.
+    if server == "aggregator":
+        items.sort(
+            key=lambda x: (
+                float(x.get("cost") or 999999),
+                -int(x.get("stock") or 0),
+                str(x.get("name") or "").lower()
+            )
         )
-    )
+    else:
+        # Server individual tetap memakai urutan lama dengan Indonesia di atas.
+        items.sort(
+            key=lambda x: (
+                0 if str(x["name"]).lower() == "indonesia"
+                or str(x["country"]).lower() == "indonesia"
+                else 1,
+                str(x["name"]).lower()
+            )
+        )
 
     if not items:
         await query.edit_message_text(
@@ -1840,28 +1833,30 @@ async def show_service_country_page(
     keyboard = []
 
     if server == "aggregator":
-        # get_aggregated_countries() already contains the cheapest price and
-        # combined stock from all providers. Do NOT make a second live quote
-        # request here: a temporary provider timeout must never turn a country
-        # that is actually available into "Tidak tersedia".
+        # get_aggregated_countries() sudah berisi harga termurah dan stok
+        # gabungan dari RumahOTP + SMSPool + 5SIM. Tampilkan 2 kolom agar
+        # daftar negara tidak memanjang ke bawah.
+        country_buttons = []
         for item in page_items:
             cost = float(item.get("cost") or 0)
             stock = int(item.get("stock") or 0)
             if cost > 0 and stock > 0:
                 price = hitung_harga_jual(cost)
                 label = (
-                    f"🌍 {item['name']}  |  "
-                    f"💰 mulai {format_rupiah(price)}  |  "
-                    f"📦 {stock}"
+                    f"🌍 {item['name']}\n"
+                    f"💰 {format_rupiah(price)} | 📦 {stock}"
                 )
             else:
-                label = f"🌍 {item['name']}  |  ❌ Tidak tersedia"
-            keyboard.append([
+                label = f"🌍 {item['name']}\n❌ Tidak tersedia"
+            country_buttons.append(
                 InlineKeyboardButton(
                     label,
                     callback_data=f"otp_operators:{service}:{item['country']}"
                 )
-            ])
+            )
+
+        for i in range(0, len(country_buttons), 2):
+            keyboard.append(country_buttons[i:i + 2])
     else:
         for item in page_items:
             price = hitung_harga_jual(item["cost"])
@@ -2766,12 +2761,11 @@ async def show_aggregated_quotes_page(query, user_id, service, country, operator
             country_name=q.get("country_name") or country
         )
         sell = hitung_harga_jual(q["cost_usd"])
-        # Keep provider identities private. Users only see the internal
-        # server number, never 5SIM / SMSPool / SMS-Man.
+        # Keep provider identities private. Users only see the internal server number.
         server_label = {
-            "5sim": "⚡ Server 1",
+            "rumahotp": "⚡ Server 1",
             "smspool": "⚡ Server 2",
-            "smsman": "⚡ Server 3",
+            "5sim": "⚡ Server 3",
         }.get(q.get("provider"), "⚡ Server")
         keyboard.append([
             InlineKeyboardButton(
@@ -2915,18 +2909,7 @@ async def process_otp_order(
 
         operator = "AUTO"
         provider_cost_usd = float(quote["cost"])
-    elif server == "smsman":
-        sm = await asyncio.to_thread(get_smsman_country_items, service)
-        current = next((x for x in sm if str(x["country"]).lower() == str(country).lower()), None)
-        if not current:
-            await query.edit_message_text(
-                "❌ <b>Harga/stok SMS-Man tidak tersedia.</b>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_service:{server}:{service}")], [InlineKeyboardButton("⬅️ Pilih Layanan", callback_data=f"otp_server:{server}")]])
-            )
-            return
-        operator = "AUTO"
-        provider_cost_usd = float(current["cost"])
+
     else:
         await query.answer("Server tidak tersedia.", show_alert=True)
         return
@@ -3005,12 +2988,7 @@ async def process_otp_order(
         phone = result.get("phone") or result.get("number") if result else None
         provider_error = not result or result.get("response") == "ERROR"
         error_reason = "Pembelian nomor RumahOTP gagal."
-    elif server == "smsman":
-        result = await asyncio.to_thread(buy_smsman_number, country, service)
-        provider_order_id = result.get("order_id") if result else None
-        phone = result.get("phone") or result.get("number") if result else None
-        provider_error = not result or result.get("response") == "ERROR"
-        error_reason = "Pembelian nomor SMS-Man gagal."
+
     else:
         found = await asyncio.to_thread(find_smspool_service, service)
         smspool_service = (
@@ -4106,8 +4084,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         if provider == "smspool":
             sms_checker = get_smspool_sms
-        elif provider == "smsman":
-            sms_checker = get_smsman_sms
         elif provider == "rumahotp":
             sms_checker = get_rumahotp_sms
         else:
@@ -4269,8 +4245,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             if provider == "smspool":
                 canceler = cancel_smspool_number
-            elif provider == "smsman":
-                canceler = cancel_smsman_number
             elif provider == "rumahotp":
                 canceler = cancel_rumahotp_number
             else:
@@ -5075,19 +5049,17 @@ async def admin_callback(
 
     elif query.data == "admin_provider":
 
-        # Check all three providers concurrently so the admin panel stays fast.
+        # Check the three active providers concurrently so the admin panel stays fast.
         checks = await asyncio.gather(
-            asyncio.to_thread(check_5sim_api),
-            asyncio.to_thread(check_smspool_api),
-            asyncio.to_thread(check_smsman_api),
             asyncio.to_thread(check_rumahotp_api),
+            asyncio.to_thread(check_smspool_api),
+            asyncio.to_thread(check_5sim_api),
             return_exceptions=True,
         )
         balances = await asyncio.gather(
-            asyncio.to_thread(get_5sim_balance),
-            asyncio.to_thread(get_smspool_balance),
-            asyncio.to_thread(get_smsman_balance),
             asyncio.to_thread(get_rumahotp_balance),
+            asyncio.to_thread(get_smspool_balance),
+            asyncio.to_thread(get_5sim_balance),
             return_exceptions=True,
         )
 
@@ -5100,18 +5072,16 @@ async def admin_callback(
             except Exception:
                 return 0.0
 
-        b1, b2, b3, b4 = [money(x) for x in balances]
-        s1 = "🟢 CONNECTED" if ok(checks[0]) else "🔴 OFFLINE"
-        s2 = "🟢 CONNECTED" if ok(checks[1]) else "🔴 OFFLINE"
-        s3 = "🟢 CONNECTED" if ok(checks[2]) else "🔴 OFFLINE"
-        s4 = "🟢 CONNECTED" if ok(checks[3]) else "🔴 OFFLINE / API KEY BELUM DIATUR"
+        b1, b2, b3 = [money(x) for x in balances]
+        s1 = "🟢 CONNECTED" if ok(checks[0]) else "🔴 OFFLINE / API KEY BELUM DIATUR"
+        s2 = "🟢 CONNECTED" if ok(checks[1]) else "🔴 OFFLINE / API KEY BELUM DIATUR"
+        s3 = "🟢 CONNECTED" if ok(checks[2]) else "🔴 OFFLINE / API KEY BELUM DIATUR"
 
         await query.edit_message_text(
             "💰 <b>PROVIDER STATUS</b>\n\n"
-            f"⚡ <b>Server 1</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
-            f"⚡ <b>Server 2</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
-            f"⚡ <b>Server 3</b>\n{s3}\n💵 Saldo: <b>{b3:.4f}</b> (currency provider)\n\n"
-            f"⚡ <b>Server 4 — RumahOTP</b>\n{s4}\n💵 Saldo: <b>Rp{b4:,.0f}</b>\n\n"
+            f"⚡ <b>Server 1 — RumahOTP</b>\n{s1}\n💵 Saldo: <b>Rp{b1:,.0f}</b>\n\n"
+            f"⚡ <b>Server 2 — SMSPool</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
+            f"⚡ <b>Server 3 — 5SIM</b>\n{s3}\n💵 Saldo: <b>{b3:.4f}</b> (currency provider)\n\n"
             f"💱 Kurs: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
             f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
             parse_mode="HTML",
@@ -5886,9 +5856,9 @@ def run():
 
     )
 
-    application.add_handler(CommandHandler("server1", lambda u, c: command_server(u, c, "5sim")))
+    application.add_handler(CommandHandler("server1", lambda u, c: command_server(u, c, "rumahotp")))
     application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "smspool")))
-    application.add_handler(CommandHandler("server3", lambda u, c: command_server(u, c, "smsman")))
+    application.add_handler(CommandHandler("server3", lambda u, c: command_server(u, c, "5sim")))
     application.add_handler(CommandHandler("multiserver", lambda u, c: command_server(u, c, "aggregator")))
     application.add_handler(CommandHandler("deposit", command_deposit))
     application.add_handler(CommandHandler("checkin", perform_checkin))

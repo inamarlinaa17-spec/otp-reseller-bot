@@ -16,14 +16,6 @@ from rumahotp import (
     get_all_quotes as get_rumahotp_all_quotes,
     get_operator_quotes as get_rumahotp_operator_quotes,
 )
-from smsman import (
-    get_country_items as get_smsman_country_items,
-    get_countries as get_smsman_countries,
-    find_country as find_smsman_country,
-    find_application as find_smsman_application,
-    get_applications as get_smsman_applications,
-    _price_to_usd as smsman_price_to_usd,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -264,10 +256,10 @@ def get_aggregator_service_catalog():
 
     # Fetch the three catalogs concurrently. One slow provider no longer
     # blocks the other provider's service list.
+    # Multi Server hanya menggabungkan RumahOTP + SMSPool + 5SIM.
     loaders = (
         ("5SIM", get_5sim_products),
         ("SMSPool", get_smspool_services),
-        ("SMS-Man", get_smsman_applications),
         ("RumahOTP", lambda: [{"service_code": x.get("service_code"), "service_name": x.get("service_name")} for x in __import__("rumahotp").get_services()]),
     )
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -373,38 +365,6 @@ def _resolve_smspool_service(service):
                     return {"id": sid, "name": str(item.get("name") or value)}
     except Exception:
         logger.exception("[AGGREGATOR] SMSPool raw service resolution failed: %s", service)
-    return None
-
-
-def _resolve_smsman_service(service):
-    # First use the provider helper.
-    for candidate in _service_candidates(service):
-        try:
-            found = find_smsman_application(candidate)
-            if found and found.get("id") is not None:
-                return found
-        except Exception:
-            continue
-
-    # Fallback: scan the raw application catalog with the same canonical
-    # normalization used by the aggregator. This catches cases where the
-    # provider exposes e.g. code=wa but name=WhatsApp, or a translated name.
-    try:
-        target = _canonical_service_key(service)
-        for item in get_smsman_applications() or []:
-            if not isinstance(item, dict):
-                continue
-            aid = item.get("id") or item.get("application_id")
-            vals = [item.get("name"), item.get("title"), item.get("code"), item.get("service")]
-            for value in vals:
-                if value and _canonical_service_key(value) == target:
-                    return {
-                        "id": str(aid),
-                        "name": str(item.get("name") or value),
-                        "code": str(item.get("code") or value),
-                    }
-    except Exception:
-        logger.exception("[AGGREGATOR] SMS-Man raw service resolution failed: %s", service)
     return None
 
 
@@ -653,95 +613,6 @@ def _smspool_all_quotes(service):
     return quotes
 
 
-def _smsman_all_quotes(service):
-    """Fetch SMS-Man prices using the documented API v2.0 shape."""
-    target_app = _resolve_smsman_service(service)
-    if not target_app:
-        logger.warning("[AGGREGATOR] SMS-Man service not found: %s", service)
-        return []
-
-    app_id = target_app.get("id")
-    app_code = target_app.get("code") or service
-    apps = [app_id, app_code, target_app.get("name")]
-
-    countries = get_smsman_countries()
-    data = get_smsman_country_items(app_code)
-    quotes = []
-
-    # First use the already-normalized helper used by Server 3.
-    for item in data or []:
-        cost = _num(item.get("cost"))
-        stock = _int(item.get("stock"))
-        cid = item.get("country_id") or item.get("country")
-        if cid is None or cost <= 0 or stock <= 0:
-            continue
-        quotes.append({
-            "provider": "smsman",
-            "country": str(cid),
-            "country_name": str(item.get("name") or item.get("country") or cid),
-            "service": str(app_code),
-            "service_name": str(service),
-            "operator": _operator_label(
-                item.get("operator")
-                or item.get("operator_name")
-                or item.get("carrier")
-                or item.get("carrier_name")
-                or "AUTO"
-            ),
-            "pool": None,
-            "cost_usd": cost,
-            "stock": stock,
-        })
-
-    if quotes:
-        return quotes
-
-    # Fallback parser for any API response shape not handled by the helper.
-    try:
-        from smsman import get_prices as get_smsman_prices
-        prices = get_smsman_prices()
-        country_names = {}
-        for c in countries or []:
-            if not isinstance(c, dict):
-                continue
-            cid = c.get("id") or c.get("country_id")
-            if cid is not None:
-                country_names[str(cid)] = str(c.get("title") or c.get("name_en") or c.get("name") or cid)
-
-        if isinstance(prices, dict):
-            for cid, country_data in prices.items():
-                if not isinstance(country_data, dict):
-                    continue
-                item = None
-                for candidate in apps:
-                    if candidate is None:
-                        continue
-                    item = country_data.get(str(candidate)) or country_data.get(candidate)
-                    if isinstance(item, dict):
-                        break
-                if not isinstance(item, dict):
-                    continue
-                cost = _num(item.get("cost"))
-                stock = _int(item.get("count") or item.get("numbers"))
-                if cost <= 0 or stock <= 0:
-                    continue
-                quotes.append({
-                    "provider": "smsman",
-                    "country": str(cid),
-                    "country_name": country_names.get(str(cid), str(cid)),
-                    "service": str(app_code),
-                    "service_name": str(service),
-                    "operator": "AUTO",
-                    "pool": None,
-                    "cost_usd": smsman_price_to_usd(cost),
-                    "stock": stock,
-                })
-    except Exception:
-        logger.exception("[AGGREGATOR] SMS-Man fallback parser failed")
-
-    return quotes
-
-
 def _all_quotes(service):
     """Fetch all three providers in parallel, with a short-lived cache."""
     cached = _cache_get_quotes(service)
@@ -749,11 +620,11 @@ def _all_quotes(service):
         return cached
 
     results = []
+    # Multi Server hanya mengambil quote live dari RumahOTP, SMSPool, dan 5SIM.
     providers = (
-        ("5SIM", _5sim_all_quotes),
-        ("SMSPool", _smspool_all_quotes),
-        ("SMS-Man", _smsman_all_quotes),
         ("RumahOTP", get_rumahotp_all_quotes),
+        ("SMSPool", _smspool_all_quotes),
+        ("5SIM", _5sim_all_quotes),
     )
 
     # Provider calls are independent, so never wait for them sequentially.
