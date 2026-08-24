@@ -178,22 +178,10 @@ _service_catalog_cache = {}
 # =========================================================
 
 OTP_SERVERS = {
-
-    # Server 1 = RumahOTP
-    "rumahotp":
-        "⚡ Server 1",
-
-    # Server 2 = SMSPool
-    "smspool":
-        "⚡ Server 2",
-
-    # Server 3 = 5SIM
-    "5sim":
-        "⚡ Server 3",
-
-    "aggregator":
-        "🔥 Multi Server"
-
+    "rumahotp": "⚡ Server 1 — RumahOTP",
+    "smspool": "⚡ Server 2 — SMSPool",
+    "5sim": "⚡ Server 3 — 5SIM",
+    "aggregator": "🔥 Multi Server",
 }
 
 
@@ -1420,7 +1408,7 @@ async def show_service_page(
         for service_code, service_name in page_items[i:i + 2]:
             row.append(
                 InlineKeyboardButton(
-                    service_name,
+                    _compact_service_label(service_code, service_name),
                     callback_data=(
                         f"otp_service:{server}:{service_code}"
                     )
@@ -1465,7 +1453,7 @@ async def show_service_page(
     await query.edit_message_text(
         "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
         f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"
-        "Pilih layanan OTP:",
+        "Pilih layanan OTP (2 kolom):",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1783,11 +1771,49 @@ def get_service_countries(server, service):
     return items
 
 
-def _short_button_name(value, limit=22):
+def _short_button_name(value, limit=18):
     text = " ".join(str(value or "").replace("_", " ").split())
     if len(text) <= limit:
         return text
     return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _compact_service_label(code, label):
+    """Keep two-column Telegram service buttons readable on narrow phones."""
+    text = " ".join(str(label or code or "").split())
+    aliases = {
+        "google / gmail / youtube": "Google / Gmail / YT",
+        "google/gmail/youtube": "Google / Gmail / YT",
+        "google gmail youtube": "Google / Gmail / YT",
+        "google / gmail / yout": "Google / Gmail / YT",
+    }
+    key = text.lower()
+    if key in aliases:
+        return "🔎 " + aliases[key]
+    if len(text) > 20:
+        return _short_button_name(text, 20)
+    return text
+
+
+_COUNTRY_SHORT_NAMES = {
+    "United States (Virtual)": "US (Virtual)",
+    "United States of America": "USA",
+    "United Kingdom": "UK",
+    "United Arab Emirates": "UAE",
+    "Saudi Arabia": "Saudi Arabia",
+    "South Africa": "South Africa",
+    "South Korea": "South Korea",
+    "New Zealand": "New Zealand",
+    "Papua New Guinea": "Papua N. Guinea",
+    "Antiguaandbarbuda": "Antigua & Barbuda",
+}
+
+
+def _compact_country_name(name, limit=17):
+    text = " ".join(str(name or "").replace("_", " ").split())
+    if text in _COUNTRY_SHORT_NAMES:
+        text = _COUNTRY_SHORT_NAMES[text]
+    return _short_button_name(text, limit)
 
 
 async def show_service_country_page(
@@ -1864,21 +1890,23 @@ async def show_service_country_page(
     # Multi Server: urutkan negara dari harga termurah ke termahal.
     # Jika harga sama, gunakan stok terbesar lalu nama negara.
     if server == "aggregator":
+        # Multi Server: Indonesia first, then the cheapest live country.
         items.sort(
             key=lambda x: (
+                0 if _norm(x.get("name") or x.get("country")) == "indonesia" else 1,
                 float(x.get("cost") or 999999),
                 -int(x.get("stock") or 0),
-                str(x.get("name") or "").lower()
+                _norm(x.get("name")),
             )
         )
     else:
-        # Server individual tetap memakai urutan lama dengan Indonesia di atas.
+        # Semua server: Indonesia selalu pertama, sisanya termurah -> termahal.
         items.sort(
             key=lambda x: (
-                0 if str(x["name"]).lower() == "indonesia"
-                or str(x["country"]).lower() == "indonesia"
-                else 1,
-                str(x["name"]).lower()
+                0 if _norm(x.get("name") or x.get("country")) == "indonesia" else 1,
+                float(x.get("cost") or 999999),
+                -int(x.get("stock") or 0),
+                _norm(x.get("name")),
             )
         )
 
@@ -1935,14 +1963,14 @@ async def show_service_country_page(
         for item in page_items:
             cost = float(item.get("cost") or 0)
             stock = int(item.get("stock") or 0)
+            country_name = _compact_country_name(item.get("name"), limit=11)
             if cost > 0 and stock > 0:
                 price = hitung_harga_jual(cost)
-                label = (
-                    f"🌍 {_short_button_name(item['name'])}\n"
-                    f"💰 {format_rupiah(price)} | 📦 {stock}"
-                )
+                # Satu baris dibuat sengaja agar dua kolom memakai lebar penuh
+                # dan harga tidak terpotong di layar HP sempit.
+                label = f"🌍 {country_name} • {format_rupiah(price)} • {stock}"
             else:
-                label = f"🌍 {item['name']}\n❌ Tidak tersedia"
+                label = f"🌍 {country_name} • Tidak ada"
             country_buttons.append(
                 InlineKeyboardButton(
                     label,
@@ -1956,12 +1984,11 @@ async def show_service_country_page(
         country_buttons = []
         for item in page_items:
             price = hitung_harga_jual(item["cost"])
+            country_name = _compact_country_name(item.get("name"), limit=11)
+            # Satu baris + 2 kolom supaya seluruh tombol memanfaatkan lebar layar.
             country_buttons.append(
                 InlineKeyboardButton(
-                    (
-                        f"🌍 {_short_button_name(item['name'])}\n"
-                        f"💰 {format_rupiah(price)} | 📦 {item['stock']}"
-                    ),
+                    f"🌍 {country_name} • {format_rupiah(price)} • {item['stock']}",
                     callback_data=(
                         f"otp_provider_quotes:{server}:{service}:"
                         f"{item['country']}"
@@ -2729,7 +2756,7 @@ async def show_provider_quotes_page(query, user_id, server, service, country):
         sell = hitung_harga_jual(q["cost_usd"])
         operator = _operator_label(q.get("operator") or q.get("provider_operator") or "AUTO")
         buttons.append(InlineKeyboardButton(
-            f"📡 {_short_button_name(operator, 18)}\n💰 {format_rupiah(sell)} | 📦 {int(q.get('stock') or 0)}",
+            f"📡 {_short_button_name(operator, 14)}\n💰 {format_rupiah(sell)} • 📦 {int(q.get('stock') or 0)}",
             callback_data=f"otp_quote:{quote_id}"
         ))
 
@@ -2844,7 +2871,7 @@ async def show_aggregated_operator_page(query, service, country):
         price = hitung_harga_jual(item["cost"]) if item["cost"] else 0
         operator_buttons.append(
             InlineKeyboardButton(
-                f"📡 {_short_button_name(item['operator'], 18)}\n💰 {format_rupiah(price)} | 📦 {item['stock']}",
+                f"📡 {_short_button_name(item['operator'], 14)}\n💰 {format_rupiah(price)} • 📦 {item['stock']}",
                 callback_data=f"otp_operator:{service}:{country}:{item['operator']}"
             )
         )
@@ -2938,14 +2965,12 @@ async def show_aggregated_quotes_page(query, user_id, service, country, operator
         )
         sell = hitung_harga_jual(q["cost_usd"])
         # Keep provider identities private. Users only see the internal server number.
-        server_label = {
-            "rumahotp": "⚡ S1",
-            "smspool": "⚡ S2",
-            "5sim": "⚡ S3",
-        }.get(q.get("provider"), "⚡ S")
+        # Nama provider sengaja tidak ditampilkan di Multi Server.
+        # User cukup melihat pilihan harga + stok; provider tetap disimpan
+        # secara internal pada quote_id untuk proses order.
         quote_buttons.append(
             InlineKeyboardButton(
-                f"{server_label}\n💰 {format_rupiah(sell)} | 📦 {q['stock']}",
+                f"💰 {format_rupiah(sell)} • 📦 {q['stock']}",
                 callback_data=f"otp_quote:{quote_id}"
             )
         )
@@ -2985,6 +3010,13 @@ async def process_otp_order(
 
     service_label = dict(OTP_SERVICES).get(service, service)
     display_country = country
+
+    # Never purchase directly from a country click. Every individual server
+    # must first show its live price/operator choices. This also protects old
+    # callbacks from accidentally auto-buying 5SIM/SMSPool/RumahOTP stock.
+    if quote is None and server in {"rumahotp", "smspool", "5sim"}:
+        await show_provider_quotes_page(query, user_id, server, service, country)
+        return
 
     # -----------------------------------------------------
     # AMBIL HARGA/STOK TERKINI
