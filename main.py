@@ -1425,146 +1425,90 @@ def _country_items_5sim(service):
 
 
 def _flatten_smspool_prices(data, fallback_service):
-    """Normalisasi beberapa bentuk response SMSPool price endpoint."""
-    result = []
+    """Normalize SMSPool /sms/all_stock rows and keep REAL stock counts.
+
+    SMSPool returns one row per country/service/pool.  The bot should show
+    the total available stock for a country and the cheapest pool price,
+    rather than fabricating a stock value of 1 when a field is missing.
+    """
+    rows = []
 
     if isinstance(data, list):
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            country = (
-                item.get("country")
-                or item.get("country_name")
-                or item.get("short_name")
-                or item.get("cc")
-            )
-            cost = (
-                item.get("cost")
-                or item.get("price")
-                or item.get("amount")
-            )
-            stock = (
-                item.get("count")
-                or item.get("stock")
-                or item.get("available")
-                or 1
-            )
-            try:
-                cost = float(cost or 0)
-                stock = int(stock or 0)
-            except Exception:
-                continue
-            if country and cost > 0 and stock > 0:
-                result.append({
-                    "country": str(country),
-                    "name": str(country),
-                    "cost": cost,
-                    "stock": stock
-                })
-        return result
+        rows = [item for item in data if isinstance(item, dict)]
+    elif isinstance(data, dict):
+        # Be tolerant of wrapped API responses.
+        for key in ("data", "results", "stock", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                rows = [item for item in value if isinstance(item, dict)]
+                break
 
-    if not isinstance(data, dict):
-        return result
+    if not rows:
+        return []
 
-    # Bentuk umum: {country: {...}}
-    for country, value in data.items():
-        if not isinstance(value, (dict, list)):
-            continue
+    aggregated = {}
+    for item in rows:
+        country = (
+            item.get("country")
+            or item.get("country_id")
+            or item.get("country_name")
+            or item.get("short_name")
+            or item.get("cc")
+        )
+        country_name = (
+            item.get("country_name")
+            or item.get("name")
+            or item.get("short_name")
+            or country
+        )
+        cost = (
+            item.get("price")
+            or item.get("cost")
+            or item.get("amount")
+        )
+        stock = (
+            item.get("stock")
+            if item.get("stock") is not None
+            else item.get("count")
+        )
+        if stock is None:
+            stock = item.get("available")
+        if stock is None:
+            stock = item.get("quantity")
+        if stock is None:
+            stock = item.get("qty")
 
-        # country-level langsung
-        if isinstance(value, dict):
-            direct_cost = (
-                value.get("cost")
-                or value.get("price")
-                or value.get("amount")
-            )
-            direct_stock = (
-                value.get("count")
-                or value.get("stock")
-                or value.get("available")
-                or 1
-            )
-
-            if direct_cost is not None:
-                try:
-                    cost = float(direct_cost)
-                    stock = int(direct_stock or 0)
-                except Exception:
-                    cost, stock = 0, 0
-                if cost > 0 and stock > 0:
-                    result.append({
-                        "country": str(country),
-                        "name": str(
-                            value.get("country_name")
-                            or value.get("name")
-                            or country
-                        ),
-                        "cost": cost,
-                        "stock": stock
-                    })
-                    continue
-
-            # nested service/operator/pool
-            candidates = []
-            for key, sub in value.items():
-                if isinstance(sub, dict):
-                    c = (
-                        sub.get("cost")
-                        or sub.get("price")
-                        or sub.get("amount")
-                    )
-                    s = (
-                        sub.get("count")
-                        or sub.get("stock")
-                        or sub.get("available")
-                        or 1
-                    )
-                    if c is not None:
-                        try:
-                            c = float(c)
-                            s = int(s or 0)
-                        except Exception:
-                            continue
-                        if c > 0 and s > 0:
-                            candidates.append((c, s))
-
-            if candidates:
-                cost, stock = min(candidates, key=lambda x: x[0])
-                result.append({
-                    "country": str(country),
-                    "name": str(country).replace("_", " ").title(),
-                    "cost": cost,
-                    "stock": stock
-                })
-
-    return result
-
-
-def _flatten_smspool_suggested_countries(data):
-    result = []
-    if not isinstance(data, list):
-        return result
-
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        country = item.get("country_id") or item.get("country") or item.get("ID")
-        name = item.get("name") or item.get("country_name") or item.get("short_name") or str(country or "")
-        price = item.get("price") or item.get("cost")
         try:
-            cost = float(price or 0)
+            cost = float(cost or 0)
+            stock = int(float(stock or 0))
         except Exception:
             continue
-        if country is not None and cost > 0:
-            result.append({
-                "country": str(country),
-                "name": str(name),
+
+        if country is None or cost <= 0 or stock <= 0:
+            continue
+
+        key = str(country)
+        entry = aggregated.get(key)
+        if entry is None:
+            aggregated[key] = {
+                "country": key,
+                "name": str(country_name),
                 "cost": cost,
-                # suggested_countries tidak mengembalikan stock count;
-                # gunakan 1 sebagai indikator bahwa provider menyarankan negara ini.
-                "stock": 1
-            })
-    return result
+                "stock": stock,
+            }
+        else:
+            # Multiple pools can exist for one country/service.  Show the
+            # cheapest available price and the combined active stock.
+            entry["stock"] += stock
+            if cost < entry["cost"]:
+                entry["cost"] = cost
+                entry["name"] = str(country_name)
+
+    return list(aggregated.values())
+
+def _flatten_smspool_suggested_countries(data):
+    """Deprecated: suggested countries do not provide real stock counts."""
+    return []
 
 
 def _smspool_country_name_map():
@@ -1607,41 +1551,74 @@ def _smspool_country_name_map():
 
 
 def get_service_countries(server, service):
-
     if server == "5sim":
         return _country_items_5sim(service)
 
-
-    # SMSPool: gunakan endpoint all_stock yang mengembalikan country,
-    # service, stock dan price. Jika kosong/error, coba suggested_countries
-    # sebagai fallback sehingga menu negara + harga tetap dapat ditampilkan.
+    # SMSPool: /sms/all_stock is the source of truth because it returns
+    # country, service, pool, stock and price.  Try the resolved numeric
+    # service ID first, then the service name, and finally fetch the full
+    # stock list and filter it locally.  This avoids falling back to the
+    # suggested-country endpoint, which does NOT contain a real stock count.
     found = find_smspool_service(service)
-    lookup_service = (
-        found.get("id")
-        if found and found.get("id") is not None
-        else service
-    )
+    candidates = []
+    if found:
+        service_id = found.get("id")
+        if service_id is not None:
+            candidates.append(str(service_id))
+        resolved_name = found.get("name")
+        if resolved_name:
+            candidates.append(str(resolved_name))
+    candidates.append(str(service))
 
-    data = get_smspool_prices(service=lookup_service)
-    items = _flatten_smspool_prices(data, service)
+    seen_candidates = set()
+    for lookup_service in candidates:
+        lookup_service = lookup_service.strip()
+        if not lookup_service or lookup_service.lower() in seen_candidates:
+            continue
+        seen_candidates.add(lookup_service.lower())
+        data = get_smspool_prices(service=lookup_service)
+        items = _flatten_smspool_prices(data, service)
+        if items:
+            names = _smspool_country_name_map()
+            for item in items:
+                item["name"] = names.get(str(item["country"]), item["name"])
+            return items
 
-    if not items:
-        try:
-            suggested = get_smspool_suggested_countries(lookup_service)
-            items = _flatten_smspool_suggested_countries(suggested)
-        except Exception as error:
-            logger.warning(
-                "SMSPool suggested countries fallback failed: %s", error
-            )
+    # Last resort: request the complete stock table and filter by the
+    # resolved service ID/name.  This is still REAL stock data.
+    data = get_smspool_prices()
+    rows = data if isinstance(data, list) else []
+    if rows:
+        target_ids = set()
+        target_names = {str(service).strip().lower()}
+        if found:
+            if found.get("id") is not None:
+                target_ids.add(str(found.get("id")))
+            if found.get("name"):
+                target_names.add(str(found.get("name")).strip().lower())
 
-    names = _smspool_country_name_map()
-    for item in items:
-        item["name"] = names.get(
-            str(item["country"]),
-            item["name"]
-        )
+        filtered = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("service") or row.get("service_id") or row.get("ID")
+            sname = row.get("service_name") or row.get("name") or row.get("service")
+            if (sid is not None and str(sid) in target_ids) or (
+                sname is not None and str(sname).strip().lower() in target_names
+            ):
+                filtered.append(row)
 
-    return items
+        items = _flatten_smspool_prices(filtered, service)
+        if items:
+            names = _smspool_country_name_map()
+            for item in items:
+                item["name"] = names.get(str(item["country"]), item["name"])
+            return items
+
+    # Never invent a stock value.  If SMSPool does not return stock,
+    # show no countries instead of displaying every country as stock 1.
+    logger.warning("SMSPool returned no real stock for service=%s", service)
+    return []
 
 
 async def show_service_country_page(
