@@ -7,6 +7,7 @@ import json
 import logging
 import requests
 import time
+import re
 
 from config import RUMAHOTP_API_KEY, KURS_DOLAR
 
@@ -22,18 +23,42 @@ def _headers():
 
 
 def _get(path, params=None):
+    """GET RumahOTP with a small 429 retry; never turn an API error into cached empty stock."""
     if not RUMAHOTP_API_KEY:
         return {"success": False, "error": {"message": "RUMAHOTP_API_KEY belum diatur."}}
-    try:
-        r = requests.get(f"{BASE_URL}{path}", headers=_headers(), params=params or {}, timeout=TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, dict):
-            return {"success": False, "error": {"message": "Response RumahOTP tidak valid."}}
-        return data
-    except Exception as exc:
-        logger.warning("[RUMAHOTP] request %s failed: %s", path, exc)
-        return {"success": False, "error": {"message": str(exc)}}
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                f"{BASE_URL}{path}",
+                headers=_headers(),
+                params=params or {},
+                timeout=TIMEOUT,
+            )
+
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    delay = max(1.0, min(float(retry_after), 5.0))
+                except (TypeError, ValueError):
+                    delay = 2.0
+                time.sleep(delay)
+                continue
+
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, dict):
+                return {"success": False, "error": {"message": "Response RumahOTP tidak valid."}}
+            return data
+
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.8)
+
+    logger.warning("[RUMAHOTP] request %s failed: %s", path, last_error)
+    return {"success": False, "error": {"message": str(last_error or "Request gagal.")}}
 
 
 def check_api():
@@ -63,20 +88,53 @@ def get_services():
     cached = _cached("services")
     if cached is not None:
         return cached
+
     data = _get("/v2/services")
-    value = data.get("data") if data.get("success") and isinstance(data.get("data"), list) else []
+    if not data.get("success"):
+        logger.warning("[RUMAHOTP] services unavailable: %s", data.get("error"))
+        return []
+
+    value = data.get("data")
+    if not isinstance(value, list):
+        logger.warning("[RUMAHOTP] services returned unexpected data.")
+        return []
+
     return _put_cache("services", value)
 
 
+def _norm(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
 def find_service(service):
-    target = str(service or "").strip().lower().replace("_", " ")
-    aliases = {"google": {"google", "gmail", "youtube", "google gmail youtube"}, "whatsapp": {"whatsapp", "wa"}, "telegram": {"telegram", "tg"}, "facebook": {"facebook", "fb"}, "instagram": {"instagram", "ig"}, "tiktok": {"tiktok", "tt"}, "shopee": {"shopee"}}
+    target_raw = str(service or "").strip()
+    target = _norm(target_raw)
+
+    aliases = {
+        "google": {"google", "gmail", "youtube", "google gmail youtube"},
+        "whatsapp": {"whatsapp", "wa"},
+        "telegram": {"telegram", "tg"},
+        "facebook": {"facebook", "fb"},
+        "instagram": {"instagram", "ig"},
+        "tiktok": {"tiktok", "tt"},
+        "shopee": {"shopee"},
+    }
     wanted = aliases.get(target, {target})
+
     for item in get_services():
         code = str(item.get("service_code") or item.get("id") or "").strip()
         name = str(item.get("service_name") or item.get("name") or "").strip()
-        if name.lower() in wanted or code.lower() in wanted or target == name.lower():
+        code_norm = _norm(code)
+        name_norm = _norm(name)
+
+        if (
+            code == target_raw
+            or code_norm == target
+            or name_norm in wanted
+            or target in wanted
+            or target == name_norm
+        ):
             return {"id": code, "name": name, **item}
+
     return None
 
 
@@ -85,8 +143,26 @@ def get_countries(service_id):
     cached = _cached(key)
     if cached is not None:
         return cached
+
     data = _get("/v2/countries", {"service_id": service_id})
-    value = data.get("data") if data.get("success") and isinstance(data.get("data"), list) else []
+    if not data.get("success"):
+        logger.warning(
+            "[RUMAHOTP] countries unavailable for service=%s: %s",
+            service_id,
+            data.get("error"),
+        )
+        return []
+
+    value = data.get("data")
+    if not isinstance(value, list):
+        logger.warning(
+            "[RUMAHOTP] countries returned unexpected data for service=%s",
+            service_id,
+        )
+        return []
+
+    # Only successful API responses are cached. A temporary 429/error must
+    # never become a fake "stock kosong" result for the next 30 seconds.
     return _put_cache(key, value)
 
 
@@ -109,11 +185,13 @@ def _country_quotes(country_item, service_name, service_id=None):
     country_name=str(country_item.get("name") or country_item.get("iso_code") or "")
     number_id=country_item.get("number_id")
     for row in country_item.get("pricelist") or []:
-        if not isinstance(row, dict): continue
-        provider_id=row.get("provider_id")
-        price=float(row.get("price") or 0)
-        stock=int(float(row.get("stock") or 0))
-        if provider_id is None or price <= 0 or stock <= 0: continue
+        if not isinstance(row, dict):
+            continue
+        provider_id = row.get("provider_id")
+        price = float(row.get("price") or row.get("rate") or 0)
+        stock = int(float(row.get("stock") or 0))
+        if provider_id is None or price <= 0 or stock <= 0:
+            continue
         quotes.append({
             "provider":"rumahotp", "country":str(number_id or country_name), "country_name":country_name,
             "service":str(service_id or service_name),
@@ -125,12 +203,25 @@ def _country_quotes(country_item, service_name, service_id=None):
 
 
 def get_all_quotes(service):
-    found=find_service(service)
-    if not found: return []
-    sid=found.get("id")
-    result=[]
-    for country in get_countries(sid):
-        result.extend(_country_quotes(country, found.get("name") or service, sid))
+    """Return every live country/provider quote for a RumahOTP service."""
+    found = find_service(service)
+    if not found:
+        logger.warning("[RUMAHOTP] service not found: %s", service)
+        return []
+
+    sid = found.get("id")
+    result = []
+    countries = get_countries(sid)
+
+    for country in countries:
+        result.extend(
+            _country_quotes(
+                country,
+                found.get("name") or service,
+                sid,
+            )
+        )
+
     return result
 
 
@@ -144,9 +235,11 @@ def get_operator_quotes(country, service):
     out=[]
     for row in item.get("pricelist") or []:
         if not isinstance(row,dict): continue
-        provider_id=row.get("provider_id")
-        price=float(row.get("price") or 0); stock=int(float(row.get("stock") or 0))
-        if provider_id is None or price<=0 or stock<=0: continue
+        provider_id = row.get("provider_id")
+        price = float(row.get("price") or row.get("rate") or 0)
+        stock = int(float(row.get("stock") or 0))
+        if provider_id is None or price <= 0 or stock <= 0:
+            continue
         cache_key = f"operators:{str(item.get('name')).lower()}:{provider_id}"
         operators = _cached(cache_key)
         if operators is None:

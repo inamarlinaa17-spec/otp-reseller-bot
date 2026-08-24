@@ -156,8 +156,8 @@ SERVICES_PER_PAGE = 16
 # =========================================================
 
 OTP_SERVERS = {
-    "5sim": "⚡ Server 1",
-    "rumahotp": "⚡ Server 2",
+    "5sim": "⚡ Server 1 — JOS🔥",
+    "rumahotp": "⚡ Server 2 — ELIT HIGH STOCK",
 }
 
 
@@ -1197,10 +1197,10 @@ async def show_server_page(
     await query.edit_message_text(
         "🌟 <b>PILIH SERVER OTP</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚡ <b>SERVER 1 — HIGH STOCK</b>\n"
+        "⚡ <b>SERVER 1 — JOS🔥</b>\n"
         "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
-        "⚡ <b>SERVER 2 — RUMAHOTP</b>\n"
-        "Stok dan harga diambil langsung dari RumahOTP.\n\n"
+        "⚡ <b>SERVER 2 — ELIT HIGH STOCK</b>\n"
+        "Server ELIT dengan beragam stok layanan dan negara.\n\n"
         "Silakan pilih server melalui tombol di bawah ini:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1249,11 +1249,10 @@ def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
 
 def get_service_catalog(server):
     """Katalog layanan dari provider Server 1 (5SIM) atau Server 2 (RumahOTP)."""
-    catalog = list(OTP_SERVICES)
-    seen = {code.lower() for code, _ in catalog}
-
-
     if server == "5sim":
+        catalog = list(OTP_SERVICES)
+        seen = {code.lower() for code, _ in catalog}
+
         data = get_all_products()
         if isinstance(data, dict):
             for product, info in data.items():
@@ -1268,18 +1267,46 @@ def get_service_catalog(server):
                     catalog.append((code, code.replace("_", " ").title()))
                     seen.add(code.lower())
 
-    elif server == "rumahotp":
+        return catalog
+
+    if server == "rumahotp":
+        # Server 2 must follow the live RumahOTP catalog. The old static
+        # OTP_SERVICES list caused services to be missing/duplicated and could
+        # send users into a service code that did not match RumahOTP.
+        catalog = []
+        seen = set()
+
         for item in get_rumahotp_services() or []:
             if not isinstance(item, dict):
                 continue
-            code = str(item.get("service_code") or item.get("id") or "").strip()
-            label = str(item.get("service_name") or item.get("name") or code).strip()
-            if code and code.lower() not in seen:
+
+            code = str(
+                item.get("service_code")
+                or item.get("id")
+                or ""
+            ).strip()
+            label = str(
+                item.get("service_name")
+                or item.get("name")
+                or code
+            ).strip()
+
+            if not code:
+                continue
+
+            key = code.lower()
+            if key not in seen:
                 catalog.append((code, label))
-                seen.add(code.lower())
+                seen.add(key)
 
+        # If the live catalog is temporarily unavailable, keep the bot
+        # navigable; the country page will still re-check the live API.
+        if not catalog:
+            return list(OTP_SERVICES)
 
-    return catalog
+        return catalog
+
+    return list(OTP_SERVICES)
 
 
 async def show_service_page(
