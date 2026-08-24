@@ -646,6 +646,41 @@ def _all_quotes(service):
     return results
 
 
+def get_provider_quotes(server, country, service):
+    """Return live quotes from exactly one provider for one country/service.
+
+    This is intentionally separate from the Multi Server aggregator so each
+    Server 1/2/3 screen uses only its own provider data.
+    """
+    server = str(server or "").strip().lower()
+    if server == "rumahotp":
+        try:
+            # Operator-aware quotes carry the exact provider/operator pool
+            # needed by the RumahOTP order endpoint.
+            quotes = get_rumahotp_operator_quotes(country, service)
+            if quotes:
+                return sorted(quotes, key=lambda q: (_num(q.get("cost_usd")), -_int(q.get("stock"))))
+        except Exception:
+            logger.exception("[PROVIDER] RumahOTP operator quotes failed")
+        quotes = get_rumahotp_all_quotes(service)
+    elif server == "smspool":
+        quotes = _smspool_all_quotes(service)
+    elif server == "5sim":
+        quotes = _5sim_all_quotes(service)
+    else:
+        return []
+
+    matches = [
+        q for q in (quotes or [])
+        if _same_country(q.get("country_name") or q.get("country"), country)
+        or str(q.get("country")) == str(country)
+    ]
+    return sorted(
+        matches,
+        key=lambda q: (_num(q.get("cost_usd")), -_int(q.get("stock")), _norm(q.get("operator"))),
+    )
+
+
 def get_aggregated_quotes(country, service, operator=None):
     """Return live provider quotes for one country, optionally for an operator."""
     matches = [q for q in _all_quotes(service) if _same_country(q.get("country_name"), country)]

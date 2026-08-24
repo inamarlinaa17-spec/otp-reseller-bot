@@ -162,7 +162,10 @@ def get_all_countries():
             timeout=20
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if isinstance(result, dict) and isinstance(result.get("data"), (list, dict)):
+            return result.get("data")
+        return result
     except Exception as error:
         print(f"[SMSPOOL] country list error: {error}")
         return []
@@ -181,7 +184,10 @@ def get_services():
             timeout=20
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if isinstance(result, dict) and isinstance(result.get("data"), (list, dict)):
+            return result.get("data")
+        return result
     except Exception as error:
         print(f"[SMSPOOL] service list error: {error}")
         return []
@@ -237,6 +243,13 @@ def get_prices(
             f"{result.get('type') or result.get('message') or result}"
         )
         return []
+
+    # Some SMSPool responses wrap the rows in {success: 1, data: [...]}.
+    # Normalize that wrapper here so every caller sees the actual stock rows.
+    if isinstance(result, dict):
+        payload = result.get("data")
+        if isinstance(payload, (list, dict)):
+            return payload
 
     return result
 

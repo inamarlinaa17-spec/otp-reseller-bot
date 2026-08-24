@@ -9,6 +9,7 @@ import hmac
 import asyncio
 import pytz
 import random
+import time
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 
@@ -85,6 +86,7 @@ from provider import (
 from aggregator import (
     get_aggregated_countries,
     get_aggregated_quotes,
+    get_provider_quotes,
     get_aggregator_service_catalog,
     _operator_label,
     _is_displayable_operator,
@@ -94,6 +96,8 @@ from aggregator import (
 from rumahotp import (
     check_api as check_rumahotp_api,
     get_balance as get_rumahotp_balance,
+    get_services as get_rumahotp_services,
+    get_all_quotes as get_rumahotp_all_quotes,
     buy_number as buy_rumahotp_number,
     get_sms as get_rumahotp_sms,
     cancel_number as cancel_rumahotp_number,
@@ -165,6 +169,8 @@ snap = midtransclient.Snap(
 COUNTRIES_PER_PAGE = 12
 PRODUCTS_PER_PAGE = 12
 SERVICES_PER_PAGE = 16
+_SERVICE_CATALOG_CACHE_TTL = 60.0
+_service_catalog_cache = {}
 
 
 # =========================================================
@@ -1295,44 +1301,81 @@ def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
 
 
 def get_service_catalog(server):
-    """Katalog layanan untuk provider dan Multi Server."""
-    catalog = list(OTP_SERVICES)
-    seen = {code.lower() for code, _ in catalog}
+    """Return the complete live service catalog for the selected server."""
+    now = time.monotonic()
+    cached = _service_catalog_cache.get(server)
+    if cached and now - cached[0] < _SERVICE_CATALOG_CACHE_TTL:
+        return list(cached[1])
 
     if server == "aggregator":
-        # Aggregator memakai satu canonical key per layanan. Saat order,
-        # aggregator.py menerjemahkan key tersebut ke ID layanan masing-masing provider.
         try:
-            return get_aggregator_service_catalog()
+            result = get_aggregator_service_catalog()
         except Exception:
             logger.exception("Aggregator: gagal mengambil katalog gabungan")
-            return catalog
+            result = list(OTP_SERVICES)
+        _service_catalog_cache[server] = (time.monotonic(), list(result))
+        return result
 
-    if server == "5sim":
-        data = get_all_products()
-        if isinstance(data, dict):
-            for product, info in data.items():
-                if isinstance(info, dict):
-                    category = str(
-                        info.get("Category", "")
-                    ).lower()
-                    if category and category != "activation":
-                        continue
-                code = str(product).strip()
-                if code and code.lower() not in seen:
-                    catalog.append((code, code.replace("_", " ").title()))
-                    seen.add(code.lower())
+    catalog = []
+    seen = set()
 
-    elif server == "smspool":
-        _merge_service_catalog(
-            catalog, seen, get_smspool_services(),
-            ("ID", "id", "service_id", "name", "service"),
-            ("name", "service", "title")
-        )
+    def add(code, label=None):
+        code = str(code or "").strip()
+        if not code:
+            return
+        key = code.lower()
+        if key in seen:
+            return
+        label = str(label or code).strip()
+        # Reuse the friendly labels where the provider exposes the same
+        # canonical service name/code. Unknown provider services keep their
+        # real provider name so the catalog is genuinely complete.
+        canonical = _canonical_service_key(code)
+        friendly = dict(OTP_SERVICES).get(canonical)
+        catalog.append((code, friendly or label))
+        seen.add(key)
 
+    try:
+        if server == "rumahotp":
+            for item in get_rumahotp_services() or []:
+                if isinstance(item, dict):
+                    add(item.get("service_code") or item.get("id") or item.get("code"),
+                        item.get("service_name") or item.get("name") or item.get("title"))
+        elif server == "smspool":
+            data = get_smspool_services() or []
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if isinstance(value, dict):
+                        add(value.get("ID") or value.get("id") or value.get("service_id") or key,
+                            value.get("name") or value.get("service") or value.get("title"))
+                    else:
+                        add(key, value)
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        add(item.get("ID") or item.get("id") or item.get("service_id") or item.get("code"),
+                            item.get("name") or item.get("service") or item.get("title"))
+        elif server == "5sim":
+            data = get_all_products() or {}
+            if isinstance(data, dict):
+                for code, info in data.items():
+                    if isinstance(info, dict):
+                        category = str(info.get("Category") or info.get("category") or "activation").lower()
+                        if category and category not in {"activation", ""}:
+                            continue
+                        label = info.get("name") or info.get("title") or info.get("service") or code
+                    else:
+                        label = code
+                    add(code, label)
+    except Exception:
+        logger.exception("Service catalog provider error: %s", server)
 
-
-    return catalog
+    # Only use the old hard-coded list when a provider catalog is genuinely
+    # unavailable. This prevents Server 1/2/3 from silently showing a fake
+    # 15-item catalog from another provider.
+    result = catalog or list(OTP_SERVICES)
+    _service_catalog_cache[server] = (time.monotonic(), list(result))
+    return result
 
 
 async def show_service_page(
@@ -1476,6 +1519,9 @@ def _country_items_5sim(service):
 def _flatten_smspool_prices(data, fallback_service):
     """Normalisasi beberapa bentuk response SMSPool price endpoint."""
     result = []
+
+    if isinstance(data, dict) and isinstance(data.get("data"), (list, dict)):
+        data = data.get("data")
 
     if isinstance(data, list):
         for item in data:
@@ -1655,9 +1701,51 @@ def _smspool_country_name_map():
     return mapping
 
 
+def _country_items_rumahotp(service):
+    """Collapse RumahOTP live quotes into one cheapest row per country."""
+    try:
+        quotes = get_rumahotp_all_quotes(service) or []
+    except Exception:
+        logger.exception("RumahOTP country list failed for service=%s", service)
+        return []
+
+    grouped = {}
+    for q in quotes:
+        name = str(q.get("country_name") or q.get("country") or "").strip()
+        # Use the human country name in the callback so RumahOTP's operator
+        # endpoint can resolve it reliably; the actual number_id stays inside
+        # the saved quote metadata used during purchase.
+        country_id = name
+        try:
+            cost = float(q.get("cost_usd") or 0)
+            stock = int(float(q.get("stock") or 0))
+        except Exception:
+            continue
+        if not name or not country_id or cost <= 0 or stock <= 0:
+            continue
+        key = _norm(name)
+        item = grouped.get(key)
+        if item is None:
+            grouped[key] = {
+                "country": country_id,
+                "name": name,
+                "cost": cost,
+                "stock": stock,
+            }
+        else:
+            item["stock"] += stock
+            if cost < item["cost"]:
+                item["cost"] = cost
+                item["country"] = country_id
+    return list(grouped.values())
+
+
 def get_service_countries(server, service):
     if server == "aggregator":
         return get_aggregated_countries(service)
+
+    if server == "rumahotp":
+        return _country_items_rumahotp(service)
 
     if server == "5sim":
         return _country_items_5sim(service)
@@ -1693,6 +1781,13 @@ def get_service_countries(server, service):
         )
 
     return items
+
+
+def _short_button_name(value, limit=22):
+    text = " ".join(str(value or "").replace("_", " ").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
 
 
 async def show_service_country_page(
@@ -1843,7 +1938,7 @@ async def show_service_country_page(
             if cost > 0 and stock > 0:
                 price = hitung_harga_jual(cost)
                 label = (
-                    f"🌍 {item['name']}\n"
+                    f"🌍 {_short_button_name(item['name'])}\n"
                     f"💰 {format_rupiah(price)} | 📦 {stock}"
                 )
             else:
@@ -1858,21 +1953,23 @@ async def show_service_country_page(
         for i in range(0, len(country_buttons), 2):
             keyboard.append(country_buttons[i:i + 2])
     else:
+        country_buttons = []
         for item in page_items:
             price = hitung_harga_jual(item["cost"])
-            keyboard.append([
+            country_buttons.append(
                 InlineKeyboardButton(
                     (
-                        f"🌍 {item['name']}\n"
-                        f"💰 {format_rupiah(price)}"
-                        f"  |  📦 {item['stock']}"
+                        f"🌍 {_short_button_name(item['name'])}\n"
+                        f"💰 {format_rupiah(price)} | 📦 {item['stock']}"
                     ),
                     callback_data=(
-                        f"otp_buy:{server}:{service}:"
+                        f"otp_provider_quotes:{server}:{service}:"
                         f"{item['country']}"
                     )
                 )
-            ])
+            )
+        for i in range(0, len(country_buttons), 2):
+            keyboard.append(country_buttons[i:i + 2])
 
     # Navigasi negara + tombol kembali ke layanan.
     nav = []
@@ -2580,6 +2677,81 @@ async def post_init(application):
 # =========================================================
 
 
+async def show_provider_quotes_page(query, user_id, server, service, country):
+    """Show the available prices/operators for one provider before purchase."""
+    service_label = dict(OTP_SERVICES).get(service, service)
+    try:
+        quotes = await asyncio.wait_for(
+            asyncio.to_thread(get_provider_quotes, server, country, service),
+            timeout=25
+        )
+    except asyncio.TimeoutError:
+        await query.edit_message_text(
+            "⚠️ <b>Provider terlalu lama merespons.</b>\n\nSilakan refresh dan coba lagi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_provider_quotes:{server}:{service}:{country}")
+            ], [
+                InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:{server}:{service}:0")
+            ]])
+        )
+        return
+    except Exception:
+        logger.exception("Provider quote page failed: %s/%s/%s", server, service, country)
+        quotes = []
+
+    if not quotes:
+        await query.edit_message_text(
+            "❌ <b>Harga/stok tidak tersedia.</b>\n\n"
+            f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
+            f"🌍 Negara: <b>{country}</b>\n"
+            f"📱 Layanan: <b>{service_label}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_provider_quotes:{server}:{service}:{country}")
+            ], [
+                InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:{server}:{service}:0")
+            ]])
+        )
+        return
+
+    keyboard = []
+    buttons = []
+    for q in quotes:
+        quote_id = uuid.uuid4().hex[:10].upper()
+        save_otp_quote(
+            quote_id=quote_id, telegram_id=user_id, provider=q["provider"],
+            country=q["country"], service=q["service"],
+            operator=q.get("provider_operator") or q.get("operator"),
+            pool=q.get("pool"), cost_usd=q["cost_usd"], stock=q["stock"],
+            country_name=q.get("country_name") or country
+        )
+        sell = hitung_harga_jual(q["cost_usd"])
+        operator = _operator_label(q.get("operator") or q.get("provider_operator") or "AUTO")
+        buttons.append(InlineKeyboardButton(
+            f"📡 {_short_button_name(operator, 18)}\n💰 {format_rupiah(sell)} | 📦 {int(q.get('stock') or 0)}",
+            callback_data=f"otp_quote:{quote_id}"
+        ))
+
+    for i in range(0, len(buttons), 2):
+        keyboard.append(buttons[i:i + 2])
+
+    keyboard.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_provider_quotes:{server}:{service}:{country}"),
+        InlineKeyboardButton("⬅️ Negara", callback_data=f"otp_service_countries:{server}:{service}:0")
+    ])
+
+    await query.edit_message_text(
+        "✨ <b>PILIH HARGA / OPERATOR</b>\n\n"
+        f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
+        f"🌍 Negara: <b>{country}</b>\n"
+        f"📱 Layanan: <b>{service_label}</b>\n\n"
+        "Pilih kotak harga yang tersedia:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def show_aggregated_operator_page(query, service, country):
     """MOCHI-style aggregator step: country -> carrier -> price/stock.
 
@@ -2667,14 +2839,17 @@ async def show_aggregated_operator_page(query, service, country):
     )
 
     keyboard = []
+    operator_buttons = []
     for item in operators:
         price = hitung_harga_jual(item["cost"]) if item["cost"] else 0
-        keyboard.append([
+        operator_buttons.append(
             InlineKeyboardButton(
-                f"📡 {item['operator']} | 💰 mulai {format_rupiah(price)} | 📦 {item['stock']}",
+                f"📡 {_short_button_name(item['operator'], 18)}\n💰 {format_rupiah(price)} | 📦 {item['stock']}",
                 callback_data=f"otp_operator:{service}:{country}:{item['operator']}"
             )
-        ])
+        )
+    for i in range(0, len(operator_buttons), 2):
+        keyboard.append(operator_buttons[i:i + 2])
 
     # Match the requested MOCHI-style catch-all button.
     keyboard.append([
@@ -2751,6 +2926,7 @@ async def show_aggregated_quotes_page(query, user_id, service, country, operator
         return
 
     keyboard = []
+    quote_buttons = []
     for q in quotes:
         quote_id = uuid.uuid4().hex[:10].upper()
         save_otp_quote(
@@ -2763,16 +2939,19 @@ async def show_aggregated_quotes_page(query, user_id, service, country, operator
         sell = hitung_harga_jual(q["cost_usd"])
         # Keep provider identities private. Users only see the internal server number.
         server_label = {
-            "rumahotp": "⚡ Server 1",
-            "smspool": "⚡ Server 2",
-            "5sim": "⚡ Server 3",
-        }.get(q.get("provider"), "⚡ Server")
-        keyboard.append([
+            "rumahotp": "⚡ S1",
+            "smspool": "⚡ S2",
+            "5sim": "⚡ S3",
+        }.get(q.get("provider"), "⚡ S")
+        quote_buttons.append(
             InlineKeyboardButton(
-                f"{server_label} | 💰 {format_rupiah(sell)} | 📦 {q['stock']}",
+                f"{server_label}\n💰 {format_rupiah(sell)} | 📦 {q['stock']}",
                 callback_data=f"otp_quote:{quote_id}"
             )
-        ])
+        )
+
+    for i in range(0, len(quote_buttons), 2):
+        keyboard.append(quote_buttons[i:i + 2])
 
     keyboard.append([
         InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_quotes:{service}:{country}"),
@@ -3464,7 +3643,23 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         return
 
     # =====================================================
-    # PILIH NEGARA -> ORDER LANGSUNG
+    # PILIH NEGARA -> PILIH HARGA / OPERATOR
+    # =====================================================
+
+    if data.startswith("otp_provider_quotes:"):
+        parts = data.split(":", 3)
+        if len(parts) != 4:
+            await query.answer("Data quote tidak valid.", show_alert=True)
+            return
+        server, service, country = parts[1], parts[2], parts[3]
+        if server not in {"rumahotp", "smspool", "5sim"}:
+            await query.answer("Server tidak valid.", show_alert=True)
+            return
+        await show_provider_quotes_page(query, user_id, server, service, country)
+        return
+
+    # =====================================================
+    # KOMPATIBILITAS CALLBACK LAMA -> JANGAN AUTO-BUY
     # =====================================================
 
     if data.startswith("otp_buy:"):
@@ -3486,13 +3681,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
-        await process_otp_order(
+        await show_provider_quotes_page(
             query,
             user_id,
-            context,
             server,
-            country,
-            service
+            service,
+            country
         )
         return
 
