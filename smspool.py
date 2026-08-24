@@ -280,6 +280,30 @@ def normalize_service_name(
     ).strip()
 
 
+# The bot keeps short internal service codes for its common menu.
+# SMSPool, however, expects its own numeric service ID or provider
+# service name.  Resolve these aliases before asking for stock/order.
+# This is only used by Server 2 (SMSPool).
+SERVICE_ALIASES = {
+    "whatsapp": ["WhatsApp"],
+    "telegram": ["Telegram"],
+    "shopee": ["Shopee"],
+    "tiktok": ["TikTok"],
+    "facebook": ["Facebook"],
+    "instagram": ["Instagram"],
+    "google": ["Google", "Gmail", "YouTube"],
+    "vercel": ["Vercel"],
+    "uangme": ["UangMe"],
+    "grab": ["Grab"],
+    "dana": ["DANA"],
+    "gojek": ["Gojek"],
+    "ovo": ["OVO"],
+    "kopikenangan": ["Kopi Kenangan", "KopiKenangan"],
+    "tokopedia": ["Tokopedia"],
+    "any": ["Not Listed", "Any Other"],
+}
+
+
 # =========================================================
 # FIND SERVICE
 # =========================================================
@@ -287,18 +311,73 @@ def normalize_service_name(
 def find_service(
     service_name
 ):
-    """Find an SMSPool service by exact/partial name or ID.
+    """Find the real SMSPool service ID/name for a bot service code.
 
-    SMSPool's current service-list response uses uppercase ``ID``.
-    The old code only checked lowercase ``id``, so it could fail to
-    resolve a service ID and then query stock with the wrong value.
+    The bot's menu uses short codes such as ``google`` and ``whatsapp``.
+    Those are not SMSPool service IDs.  SMSPool accepts either its numeric
+    service ID or its service name, so try the exact value first and then
+    the known Server-2 aliases.
     """
     services = get_services()
 
     if not services:
         return None
 
-    target = normalize_service_name(service_name).lower()
+    raw_target = normalize_service_name(service_name)
+    targets = [raw_target] if raw_target else []
+    targets.extend(SERVICE_ALIASES.get(raw_target.lower(), []))
+
+    # Preserve order while removing duplicates.
+    seen_targets = set()
+    targets = [
+        target for target in targets
+        if target and not (target.lower() in seen_targets or seen_targets.add(target.lower()))
+    ]
+
+    def match_entry(sid, name):
+        sid_text = str(sid or "").strip().lower()
+        name_text = str(name or "").strip().lower()
+        for target in targets:
+            target_text = target.lower().strip()
+            if sid_text == target_text or name_text == target_text:
+                return {"id": sid, "name": str(name)}
+        return None
+
+    # First pass: exact ID/name.  This prevents a broad alias such as
+    # "Google" from accidentally matching a different Google-related item.
+    if isinstance(services, dict):
+        iterable = services.items()
+        for service_id, value in iterable:
+            if isinstance(value, dict):
+                sid = value.get("ID", value.get("id", value.get("service_id", service_id)))
+                name = value.get("name", value.get("service", str(value)))
+            else:
+                sid = service_id
+                name = value
+            match = match_entry(sid, name)
+            if match:
+                return match
+
+    elif isinstance(services, list):
+        for item in services:
+            if not isinstance(item, dict):
+                continue
+            sid = item.get("ID", item.get("id", item.get("service_id")))
+            name = item.get("name", item.get("service", ""))
+            match = match_entry(sid, name)
+            if match:
+                return match
+
+    # Second pass: controlled partial matching for aliases.
+    # This helps when the provider names a service e.g. "Google Voice".
+    alias_targets = [t.lower().strip() for t in targets[1:]]
+
+    def partial_match(sid, name):
+        name_text = str(name or "").strip().lower()
+        for target in alias_targets:
+            if target and target in name_text:
+                return {"id": sid, "name": str(name)}
+        return None
 
     if isinstance(services, dict):
         iterable = services.items()
@@ -309,31 +388,19 @@ def find_service(
             else:
                 sid = service_id
                 name = value
-
-            if str(sid).lower() == target or str(name).lower() == target:
-                return {"id": sid, "name": str(name)}
-            if target and target in str(name).lower():
-                return {"id": sid, "name": str(name)}
+            match = partial_match(sid, name)
+            if match:
+                return match
 
     elif isinstance(services, list):
         for item in services:
             if not isinstance(item, dict):
                 continue
-
-            service_id = item.get(
-                "ID",
-                item.get("id", item.get("service_id"))
-            )
-            name = item.get(
-                "name",
-                item.get("service", "")
-            )
-
-            if str(service_id).lower() == target or str(name).lower() == target:
-                return {"id": service_id, "name": str(name)}
-
-            if target and target in str(name).lower():
-                return {"id": service_id, "name": str(name)}
+            sid = item.get("ID", item.get("id", item.get("service_id")))
+            name = item.get("name", item.get("service", ""))
+            match = partial_match(sid, name)
+            if match:
+                return match
 
     return None
 
