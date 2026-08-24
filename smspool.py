@@ -173,18 +173,27 @@ def get_all_countries():
 # =========================================================
 
 def get_services():
-    """Return the current SMSPool service list."""
-    try:
-        response = requests.get(
-            f"{BASE_URL}/service/retrieve_all",
-            headers=get_headers(),
-            timeout=20
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as error:
-        print(f"[SMSPOOL] service list error: {error}")
-        return []
+    """Return the SMSPool service list.
+
+    SMSPool documents this as GET /service/retrieve_all.  Some older
+    deployments/examples use POST, so use GET first and POST as a safe
+    compatibility fallback.
+    """
+    for method in ("get", "post"):
+        try:
+            request_fn = getattr(requests, method)
+            response = request_fn(
+                f"{BASE_URL}/service/retrieve_all",
+                headers=get_headers(),
+                timeout=20
+            )
+            response.raise_for_status()
+            result = response.json()
+            if isinstance(result, (list, dict)):
+                return result
+        except Exception as error:
+            print(f"[SMSPOOL] service list {method} error: {error}")
+    return []
 
 
 # =========================================================
@@ -203,11 +212,12 @@ def get_prices(
     country=None,
     service=None
 ):
-    """Return SMSPool one-time SMS stock records.
+    """Return REAL SMSPool one-time stock rows.
 
-    The current documented endpoint is /sms/all_stock.  It returns
-    records containing country, service, pool, stock and price.
-    Country and service are optional filters.
+    The documented endpoint is /sms/all_stock and its rows contain
+    country, service, pool, stock and price.  A small compatibility
+    fallback to /sms/stock is kept because SMSPool documentation has
+    historically referenced both paths.
     """
     data = {}
 
@@ -217,28 +227,37 @@ def get_prices(
     if service is not None and str(service).strip():
         data["service"] = str(service).strip()
 
-    result = post_request(
-        "/sms/all_stock",
-        data=data,
-        timeout=30
-    )
+    last_error = None
+    for endpoint in ("/sms/all_stock", "/sms/stock"):
+        result = post_request(endpoint, data=dict(data), timeout=30)
 
-    if not result:
-        print(
-            f"[SMSPOOL] all_stock empty: service={service!r} country={country!r}"
-        )
-        return []
+        if not result:
+            continue
 
-    # API errors are dicts with success=0; callers should treat them
-    # as an empty stock result rather than trying to parse them as rows.
-    if isinstance(result, dict) and str(result.get("success", "1")) == "0":
+        if isinstance(result, dict) and str(result.get("success", "1")) == "0":
+            last_error = result.get("type") or result.get("message") or str(result)
+            continue
+
+        # Normal successful response is a list.  Be tolerant of wrappers.
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            for key in ("data", "results", "stock", "items"):
+                value = result.get(key)
+                if isinstance(value, list):
+                    return value
+
+    if last_error:
         print(
             "[SMSPOOL] stock error: "
-            f"{result.get('type') or result.get('message') or result}"
+            f"service={service!r} country={country!r} error={last_error}"
         )
-        return []
-
-    return result
+    else:
+        print(
+            "[SMSPOOL] stock empty: "
+            f"service={service!r} country={country!r}"
+        )
+    return []
 
 
 # =========================================================
@@ -246,7 +265,7 @@ def get_prices(
 # =========================================================
 
 def get_suggested_countries(service):
-    """Return SMSPool suggested countries with price for a service."""
+    """Return SMSPool's suggested country candidates for a service."""
     result = post_request(
         "/request/suggested_countries",
         data={"service": service},
@@ -260,7 +279,14 @@ def get_suggested_countries(service):
         )
         return []
 
-    return result if isinstance(result, list) else []
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        for key in ("data", "results", "countries", "items"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return value
+    return []
 
 
 # =========================================================

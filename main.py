@@ -1554,28 +1554,35 @@ def get_service_countries(server, service):
     if server == "5sim":
         return _country_items_5sim(service)
 
-    # SMSPool: /sms/all_stock is the source of truth because it returns
-    # country, service, pool, stock and price.  Try the resolved numeric
-    # service ID first, then the service name, and finally fetch the full
-    # stock list and filter it locally.  This avoids falling back to the
-    # suggested-country endpoint, which does NOT contain a real stock count.
+    # =====================================================
+    # SMSPool — REAL STOCK FIRST
+    # =====================================================
+    # SMSPool's /sms/all_stock is the only source used for the stock
+    # number shown in the bot.  The suggested-country endpoint is used
+    # only as a candidate list when the filtered all_stock request does
+    # not return rows (for example when a provider-side filter behaves
+    # differently for a service alias).
     found = find_smspool_service(service)
-    candidates = []
-    if found:
-        service_id = found.get("id")
-        if service_id is not None:
-            candidates.append(str(service_id))
-        resolved_name = found.get("name")
-        if resolved_name:
-            candidates.append(str(resolved_name))
-    candidates.append(str(service))
 
-    seen_candidates = set()
-    for lookup_service in candidates:
-        lookup_service = lookup_service.strip()
-        if not lookup_service or lookup_service.lower() in seen_candidates:
-            continue
-        seen_candidates.add(lookup_service.lower())
+    service_candidates = []
+    if found:
+        if found.get("id") is not None:
+            service_candidates.append(str(found["id"]))
+        if found.get("name"):
+            service_candidates.append(str(found["name"]))
+    service_candidates.append(str(service))
+
+    seen_services = set()
+    service_candidates = [
+        value for value in service_candidates
+        if value and not (
+            value.strip().lower() in seen_services
+            or seen_services.add(value.strip().lower())
+        )
+    ]
+
+    # 1) Direct filtered stock requests.
+    for lookup_service in service_candidates:
         data = get_smspool_prices(service=lookup_service)
         items = _flatten_smspool_prices(data, service)
         if items:
@@ -1584,8 +1591,7 @@ def get_service_countries(server, service):
                 item["name"] = names.get(str(item["country"]), item["name"])
             return items
 
-    # Last resort: request the complete stock table and filter by the
-    # resolved service ID/name.  This is still REAL stock data.
+    # 2) Full stock table, then filter locally by service ID/name.
     data = get_smspool_prices()
     rows = data if isinstance(data, list) else []
     if rows:
@@ -1593,16 +1599,21 @@ def get_service_countries(server, service):
         target_names = {str(service).strip().lower()}
         if found:
             if found.get("id") is not None:
-                target_ids.add(str(found.get("id")))
+                target_ids.add(str(found["id"]))
             if found.get("name"):
-                target_names.add(str(found.get("name")).strip().lower())
+                target_names.add(str(found["name"]).strip().lower())
 
         filtered = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            sid = row.get("service") or row.get("service_id") or row.get("ID")
-            sname = row.get("service_name") or row.get("name") or row.get("service")
+            sid = row.get("service_id")
+            if sid is None:
+                sid = row.get("service")
+            sname = row.get("service_name")
+            if sname is None:
+                sname = row.get("name")
+
             if (sid is not None and str(sid) in target_ids) or (
                 sname is not None and str(sname).strip().lower() in target_names
             ):
@@ -1615,9 +1626,69 @@ def get_service_countries(server, service):
                 item["name"] = names.get(str(item["country"]), item["name"])
             return items
 
-    # Never invent a stock value.  If SMSPool does not return stock,
-    # show no countries instead of displaying every country as stock 1.
-    logger.warning("SMSPool returned no real stock for service=%s", service)
+    # 3) Candidate-country fallback.
+    # Suggested countries contain country_id/name/price/pool, but no
+    # reliable stock counter.  Therefore NEVER display a fake stock
+    # value.  Each candidate is verified against /sms/all_stock before
+    # being shown.
+    for lookup_service in service_candidates:
+        suggestions = get_smspool_suggested_countries(lookup_service)
+        if not suggestions:
+            continue
+
+        verified = {}
+        for candidate in suggestions:
+            if not isinstance(candidate, dict):
+                continue
+
+            country_id = (
+                candidate.get("country_id")
+                or candidate.get("country")
+                or candidate.get("ID")
+                or candidate.get("id")
+            )
+            if country_id is None:
+                continue
+
+            # Verify actual stock for this country/service.  Try the
+            # provider service ID/name first, then the candidate's pool
+            # as a last compatibility option.
+            country_rows = []
+            for service_value in service_candidates:
+                country_rows = get_smspool_prices(
+                    country=country_id,
+                    service=service_value
+                )
+                if country_rows:
+                    break
+
+            if not country_rows:
+                continue
+
+            items = _flatten_smspool_prices(country_rows, service)
+            for item in items:
+                if str(item["country"]) != str(country_id):
+                    continue
+                name = (
+                    candidate.get("name")
+                    or candidate.get("country_name")
+                    or candidate.get("short_name")
+                    or item.get("name")
+                )
+                item["name"] = str(name)
+                key = str(item["country"])
+                old = verified.get(key)
+                if old is None or item["cost"] < old["cost"]:
+                    verified[key] = item
+
+        if verified:
+            return list(verified.values())
+
+    logger.warning(
+        "SMSPool returned no real stock for service=%s (resolved=%s)",
+        service,
+        found
+    )
     return []
 
 
