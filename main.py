@@ -2593,8 +2593,11 @@ async def show_aggregated_operator_page(query, service, country):
     """
     service_label = dict(OTP_SERVICES).get(service, service)
     try:
+        # Operator list must load the full set of quotes for the selected
+        # country/service first.  `operator` is not defined at this stage;
+        # it is supplied only after the user taps a carrier button.
         quotes = await asyncio.wait_for(
-            asyncio.to_thread(get_aggregated_quotes, country, service, operator),
+            asyncio.to_thread(get_aggregated_quotes, country, service, None),
             timeout=25
         )
     except asyncio.TimeoutError:
