@@ -9,6 +9,11 @@ import hmac
 import asyncio
 import pytz
 import random
+
+try:
+    import pycountry
+except Exception:
+    pycountry = None
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 
@@ -90,6 +95,7 @@ from rumahotp import (
     get_services as get_rumahotp_services,
     find_service as find_rumahotp_service,
     get_all_quotes as get_rumahotp_all_quotes,
+    get_quotes_for_country as get_rumahotp_quotes_for_country,
     get_cheapest_quote as get_rumahotp_cheapest_quote,
     buy_number as buy_rumahotp_number,
     get_sms as get_rumahotp_sms,
@@ -149,6 +155,7 @@ snap = midtransclient.Snap(
 COUNTRIES_PER_PAGE = 12
 PRODUCTS_PER_PAGE = 12
 SERVICES_PER_PAGE = 16
+COUNTRY_QUOTES_PER_PAGE = 8
 
 
 # =========================================================
@@ -280,6 +287,43 @@ def get_wib_time():
     ).strftime(
         "%d %B %Y pukul %H:%M:%S WIB"
     )
+
+
+# =========================================================
+# COUNTRY / SERVICE DISPLAY HELPERS
+# =========================================================
+
+_COUNTRY_ALIASES = {
+    "uk": "GB", "united kingdom": "GB", "usa": "US",
+    "united states": "US", "united states of america": "US",
+    "uae": "AE", "united arab emirates": "AE",
+    "south korea": "KR", "korea": "KR", "russia": "RU",
+    "vietnam": "VN", "viet nam": "VN", "laos": "LA",
+    "czech republic": "CZ", "ivory coast": "CI",
+    "bolivia": "BO", "venezuela": "VE", "tanzania": "TZ",
+}
+
+def country_flag(name_or_code):
+    value = str(name_or_code or "").strip().replace("_", " ")
+    if len(value) == 2 and value.isalpha():
+        code = value.upper()
+    else:
+        code = _COUNTRY_ALIASES.get(value.lower())
+        if not code and pycountry is not None:
+            try:
+                code = pycountry.countries.lookup(value).alpha_2
+            except Exception:
+                code = None
+    if not code or len(code) != 2:
+        return "🏳️"
+    return "".join(chr(127397 + ord(ch)) for ch in code.upper())
+
+
+def rumah_service_label(service):
+    found = find_rumahotp_service(service)
+    if found:
+        return str(found.get("name") or service).strip()
+    return str(service).strip()
 
 
 # =========================================================
@@ -1396,7 +1440,7 @@ async def show_service_page(
     await query.edit_message_text(
         "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
         f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"
-        "Pilih layanan OTP:",
+        "Pilih layanan OTP dari katalog provider.\n\nGoogle / Gmail / YouTube akan tampil sebagai satu layanan sesuai katalog RumahOTP.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1448,21 +1492,22 @@ def _country_items_5sim(service):
 
 
 def _country_items_rumahotp(service):
-    """Collapse live RumahOTP quotes into one cheapest row per country."""
+    """One country row per country, using the cheapest listed price even when stock is zero."""
     quotes = get_rumahotp_all_quotes(service) or []
     grouped = {}
     for q in quotes:
         if not isinstance(q, dict):
             continue
         try:
-            cost = float(q.get("cost_usd") or 0)
+            cost = float(q.get("cost_idr") or q.get("price_idr") or 0)
             stock = int(float(q.get("stock") or 0))
         except Exception:
             continue
-        if cost <= 0 or stock <= 0:
+        if cost <= 0:
             continue
         country_id = str(q.get("country") or q.get("country_name") or "").strip()
         name = str(q.get("country_name") or country_id).strip()
+        iso = str(q.get("iso_code") or "").strip().lower()
         if not country_id:
             continue
         key = country_id.lower()
@@ -1470,16 +1515,19 @@ def _country_items_rumahotp(service):
             grouped[key] = {
                 "country": country_id,
                 "name": name,
-                "cost": cost,
-                "stock": stock,
+                "iso_code": iso,
+                "cost_idr": cost,
+                "cost": float(q.get("cost_usd") or 0),
+                "stock": max(stock, 0),
             }
         else:
-            grouped[key]["stock"] += stock
-            if cost < grouped[key]["cost"]:
-                grouped[key]["cost"] = cost
+            grouped[key]["stock"] += max(stock, 0)
+            if cost < grouped[key]["cost_idr"]:
+                grouped[key]["cost_idr"] = cost
+                grouped[key]["cost"] = float(q.get("cost_usd") or 0)
                 grouped[key]["name"] = name
+                grouped[key]["iso_code"] = iso
     return list(grouped.values())
-
 
 def get_service_countries(server, service):
     if server == "5sim":
@@ -1495,164 +1543,188 @@ async def show_service_country_page(
     service,
     page=0
 ):
-    """Menampilkan hanya negara yang punya stok untuk service yang dipilih."""
-
-    service_label = dict(OTP_SERVICES).get(
-        service,
-        service.title()
+    """Show countries for the selected service; Server 2 keeps price tiers for the next step."""
+    service_label = (
+        rumah_service_label(service) if server == "rumahotp"
+        else dict(OTP_SERVICES).get(service, service.title())
     )
 
     try:
         items = await asyncio.wait_for(
-            asyncio.to_thread(
-                get_service_countries,
-                server,
-                service
-            ),
+            asyncio.to_thread(get_service_countries, server, service),
             timeout=20
         )
     except asyncio.TimeoutError:
-        logger.warning(
-            "OTP stock timeout: server=%s service=%s",
-            server,
-            service
-        )
+        logger.warning("OTP stock timeout: server=%s service=%s", server, service)
         await query.edit_message_text(
             "⚠️ <b>Provider terlalu lama merespons.</b>\n\n"
             f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
             "Silakan tekan Refresh dan coba lagi.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔄 Refresh",
-                    callback_data=f"otp_service:{server}:{service}"
-                )],
-                [InlineKeyboardButton(
-                    "⬅️ Pilih Layanan",
-                    callback_data=f"otp_server:{server}"
-                )]
-            ])
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_service:{server}:{service}"),
+                InlineKeyboardButton("⬅️ Pilih Layanan", callback_data=f"otp_server:{server}")
+            ]])
         )
         return
-    except Exception as error:
-        logger.exception(
-            "OTP stock error: server=%s service=%s",
-            server,
-            service
-        )
+    except Exception:
+        logger.exception("OTP stock error: server=%s service=%s", server, service)
         await query.edit_message_text(
             "⚠️ <b>Gagal mengambil stok provider.</b>\n\n"
             f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
             "Periksa API provider atau tekan Refresh.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔄 Refresh",
-                    callback_data=f"otp_service:{server}:{service}"
-                )],
-                [InlineKeyboardButton(
-                    "⬅️ Pilih Layanan",
-                    callback_data=f"otp_server:{server}"
-                )]
-            ])
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_service:{server}:{service}"),
+                InlineKeyboardButton("⬅️ Pilih Layanan", callback_data=f"otp_server:{server}")
+            ]])
         )
         return
 
-    # Indonesia diprioritaskan
-    items.sort(
-        key=lambda x: (
-            0 if str(x["name"]).lower() == "indonesia"
-            or str(x["country"]).lower() == "indonesia"
-            else 1,
-            str(x["name"]).lower()
-        )
-    )
+    items.sort(key=lambda x: (
+        0 if str(x.get("name", "")).lower() == "indonesia" else 1,
+        str(x.get("name", "")).lower()
+    ))
 
     if not items:
         await query.edit_message_text(
-            "❌ <b>Stok tidak tersedia</b>\n\n"
+            "❌ <b>Produk tidak tersedia</b>\n\n"
             f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
-            "Saat ini tidak ada negara yang memiliki "
-            "stok untuk layanan tersebut.",
+            "Belum ada negara/harga yang dikembalikan provider.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🔄 Refresh",
-                        callback_data=(
-                            f"otp_service:{server}:{service}"
-                        )
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Pilih Layanan",
-                        callback_data=f"otp_server:{server}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🏠 Menu Utama",
-                        callback_data="user_home"
-                    )
-                ]
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_service:{server}:{service}")],
+                [InlineKeyboardButton("⬅️ Pilih Layanan", callback_data=f"otp_server:{server}")],
+                [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]
             ])
         )
         return
 
-    total_pages = (
-        len(items) + COUNTRIES_PER_PAGE - 1
-    ) // COUNTRIES_PER_PAGE
+    total_pages = max(1, (len(items) + COUNTRIES_PER_PAGE - 1) // COUNTRIES_PER_PAGE)
     page = max(0, min(page, total_pages - 1))
-
-    page_items = items[
-        page * COUNTRIES_PER_PAGE:
-        (page + 1) * COUNTRIES_PER_PAGE
-    ]
-
+    page_items = items[page * COUNTRIES_PER_PAGE:(page + 1) * COUNTRIES_PER_PAGE]
     keyboard = []
 
     for item in page_items:
-        price = hitung_harga_jual(item["cost"])
-        keyboard.append([
-            InlineKeyboardButton(
-                (
-                    f"🌍 {item['name']}\n"
-                    f"💰 {format_rupiah(price)}"
-                    f"  |  📦 {item['stock']}"
-                ),
-                callback_data=(
-                    f"otp_buy:{server}:{service}:"
-                    f"{item['country']}"
-                )
+        sell = hitung_harga_jual(
+            float(item.get("cost") or 0)
+        )
+        if server == "rumahotp":
+            sell = int(round(float(item.get("cost_idr") or 0) * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        stock = int(item.get("stock") or 0)
+        status = f"📦 {stock}" if stock > 0 else "❌ Stok kosong di harga termurah"
+        keyboard.append([InlineKeyboardButton(
+            f"{country_flag(item.get('iso_code') or item.get('name'))} {item['name']}  •  mulai {format_rupiah(sell)}  •  {status}",
+            callback_data=(
+                f"otp_rquotes:{server}:{service}:{item['country']}:0" if server == "rumahotp"
+                else f"otp_buy:{server}:{service}:{item['country']}"
             )
-        ])
+        )])
 
-    # Navigasi negara + tombol kembali ke layanan.
-    nav = []
     if total_pages > 1:
-        nav.extend([
-            InlineKeyboardButton("◀️", callback_data=f"otp_service_countries:{server}:{service}:{max(0, page - 1)}"),
-            InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="otp_noop"),
-            InlineKeyboardButton("▶️", callback_data=f"otp_service_countries:{server}:{service}:{min(total_pages - 1, page + 1)}"),
+        keyboard.append([
+            InlineKeyboardButton("◀️", callback_data=f"otp_service_countries:{server}:{service}:{max(0, page-1)}"),
+            InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="otp_noop"),
+            InlineKeyboardButton("▶️", callback_data=f"otp_service_countries:{server}:{service}:{min(total_pages-1, page+1)}")
         ])
-        keyboard.append(nav)
-    keyboard.append([
-        InlineKeyboardButton("🔎 Cari Negara", callback_data=f"otp_country_search:{server}:{service}")
-    ])
+    keyboard.append([InlineKeyboardButton("🔎 Cari Negara", callback_data=f"otp_country_search:{server}:{service}")])
     keyboard.append([
         InlineKeyboardButton("↩️ Kembali", callback_data=f"otp_server:{server}"),
         InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")
     ])
 
     await query.edit_message_text(
-        "🌍 <b>PILIH NEGARA</b>\n\n"
+        "🌎 <b>PILIH NEGARA</b>\n\n"
         f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
-        "Hanya negara dengan stok aktif yang ditampilkan.",
+        "Pilih negara. Server 2 akan menampilkan semua harga/provider RumahOTP pada langkah berikutnya.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_rumahotp_quote_page(query, service, country, page=0):
+    service_label = rumah_service_label(service)
+    try:
+        quotes = await asyncio.wait_for(
+            asyncio.to_thread(get_rumahotp_quotes_for_country, country, service),
+            timeout=20
+        )
+    except Exception:
+        logger.exception("RumahOTP quote error: service=%s country=%s", service, country)
+        quotes = []
+
+    quotes = [q for q in quotes if float(q.get("cost_idr") or 0) > 0]
+    quotes.sort(key=lambda q: (float(q.get("cost_idr") or 0), str(q.get("provider_id") or "")))
+
+    if not quotes:
+        await query.edit_message_text(
+            "❌ <b>Harga/provider tidak tersedia.</b>\n\n"
+            f"📱 Layanan: <b>{service_label}</b>\n"
+            f"🇮🇩 Negara: <b>{country}</b>\n\n"
+            "RumahOTP belum mengembalikan daftar harga untuk pilihan ini.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_rquotes:rumahotp:{service}:{country}:0")],
+                [InlineKeyboardButton("⬅️ Pilih Negara", callback_data=f"otp_service:{'rumahotp'}:{service}")]
+            ])
+        )
+        return
+
+    total_pages = max(1, (len(quotes) + COUNTRY_QUOTES_PER_PAGE - 1) // COUNTRY_QUOTES_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    page_items = quotes[page * COUNTRY_QUOTES_PER_PAGE:(page + 1) * COUNTRY_QUOTES_PER_PAGE]
+    keyboard = []
+
+    for q in page_items:
+        quote_id = "ROQ-" + uuid.uuid4().hex[:12].upper()
+        save_otp_quote(
+            quote_id=quote_id,
+            telegram_id=query.from_user.id,
+            provider="rumahotp",
+            country=str(q.get("country") or country),
+            country_name=str(q.get("country_name") or country),
+            service=str(q.get("service") or service),
+            operator=str(q.get("provider_operator") or "any"),
+            pool=str(q.get("pool") or ""),
+            cost_usd=float(q.get("cost_usd") or 0),
+            stock=int(q.get("stock") or 0)
+        )
+        cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
+        sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        stock = int(q.get("stock") or 0)
+        server_id = str(q.get("server_id") or "2")
+        provider_id = str(q.get("provider_id") or "-")
+        if stock > 0:
+            status = f"📦 Stock {stock}"
+        else:
+            status = "❌ Produk/stock di harga ini sedang tidak ada"
+        label = f"🖥 Server {server_id}.0  •  ID {provider_id}\n💰 {format_rupiah(sell_price)}  •  {status}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
+
+    if total_pages > 1:
+        keyboard.append([
+            InlineKeyboardButton("◀️", callback_data=f"otp_rquotes:rumahotp:{service}:{country}:{max(0,page-1)}"),
+            InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="otp_noop"),
+            InlineKeyboardButton("▶️", callback_data=f"otp_rquotes:rumahotp:{service}:{country}:{min(total_pages-1,page+1)}")
+        ])
+    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_rquotes:rumahotp:{service}:{country}:0")])
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Pilih Negara", callback_data=f"otp_service:rumahotp:{service}"),
+        InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")
+    ])
+
+    country_name = str(quotes[0].get("country_name") or country)
+    flag = country_flag(quotes[0].get("iso_code") or country_name)
+    await query.edit_message_text(
+        "💰 <b>PILIH HARGA / SERVER</b>\n\n"
+        f"🖥 Server: <b>{OTP_SERVERS['rumahotp']}</b>\n"
+        f"{flag} Negara: <b>{country_name}</b>\n"
+        f"📱 Layanan: <b>{service_label}</b>\n\n"
+        "Semua harga/provider RumahOTP ditampilkan. Harga bot sudah termasuk margin reseller.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1795,7 +1867,7 @@ async def show_country_page(
 
             InlineKeyboardButton(
 
-                f"🌍 {name}",
+                f"{country_flag(name)} {name}",
 
                 callback_data=(
                     f"otp_country:"
@@ -1858,7 +1930,7 @@ async def show_country_page(
     await query.edit_message_text(
 
         f"📱 <b>ORDER OTP</b>\n\n"
-        f"🌍 Pilih negara nomor.\n\n"
+        f"🌎 Pilih negara nomor.\n\n"
         f"Halaman <b>{page + 1}</b> "
         f"dari <b>{total_pages}</b>\n"
         f"Total negara: <b>{len(items)}</b>\n\n"
@@ -2014,7 +2086,7 @@ async def show_product_page(
 
         await query.edit_message_text(
 
-            f"🌍 <b>{country}</b>\n\n"
+            f"{country_flag(country)} <b>{country}</b>\n\n"
             "❌ Tidak ada stok OTP "
             "yang tersedia saat ini.",
 
@@ -2187,7 +2259,7 @@ async def show_product_page(
 
     await query.edit_message_text(
 
-        f"🌍 Negara: <b>{country}</b>\n\n"
+        f"{country_flag(country)} Negara: <b>{country}</b>\n\n"
 
         f"📱 <b>Pilih layanan OTP</b>\n\n"
 
@@ -2346,7 +2418,7 @@ async def process_otp_order(
 ):
     """Order OTP dari provider terpilih dengan margin sesuai PROFIT_PERCENT (default 7%)."""
 
-    service_label = dict(OTP_SERVICES).get(service, service)
+    service_label = (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, service))
     display_country = country
 
     # -----------------------------------------------------
@@ -2368,7 +2440,7 @@ async def process_otp_order(
         if not operator_info:
             await query.edit_message_text(
                 "❌ <b>Stok habis.</b>\n\n"
-                f"🌍 Negara: <b>{country}</b>\n"
+                f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
                 f"📱 Layanan: <b>{service_label}</b>",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
@@ -2402,7 +2474,7 @@ async def process_otp_order(
         if not quote:
             await query.edit_message_text(
                 "❌ <b>Harga/stok RumahOTP tidak tersedia.</b>\n\n"
-                f"🌍 Negara: <b>{country}</b>\n"
+                f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
                 f"📱 Layanan: <b>{service_label}</b>\n\n"
                 "Silakan refresh atau pilih negara lain.",
                 parse_mode="HTML",
@@ -2426,7 +2498,7 @@ async def process_otp_order(
     if current_balance < sell_price:
         await query.edit_message_text(
             "❌ <b>Saldo tidak cukup.</b>\n\n"
-            f"🌍 Negara: <b>{display_country}</b>\n"
+            f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
             f"💰 Harga: <b>{format_rupiah(sell_price)}</b>\n"
             f"💳 Saldo: <b>{format_rupiah(current_balance)}</b>",
@@ -2453,7 +2525,7 @@ async def process_otp_order(
     await query.edit_message_text(
         "⏳ <b>Memproses order...</b>\n\n"
         f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
-        f"🌍 Negara: <b>{country}</b>\n"
+        f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n"
         f"💰 Harga: <b>{format_rupiah(sell_price)}</b>",
         parse_mode="HTML"
@@ -2585,7 +2657,7 @@ async def process_otp_order(
         "✅ <b>ORDER BERHASIL</b>\n\n"
         f"🧾 Order: <code>{order_id}</code>\n"
         f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
-        f"🌍 Negara: <b>{country}</b>\n"
+        f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
         f"📞 Nomor:\n<code>{phone}</code>\n\n"
         f"💰 Harga: <b>{format_rupiah(sell_price)}</b>\n"
@@ -2911,6 +2983,43 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         return
 
     # =====================================================
+    # PILIH HARGA / SERVER RUMAHOTP
+    # =====================================================
+
+    if data.startswith("otp_rquotes:"):
+        parts = data.split(":", 4)
+        if len(parts) != 5:
+            await query.answer("Data harga tidak valid.", show_alert=True)
+            return
+        _, server, service, country, page_raw = parts
+        try:
+            page = int(page_raw)
+        except Exception:
+            page = 0
+        if server != "rumahotp":
+            await query.answer("Server tidak valid.", show_alert=True)
+            return
+        await show_rumahotp_quote_page(query, service, country, page)
+        return
+
+    if data.startswith("otp_quote:"):
+        quote_id = data.split(":", 1)[1].strip()
+        quote = get_otp_quote(quote_id, user_id)
+        if not quote:
+            await query.answer("Harga sudah kedaluwarsa. Silakan refresh.", show_alert=True)
+            return
+        if int(quote.get("stock") or 0) <= 0:
+            await query.answer("Produk/stock di harga ini sedang tidak ada.", show_alert=True)
+            return
+        await process_otp_order(
+            query, user_id, context, "rumahotp",
+            str(quote.get("country") or ""),
+            str(quote.get("service") or ""),
+            quote=quote
+        )
+        return
+
+    # =====================================================
     # PILIH NEGARA -> ORDER LANGSUNG
     # =====================================================
 
@@ -3142,7 +3251,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                 "❌ <b>Saldo tidak cukup.</b>\n\n"
 
-                f"🌍 Negara: "
+                f"{country_flag(country)} Negara: "
                 f"<b>{country}</b>\n"
 
                 f"📱 Layanan: "
@@ -3184,7 +3293,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             "⏳ <b>Memproses order...</b>\n\n"
 
-            f"🌍 Negara: <b>{country}</b>\n"
+            f"{country_flag(country)} Negara: <b>{country}</b>\n"
 
             f"📱 Layanan: <b>{product}</b>\n"
 
@@ -3410,7 +3519,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             f"🧾 Order: "
             f"<code>{order_id}</code>\n"
 
-            f"🌍 Negara: "
+            f"{country_flag(country)} Negara: "
             f"<b>{country}</b>\n"
 
             f"📱 Layanan: "
@@ -4751,11 +4860,17 @@ async def text_handler(
             stock = int(item.get("stock") or 0)
             price = hitung_harga_jual(cost) if cost > 0 else 0
             if server == "legacy":
-                label = f"🌍 {name}"
+                label = f"{country_flag(name)} {name}"
                 cb = f"otp_country:{country}"
             else:
-                label = f"🌍 {name} | 💰 {format_rupiah(price)} | 📦 {stock}"
-                cb = f"otp_buy:{server}:{service}:{country}"
+                if server == "rumahotp":
+                    live_cost = float(item.get("cost_idr") or item.get("price_idr") or 0)
+                    price = int(round(live_cost * (1 + PROFIT_PERCENT / 100) / 100) * 100) if live_cost > 0 else 0
+                    label = f"{country_flag(item.get('iso_code') or name)} {name} | mulai {format_rupiah(price)} | 📦 {stock}"
+                    cb = f"otp_rquotes:{server}:{service}:{country}:0"
+                else:
+                    label = f"{country_flag(item.get('iso_code') or name)} {name} | 💰 {format_rupiah(price)} | 📦 {stock}"
+                    cb = f"otp_buy:{server}:{service}:{country}"
             keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
 
         back_cb = "order" if server == "legacy" else f"otp_service_countries:{server}:{service}:0"

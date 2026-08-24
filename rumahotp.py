@@ -106,6 +106,12 @@ def _norm(value):
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 def find_service(service):
+    """Resolve a RumahOTP service by exact service_code or service_name.
+
+    The previous matcher treated the requested value as an alias of itself,
+    which made values such as ``google``/``shopee`` accidentally resolve to
+    the first service returned by the API.
+    """
     target_raw = str(service or "").strip()
     target = _norm(target_raw)
 
@@ -118,7 +124,6 @@ def find_service(service):
         "tiktok": {"tiktok", "tt"},
         "shopee": {"shopee"},
     }
-    wanted = aliases.get(target, {target})
 
     for item in get_services():
         code = str(item.get("service_code") or item.get("id") or "").strip()
@@ -126,17 +131,21 @@ def find_service(service):
         code_norm = _norm(code)
         name_norm = _norm(name)
 
-        if (
-            code == target_raw
-            or code_norm == target
-            or name_norm in wanted
-            or target in wanted
-            or target == name_norm
-        ):
-            return {"id": code, "name": name, **item}
+        # Exact API code is the primary key. This is important because
+        # RumahOTP service codes are numeric (e.g. 13 for WhatsApp).
+        if target_raw == code or target == code_norm:
+            return {"id": code, "name": name or code, **item}
+
+        if target == name_norm:
+            return {"id": code, "name": name or code, **item}
+
+        for alias, names in aliases.items():
+            if target == alias and name_norm in {_norm(x) for x in names}:
+                return {"id": code, "name": name or code, **item}
+            if target == _norm(name) and name_norm in {_norm(x) for x in names}:
+                return {"id": code, "name": name or code, **item}
 
     return None
-
 
 def get_countries(service_id):
     key = f"countries:{service_id}"
@@ -180,27 +189,51 @@ def find_country(country, service_id):
 
 
 def _country_quotes(country_item, service_name, service_id=None):
-    quotes=[]
-    if not isinstance(country_item, dict): return quotes
-    country_name=str(country_item.get("name") or country_item.get("iso_code") or "")
-    number_id=country_item.get("number_id")
+    """Return every provider/server price, including zero-stock price tiers."""
+    quotes = []
+    if not isinstance(country_item, dict):
+        return quotes
+
+    country_name = str(country_item.get("name") or country_item.get("iso_code") or "")
+    number_id = country_item.get("number_id")
+
     for row in country_item.get("pricelist") or []:
         if not isinstance(row, dict):
             continue
+
         provider_id = row.get("provider_id")
         price = float(row.get("price") or row.get("rate") or 0)
         stock = int(float(row.get("stock") or 0))
-        if provider_id is None or price <= 0 or stock <= 0:
-            continue
-        quotes.append({
-            "provider":"rumahotp", "country":str(number_id or country_name), "country_name":country_name,
-            "service":str(service_id or service_name),
-            "service_name":str(service_name), "operator":"AUTO", "provider_operator":"any",
-            "pool":json.dumps({"number_id":number_id,"provider_id":provider_id,"operator_id":1}, separators=(",",":")),
-            "cost_usd":price/float(KURS_DOLAR), "cost_idr":price, "stock":stock,
-        })
-    return quotes
+        server_id = row.get("server_id")
 
+        if provider_id is None or price <= 0:
+            continue
+
+        quotes.append({
+            "provider": "rumahotp",
+            "country": str(number_id or country_name),
+            "country_name": country_name,
+            "iso_code": str(country_item.get("iso_code") or "").lower(),
+            "service": str(service_id or service_name),
+            "service_name": str(service_name),
+            "operator": "any",
+            "provider_operator": "any",
+            "provider_id": str(provider_id),
+            "server_id": str(server_id or "2"),
+            "price_idr": price,
+            "available": bool(row.get("available", stock > 0)) and stock > 0,
+            "pool": json.dumps({
+                "number_id": number_id,
+                "provider_id": provider_id,
+                "operator_id": 1,
+                "server_id": server_id,
+            }, separators=(",", ":")),
+            "cost_usd": price / float(KURS_DOLAR),
+            "cost_idr": price,
+            "stock": stock,
+        })
+
+    return quotes
 
 def get_all_quotes(service):
     """Return every live country/provider quote for a RumahOTP service."""
@@ -223,6 +256,17 @@ def get_all_quotes(service):
         )
 
     return result
+
+
+def get_quotes_for_country(country, service):
+    """Return every RumahOTP provider/server price for one country/service."""
+    found = find_service(service)
+    if not found:
+        return []
+    item = find_country(country, found.get("id"))
+    if not item:
+        return []
+    return _country_quotes(item, found.get("name") or service, found.get("id"))
 
 
 def get_operator_quotes(country, service):
@@ -306,18 +350,9 @@ def cancel_number(order_id):
 
 
 def get_cheapest_quote(country, service):
-    """Return the cheapest live RumahOTP quote for a country/service."""
-    quotes = get_all_quotes(service)
-    target = str(country or "").strip().lower()
-    matches = []
-    for q in quotes:
-        if not isinstance(q, dict):
-            continue
-        if target in {
-            str(q.get("country") or "").strip().lower(),
-            str(q.get("country_name") or "").strip().lower(),
-        }:
-            matches.append(q)
-    if not matches:
+    """Return the cheapest live (in-stock) RumahOTP quote for a country/service."""
+    quotes = get_quotes_for_country(country, service)
+    active = [q for q in quotes if int(q.get("stock") or 0) > 0]
+    if not active:
         return None
-    return min(matches, key=lambda x: float(x.get("cost_usd") or 0))
+    return min(active, key=lambda x: float(x.get("cost_idr") or x.get("cost_usd") or 0))
