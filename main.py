@@ -1474,16 +1474,25 @@ def _country_items_5sim(service):
             except Exception:
                 continue
 
-            if cost <= 0 or count <= 0:
+            # Keep a country when the provider publishes a valid price even
+            # when the current stock is zero. This makes zero-stock countries
+            # (including USA when returned by 5SIM) visible instead of hiding
+            # them from the catalog. Ordering still re-checks live stock.
+            if cost <= 0:
                 continue
 
+            candidate = {
+                "country": str(country),
+                "name": str(country).replace("_", " ").title(),
+                "cost": cost,
+                "stock": max(count, 0),
+            }
+
+            # Show the cheapest provider tier, regardless of whether that
+            # tier currently has stock. The actual purchase path will select
+            # the cheapest AVAILABLE operator at order time.
             if best is None or cost < best["cost"]:
-                best = {
-                    "country": str(country),
-                    "name": str(country).replace("_", " ").title(),
-                    "cost": cost,
-                    "stock": count
-                }
+                best = candidate
 
         if best:
             items.append(best)
@@ -1637,7 +1646,7 @@ async def show_service_country_page(
     ])
 
     await query.edit_message_text(
-        "🌎 <b>PILIH NEGARA</b>\n\n"
+        "🗺️ <b>PILIH NEGARA</b>\n\n"
         f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
         "Pilih negara. Server 2 akan menampilkan semua harga/provider RumahOTP pada langkah berikutnya.",
@@ -1699,10 +1708,16 @@ async def show_rumahotp_quote_page(query, service, country, page=0):
         server_id = str(q.get("server_id") or "2")
         provider_id = str(q.get("provider_id") or "-")
         if stock > 0:
-            status = f"📦 Stock {stock}"
+            status = f"📦 Stock: {stock}"
         else:
             status = "❌ Produk/stock di harga ini sedang tidak ada"
-        label = f"🖥 Server {server_id}.0  •  ID {provider_id}\n💰 {format_rupiah(sell_price)}  •  {status}"
+        # Keep the server/ID information together, then put the live stock
+        # directly underneath it as requested.
+        label = (
+            f"🖥 Server {server_id}.0 • ID {provider_id}\n"
+            f"{status}\n"
+            f"💰 {format_rupiah(sell_price)}"
+        )
         keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
 
     if total_pages > 1:
