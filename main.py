@@ -1482,10 +1482,31 @@ async def show_service_page(
 
 
 def _country_items_5sim(service):
+    """Build one row per country from the live 5SIM product price matrix.
+
+    5SIM's product-filtered endpoint returns product -> country -> operator,
+    while the country+product form returns country -> product -> operator.
+    provider.get_prices() normalizes these shapes, and this function keeps a
+    defensive fallback so a provider response change cannot silently remove
+    every country from the bot.
+    """
     data = get_prices(product=service)
 
     if not isinstance(data, dict):
         return []
+
+    # Defensive normalization in case a raw product -> country response ever
+    # reaches this layer.
+    target = str(service).strip().lower()
+    for key in list(data.keys()):
+        if str(key).strip().lower() == target and isinstance(data.get(key), dict):
+            product_data = data.get(key)
+            normalized = {}
+            for country_name, country_data in product_data.items():
+                if isinstance(country_data, dict):
+                    normalized[str(country_name)] = {str(key): country_data}
+            data = normalized
+            break
 
     items = []
     for country, country_data in data.items():
@@ -1518,9 +1539,11 @@ def _country_items_5sim(service):
 
         if groups:
             cheapest = min(groups.values(), key=lambda x: x["cost"])
+            country_name = str(country).replace("_", " ").title()
             items.append({
                 "country": str(country),
-                "name": str(country).replace("_", " ").title(),
+                "name": country_name,
+                "iso_code": str(country).strip().lower(),
                 "cost": float(cheapest["cost"]),
                 "stock": int(cheapest["stock"]),
             })
@@ -1652,9 +1675,9 @@ async def show_service_country_page(
         if server == "rumahotp":
             sell = int(round(float(item.get("cost_idr") or 0) * (1 + PROFIT_PERCENT / 100) / 100) * 100)
         stock = int(item.get("stock") or 0)
-        status = f"📦 {stock}" if stock > 0 else "❌ Stok kosong di harga termurah"
+        status = f"📦 {stock}" if stock > 0 else "❌ 0"
         keyboard.append([InlineKeyboardButton(
-            f"{country_flag(item.get('iso_code') or item.get('name'))} {item['name']}  •  mulai {format_rupiah(sell)}  •  {status}",
+            f"{country_flag(item.get('iso_code') or item.get('name'))} {item['name']} • {format_rupiah(sell)} • {status}",
             callback_data=(
                 f"otp_choose_server:{server}:{service}:{item['country']}"
             )
@@ -1691,7 +1714,11 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
     """
     if source_server not in OTP_SERVERS:
         source_server = "5sim"
-    service_label = rumah_service_label(service) if service else str(service)
+    service_label = (
+        rumah_service_label(service)
+        if source_server == "rumahotp"
+        else dict(OTP_SERVICES).get(service, str(service).title())
+    )
     display_country = str(country)
     server1_service = canonical_5sim_service(service)
 
@@ -1733,11 +1760,17 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
             cost_usd=cost_usd,
             stock=stock,
         )
-        operators = len(option.get("operators") or [])
+        operators = [str(x).strip() for x in (option.get("operators") or []) if str(x).strip()]
+        if len(operators) == 1:
+            operator_label = f"👤 {operators[0]}"
+        elif operators:
+            operator_label = f"👤 {len(operators)} operator"
+        else:
+            operator_label = ""
         label = (
-            f"⚡ Server 1\n"
-            f"📦 Stock: {stock}" + (f" • {operators} operator" if operators else "") + "\n"
-            f"💰 {format_rupiah(sell_price)}"
+            f"💰 {format_rupiah(sell_price)} • 📦 {stock}"
+            + (f" • {operator_label}" if operator_label else "")
+            + "\n⚡ Server 1"
         )
         keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
         available += 1
@@ -1790,10 +1823,18 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
             cost_usd=cost_idr / float(KURS_DOLAR),
             stock=stock,
         )
+        provider_operator = str(
+            q.get("provider_operator") or ""
+        ).strip()
+        operator_label = (
+            f"👤 {provider_operator}"
+            if provider_operator and provider_operator.lower() not in {"any", "-"}
+            else ""
+        )
         label = (
-            f"⚡ Server 2\n"
-            f"📦 Stock: {stock}\n"
-            f"💰 {format_rupiah(sell_price)}"
+            f"💰 {format_rupiah(sell_price)} • 📦 {stock}"
+            + (f" • {operator_label}" if operator_label else "")
+            + "\n⚡ Server 2"
         )
         keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
         available += 1
@@ -1818,8 +1859,7 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
         "💰 <b>PILIH SERVER / HARGA</b>\n\n"
         f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
-        "Pilih server dan harga terlebih dahulu. Pembelian tidak dilakukan sampai tombol harga ditekan.\n"
-        "Stok dengan nominal harga yang sama sudah digabung.",
+        "Pilih harga/server untuk melanjutkan pembelian.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -3204,6 +3244,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         else:
             await query.answer("Data pilihan server tidak valid.", show_alert=True)
             return
+        # Persist the exact navigation context so Back always returns to
+        # the same server/service country page that the user came from.
+        context.user_data["otp_server"] = source_server
+        context.user_data["otp_service"] = service
+        context.user_data["otp_country"] = country
+
         await show_server_choice_page(
             query,
             user_id,
@@ -3242,10 +3288,17 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         if int(quote.get("stock") or 0) <= 0:
             await query.answer("Produk/stock di harga ini sedang tidak ada.", show_alert=True)
             return
+        selected_provider = str(quote.get("provider") or "")
+        selected_country = str(quote.get("country") or "")
+        selected_service = str(quote.get("service") or "")
+        context.user_data["otp_server"] = selected_provider
+        context.user_data["otp_service"] = selected_service
+        context.user_data["otp_country"] = selected_country
+
         await process_otp_order(
-            query, user_id, context, str(quote.get("provider") or ""),
-            str(quote.get("country") or ""),
-            str(quote.get("service") or ""),
+            query, user_id, context, selected_provider,
+            selected_country,
+            selected_service,
             quote=quote
         )
         return

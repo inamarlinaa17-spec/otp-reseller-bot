@@ -237,14 +237,16 @@ def get_prices(
         if country:
             params["country"] = country
 
-        # 5SIM's /guest/prices endpoint supports product filtering, but the
-        # product-only request has been observed to intermittently return
-        # HTTP 400 "country is incorrect" on the live API.  For the catalog
-        # page we therefore fetch the public matrix without a product filter
-        # and filter the product locally.  When a country is supplied we keep
-        # both filters, which is the documented and stable form for checkout.
-        if product and country:
+        # 5SIM supports product-only, country-only, and country+product
+        # filters. Product-only responses are shaped as:
+        #   {product: {country: {operator: {...}}}}
+        # while country+product responses are shaped as:
+        #   {country: {product: {operator: {...}}}}
+        # We normalize both forms below so the rest of the bot can always
+        # work with {country: {product: ...}}.
+        if product:
             params["product"] = product
+
 
         response = requests.get(
             f"{BASE_URL}/guest/prices",
@@ -271,27 +273,46 @@ def get_prices(
             )
             return {}
 
-        # The documented /guest/prices endpoint is shaped as:
+        # Normalize the documented response shapes to:
         # {country: {product: {operator: {cost, count, ...}}}}.
-        # Product filtering is intentionally done client-side when no country
-        # is supplied, so the country/service catalog cannot be broken by a
-        # product-only 400 response.
         if product:
-            target = str(product).strip().lower()
-            filtered = {}
+            target_product = str(product).strip().lower()
+            normalized = {}
+
+            # Country -> product -> operator
             for country_name, country_data in data.items():
                 if not isinstance(country_data, dict):
                     continue
+
                 matched_key = None
                 for product_name in country_data.keys():
-                    if str(product_name).strip().lower() == target:
+                    if str(product_name).strip().lower() == target_product:
                         matched_key = product_name
                         break
-                if matched_key is not None:
-                    filtered[country_name] = {
-                        matched_key: country_data[matched_key]
+
+                if matched_key is not None and isinstance(country_data.get(matched_key), dict):
+                    normalized[str(country_name)] = {
+                        str(matched_key): country_data[matched_key]
                     }
-            return filtered
+
+            # Product -> country -> operator (the shape returned by the
+            # official product-filter endpoint).
+            if not normalized:
+                product_key = None
+                for key in data.keys():
+                    if str(key).strip().lower() == target_product:
+                        product_key = key
+                        break
+
+                product_data = data.get(product_key) if product_key is not None else None
+                if isinstance(product_data, dict):
+                    for country_name, country_data in product_data.items():
+                        if isinstance(country_data, dict):
+                            normalized[str(country_name)] = {
+                                str(product_key): country_data
+                            }
+
+            return normalized
 
         return data
 
