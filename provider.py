@@ -237,7 +237,13 @@ def get_prices(
         if country:
             params["country"] = country
 
-        if product:
+        # 5SIM's /guest/prices endpoint supports product filtering, but the
+        # product-only request has been observed to intermittently return
+        # HTTP 400 "country is incorrect" on the live API.  For the catalog
+        # page we therefore fetch the public matrix without a product filter
+        # and filter the product locally.  When a country is supplied we keep
+        # both filters, which is the documented and stable form for checkout.
+        if product and country:
             params["product"] = product
 
         response = requests.get(
@@ -267,10 +273,9 @@ def get_prices(
 
         # The documented /guest/prices endpoint is shaped as:
         # {country: {product: {operator: {cost, count, ...}}}}.
-        # It accepts a country filter, but product filtering is done here
-        # client-side. The previous code sent ?product=... and then treated
-        # the unfiltered matrix as if it were already product-filtered, which
-        # made WhatsApp/other services appear to have zero stock.
+        # Product filtering is intentionally done client-side when no country
+        # is supplied, so the country/service catalog cannot be broken by a
+        # product-only 400 response.
         if product:
             target = str(product).strip().lower()
             filtered = {}

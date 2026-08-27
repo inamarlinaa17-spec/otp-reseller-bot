@@ -1682,8 +1682,15 @@ async def show_service_country_page(
     )
 
 
-async def show_server_choice_page(query, user_id, service, country):
-    """Show both servers after country selection; buying only happens after a server/price is chosen."""
+async def show_server_choice_page(query, user_id, service, country, source_server="5sim"):
+    """Show both servers after country selection; buying only happens after a server/price is chosen.
+
+    source_server is the server whose country page the user came from.  It is
+    preserved so the Back button returns to that exact service/country list
+    instead of always jumping to Server 1.
+    """
+    if source_server not in OTP_SERVERS:
+        source_server = "5sim"
     service_label = rumah_service_label(service) if service else str(service)
     display_country = str(country)
     server1_service = canonical_5sim_service(service)
@@ -1792,10 +1799,18 @@ async def show_server_choice_page(query, user_id, service, country):
         available += 1
 
     if not available:
-        keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_choose_server:{service}:{country}")])
+        keyboard.append([
+            InlineKeyboardButton(
+                "🔄 Refresh",
+                callback_data=f"otp_choose_server:{source_server}:{service}:{country}"
+            )
+        ])
 
     keyboard.append([
-        InlineKeyboardButton("⬅️ Pilih Negara", callback_data=f"otp_server:5sim"),
+        InlineKeyboardButton(
+            "⬅️ Pilih Negara",
+            callback_data=f"otp_service_countries:{source_server}:{service}:0"
+        ),
         InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
     ])
 
@@ -3189,7 +3204,13 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         else:
             await query.answer("Data pilihan server tidak valid.", show_alert=True)
             return
-        await show_server_choice_page(query, user_id, service, country)
+        await show_server_choice_page(
+            query,
+            user_id,
+            service,
+            country,
+            source_server=source_server,
+        )
         return
 
     # =====================================================
