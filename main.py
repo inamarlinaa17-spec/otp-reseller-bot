@@ -9,6 +9,7 @@ import hmac
 import asyncio
 import pytz
 import random
+from html import escape
 
 try:
     import pycountry
@@ -81,8 +82,10 @@ from provider import (
     get_prices,
     get_all_countries,
     get_cheapest_operator,
+    get_price_options,
     hitung_harga_jual,
     buy_number,
+    buy_number_any_operator,
     get_sms,
     cancel_number
 )
@@ -324,6 +327,38 @@ def rumah_service_label(service):
     if found:
         return str(found.get("name") or service).strip()
     return str(service).strip()
+
+
+def canonical_5sim_service(service):
+    """Map a Server 2 service code/name to the canonical 5SIM service name when possible."""
+    raw = str(service or "").strip()
+    known = {str(code).lower(): str(code) for code, _ in OTP_SERVICES}
+    if raw.lower() in known:
+        return known[raw.lower()]
+
+    found = find_rumahotp_service(raw)
+    name = str(found.get("name") or "") if found else raw
+    target = name.lower().strip()
+    aliases = {
+        "whatsapp": "whatsapp",
+        "telegram": "telegram",
+        "facebook": "facebook",
+        "instagram": "instagram",
+        "tiktok": "tiktok",
+        "shopee": "shopee",
+        "google": "google",
+        "gmail": "google",
+        "youtube": "google",
+    }
+    if target in aliases:
+        return aliases[target]
+    compact = target.replace(",", " ").replace("/", " ")
+    if "google" in compact and ("gmail" in compact or "youtube" in compact):
+        return "google"
+    for code, label in OTP_SERVICES:
+        if target == str(label).lower().replace("📱 ", "").replace("✈️ ", "").strip():
+            return code
+    return raw
 
 
 # =========================================================
@@ -1440,7 +1475,7 @@ async def show_service_page(
     await query.edit_message_text(
         "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
         f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"
-        "Pilih layanan OTP dari katalog provider.\n\nGoogle / Gmail / YouTube akan tampil sebagai satu layanan sesuai katalog RumahOTP.",
+        "Pilih layanan OTP dari katalog.\n\nGoogle / Gmail / YouTube ditampilkan sebagai satu layanan bila tersedia.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1452,50 +1487,43 @@ def _country_items_5sim(service):
     if not isinstance(data, dict):
         return []
 
-    # Endpoint product dapat mengembalikan:
-    # {service: {country: {operator: {cost,count}}}}
-    if service in data and isinstance(data.get(service), dict):
-        data = data[service]
-
     items = []
-
     for country, country_data in data.items():
         if not isinstance(country_data, dict):
             continue
+        product_data = country_data.get(service)
+        if not isinstance(product_data, dict):
+            target = str(service).strip().lower()
+            for key, value in country_data.items():
+                if str(key).strip().lower() == target:
+                    product_data = value
+                    break
+        if not isinstance(product_data, dict):
+            continue
 
-        best = None
-
-        for operator, info in country_data.items():
+        groups = {}
+        for operator, info in product_data.items():
             if not isinstance(info, dict):
                 continue
             try:
-                cost = float(info.get("cost", 0) or 0)
-                count = int(info.get("count", 0) or 0)
+                cost = float(info.get("cost") or 0)
+                count = int(info.get("count") or 0)
             except Exception:
                 continue
-
-            # Keep a country when the provider publishes a valid price even
-            # when the current stock is zero. This makes zero-stock countries
-            # (including USA when returned by 5SIM) visible instead of hiding
-            # them from the catalog. Ordering still re-checks live stock.
             if cost <= 0:
                 continue
+            key = round(cost, 6)
+            group = groups.setdefault(key, {"cost": cost, "stock": 0})
+            group["stock"] += max(count, 0)
 
-            candidate = {
+        if groups:
+            cheapest = min(groups.values(), key=lambda x: x["cost"])
+            items.append({
                 "country": str(country),
                 "name": str(country).replace("_", " ").title(),
-                "cost": cost,
-                "stock": max(count, 0),
-            }
-
-            # Show the cheapest provider tier, regardless of whether that
-            # tier currently has stock. The actual purchase path will select
-            # the cheapest AVAILABLE operator at order time.
-            if best is None or cost < best["cost"]:
-                best = candidate
-
-        if best:
-            items.append(best)
+                "cost": float(cheapest["cost"]),
+                "stock": int(cheapest["stock"]),
+            })
 
     return items
 
@@ -1566,7 +1594,7 @@ async def show_service_country_page(
     except asyncio.TimeoutError:
         logger.warning("OTP stock timeout: server=%s service=%s", server, service)
         await query.edit_message_text(
-            "⚠️ <b>Provider terlalu lama merespons.</b>\n\n"
+            "⚠️ <b>Server terlalu lama merespons.</b>\n\n"
             f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
             "Silakan tekan Refresh dan coba lagi.",
@@ -1580,10 +1608,10 @@ async def show_service_country_page(
     except Exception:
         logger.exception("OTP stock error: server=%s service=%s", server, service)
         await query.edit_message_text(
-            "⚠️ <b>Gagal mengambil stok provider.</b>\n\n"
+            "⚠️ <b>Gagal mengambil stok server.</b>\n\n"
             f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
-            "Periksa API provider atau tekan Refresh.",
+            "Silakan tekan Refresh dan coba lagi.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_service:{server}:{service}"),
@@ -1602,7 +1630,7 @@ async def show_service_country_page(
             "❌ <b>Produk tidak tersedia</b>\n\n"
             f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
             f"📱 Layanan: <b>{service_label}</b>\n\n"
-            "Belum ada negara/harga yang dikembalikan provider.",
+            "Belum ada negara/harga yang dikembalikan server.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_service:{server}:{service}")],
@@ -1628,8 +1656,7 @@ async def show_service_country_page(
         keyboard.append([InlineKeyboardButton(
             f"{country_flag(item.get('iso_code') or item.get('name'))} {item['name']}  •  mulai {format_rupiah(sell)}  •  {status}",
             callback_data=(
-                f"otp_rquotes:{server}:{service}:{item['country']}:0" if server == "rumahotp"
-                else f"otp_buy:{server}:{service}:{item['country']}"
+                f"otp_choose_server:{server}:{service}:{item['country']}"
             )
         )])
 
@@ -1649,9 +1676,137 @@ async def show_service_country_page(
         "🗺️ <b>PILIH NEGARA</b>\n\n"
         f"🖥 Server: <b>{OTP_SERVERS.get(server, server)}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
-        "Pilih negara. Server 2 akan menampilkan semua harga/provider RumahOTP pada langkah berikutnya.",
+        "Pilih negara. Setelah memilih negara, kamu dapat memilih server dan harga yang tersedia.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_server_choice_page(query, user_id, service, country):
+    """Show both servers after country selection; buying only happens after a server/price is chosen."""
+    service_label = rumah_service_label(service) if service else str(service)
+    display_country = str(country)
+    server1_service = canonical_5sim_service(service)
+
+    async def five_options():
+        try:
+            return await asyncio.to_thread(get_price_options, country, server1_service)
+        except Exception:
+            logger.exception("5SIM offer lookup failed")
+            return []
+
+    async def rumah_options():
+        try:
+            return await asyncio.to_thread(get_rumahotp_quotes_for_country, country, service)
+        except Exception:
+            logger.exception("Server 2 offer lookup failed")
+            return []
+
+    five, rumah = await asyncio.gather(five_options(), rumah_options())
+    keyboard = []
+    available = 0
+
+    # Server 1: same nominal provider price = merged stock across operators.
+    for option in five or []:
+        stock = int(option.get("stock") or 0)
+        if stock <= 0:
+            continue
+        cost_usd = float(option.get("cost") or 0)
+        sell_price = hitung_harga_jual(cost_usd)
+        quote_id = "5Q-" + uuid.uuid4().hex[:12].upper()
+        save_otp_quote(
+            quote_id=quote_id,
+            telegram_id=user_id,
+            provider="5sim",
+            country=country,
+            country_name=display_country,
+            service=server1_service,
+            operator=(option.get("operators") or ["any"])[0],
+            pool=json.dumps({"operators": option.get("operators") or ["any"]}, separators=(",", ":")),
+            cost_usd=cost_usd,
+            stock=stock,
+        )
+        operators = len(option.get("operators") or [])
+        label = (
+            f"⚡ Server 1\n"
+            f"📦 Stock: {stock}" + (f" • {operators} operator" if operators else "") + "\n"
+            f"💰 {format_rupiah(sell_price)}"
+        )
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
+        available += 1
+
+    # Server 2: same nominal price = merged stock across its price tiers.
+    grouped = {}
+    for q in rumah or []:
+        try:
+            cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
+            stock = int(q.get("stock") or 0)
+        except Exception:
+            continue
+        if cost_idr <= 0 or stock <= 0:
+            continue
+        sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        key = sell_price
+        group = grouped.setdefault(key, {"cost_idr": cost_idr, "stock": 0, "quotes": []})
+        group["stock"] += stock
+        group["quotes"].append(q)
+        # Use the lowest underlying cost as the displayed route price.
+        if cost_idr < group["cost_idr"]:
+            group["cost_idr"] = cost_idr
+
+    for option in sorted(grouped.values(), key=lambda x: x["cost_idr"]):
+        quotes_for_price = option["quotes"]
+        q = min(quotes_for_price, key=lambda item: float(item.get("cost_idr") or item.get("price_idr") or 0))
+        stock = int(option["stock"])
+        cost_idr = float(option["cost_idr"])
+        sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        quote_id = "2Q-" + uuid.uuid4().hex[:12].upper()
+        # The selected pool remains tied to a concrete provider tier; the
+        # displayed stock is the merged quantity for that exact nominal price.
+        routes = []
+        for route in quotes_for_price:
+            try:
+                meta = json.loads(route.get("pool") or "{}")
+            except Exception:
+                meta = {}
+            if meta:
+                routes.append(meta)
+        save_otp_quote(
+            quote_id=quote_id,
+            telegram_id=user_id,
+            provider="rumahotp",
+            country=str(q.get("country") or country),
+            country_name=str(q.get("country_name") or display_country),
+            service=str(q.get("service") or service),
+            operator=str(q.get("provider_operator") or "any"),
+            pool=json.dumps({"routes": routes}, separators=(",", ":")),
+            cost_usd=cost_idr / float(KURS_DOLAR),
+            stock=stock,
+        )
+        label = (
+            f"⚡ Server 2\n"
+            f"📦 Stock: {stock}\n"
+            f"💰 {format_rupiah(sell_price)}"
+        )
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
+        available += 1
+
+    if not available:
+        keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_choose_server:{service}:{country}")])
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Pilih Negara", callback_data=f"otp_server:5sim"),
+        InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
+    ])
+
+    await query.edit_message_text(
+        "💰 <b>PILIH SERVER / HARGA</b>\n\n"
+        f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
+        f"📱 Layanan: <b>{service_label}</b>\n\n"
+        "Pilih server dan harga terlebih dahulu. Pembelian tidak dilakukan sampai tombol harga ditekan.\n"
+        "Stok dengan nominal harga yang sama sudah digabung.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -1671,10 +1826,10 @@ async def show_rumahotp_quote_page(query, service, country, page=0):
 
     if not quotes:
         await query.edit_message_text(
-            "❌ <b>Harga/provider tidak tersedia.</b>\n\n"
+            "❌ <b>Harga tidak tersedia.</b>\n\n"
             f"📱 Layanan: <b>{service_label}</b>\n"
             f"🇮🇩 Negara: <b>{country}</b>\n\n"
-            "RumahOTP belum mengembalikan daftar harga untuk pilihan ini.",
+            "Belum ada daftar harga untuk pilihan ini.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_rquotes:rumahotp:{service}:{country}:0")],
@@ -1739,7 +1894,7 @@ async def show_rumahotp_quote_page(query, service, country, page=0):
         f"🖥 Server: <b>{OTP_SERVERS['rumahotp']}</b>\n"
         f"{flag} Negara: <b>{country_name}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
-        "Semua harga/provider RumahOTP ditampilkan. Harga bot sudah termasuk margin reseller.",
+        "Semua pilihan harga yang tersedia ditampilkan. Harga bot sudah termasuk margin reseller.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1758,7 +1913,7 @@ async def show_country_page(
 
         await query.edit_message_text(
 
-            "❌ <b>Provider 5SIM tidak dapat "
+            "❌ <b>Server 1 tidak dapat "
             "dihubungi.</b>\n\n"
             "Silakan coba lagi.",
 
@@ -1982,7 +2137,7 @@ async def show_product_page(
         await query.edit_message_text(
 
             "❌ <b>Tidak ada layanan.</b>\n\n"
-            "Provider tidak mengembalikan "
+            "Server tidak mengembalikan "
             "produk untuk negara ini.",
 
             parse_mode="HTML",
@@ -2446,6 +2601,13 @@ async def process_otp_order(
         service = quote["service"]
         operator = quote.get("provider_operator") or quote.get("operator") or "any"
         provider_cost_usd = float(quote["cost_usd"])
+        quote_operators = []
+        if server == "5sim":
+            try:
+                meta = json.loads(quote.get("pool") or "{}")
+                quote_operators = meta.get("operators") or []
+            except Exception:
+                quote_operators = []
     elif server == "5sim":
         operator_info = await asyncio.to_thread(
             get_cheapest_operator,
@@ -2488,7 +2650,7 @@ async def process_otp_order(
         )
         if not quote:
             await query.edit_message_text(
-                "❌ <b>Harga/stok RumahOTP tidak tersedia.</b>\n\n"
+                "❌ <b>Harga/stok Server 2 tidak tersedia.</b>\n\n"
                 f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
                 f"📱 Layanan: <b>{service_label}</b>\n\n"
                 "Silakan refresh atau pilih negara lain.",
@@ -2570,25 +2732,41 @@ async def process_otp_order(
     # BELI NOMOR
     # -----------------------------------------------------
     if server == "5sim":
-        result = await asyncio.to_thread(buy_number, country, service, operator)
+        result = await asyncio.to_thread(
+            buy_number_any_operator,
+            country,
+            service,
+            quote_operators or [operator],
+        )
         provider_order_id = result.get("id") if result else None
         phone = result.get("phone") if result else None
         provider_error = not result or result.get("response") == "ERROR"
-        error_reason = "Pembelian nomor 5SIM gagal."
+        error_reason = "Pembelian nomor Server 1 gagal."
     elif server == "rumahotp":
-        metadata = None
+        routes = []
         if quote and quote.get("pool"):
             try:
-                metadata = json.loads(quote.get("pool") or "{}")
+                meta = json.loads(quote.get("pool") or "{}")
+                routes = meta.get("routes") or []
+                if not routes and isinstance(meta, dict):
+                    routes = [meta]
             except Exception:
-                metadata = None
-        result = await asyncio.to_thread(
-            buy_rumahotp_number,
-            country,
-            service,
-            operator,
-            metadata
-        )
+                routes = []
+        if not routes:
+            routes = [None]
+        result = None
+        for metadata in routes:
+            candidate = await asyncio.to_thread(
+                buy_rumahotp_number,
+                country,
+                service,
+                operator,
+                metadata
+            )
+            if candidate and candidate.get("response") != "ERROR" and (candidate.get("order_id") or candidate.get("id")) and (candidate.get("phone") or candidate.get("number")):
+                result = candidate
+                break
+            result = candidate
         provider_order_id = (
             result.get("order_id") or result.get("id") if result else None
         )
@@ -2599,7 +2777,7 @@ async def process_otp_order(
         provider_error = (
             not result or result.get("response") == "ERROR"
         )
-        error_reason = "Pembelian nomor RumahOTP gagal."
+        error_reason = "Pembelian nomor Server 2 gagal."
     else:
         provider_error = True
         provider_order_id = None
@@ -2615,7 +2793,7 @@ async def process_otp_order(
         except Exception as error:
             logger.exception("Refund gagal")
             await query.edit_message_text(
-                "⚠️ <b>Provider gagal dan refund "
+                "⚠️ <b>Server gagal dan refund "
                 "otomatis mengalami masalah.</b>\n\n"
                 f"Order: <code>{order_id}</code>\n"
                 f"Error: <code>{error}</code>",
@@ -2652,7 +2830,7 @@ async def process_otp_order(
             f"Respons {server} tidak lengkap."
         )
         await query.edit_message_text(
-            "❌ <b>Respons provider tidak valid.</b>\n\n"
+            "❌ <b>Respons server tidak valid.</b>\n\n"
             "Saldo sudah dikembalikan.",
             parse_mode="HTML"
         )
@@ -2734,7 +2912,7 @@ Bot menampilkan layanan OTP seperti WhatsApp, Telegram, Shopee, TikTok, Facebook
 5️⃣ <b>Pilih Negara</b>
 Pilih negara nomor yang tersedia.
 
-6️⃣ <b>Pilih layanan/provider</b>
+6️⃣ <b>Pilih layanan</b>
 Pilih layanan yang memiliki stok.
 
 7️⃣ <b>Gunakan Nomor</b>
@@ -2998,7 +3176,24 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         return
 
     # =====================================================
-    # PILIH HARGA / SERVER RUMAHOTP
+    # PILIH SERVER SETELAH MEMILIH NEGARA
+    # =====================================================
+
+    if data.startswith("otp_choose_server:"):
+        parts = data.split(":", 3)
+        if len(parts) == 4:
+            _, source_server, service, country = parts
+        elif len(parts) == 3:  # compatibility with older buttons
+            _, service, country = parts
+            source_server = "5sim"
+        else:
+            await query.answer("Data pilihan server tidak valid.", show_alert=True)
+            return
+        await show_server_choice_page(query, user_id, service, country)
+        return
+
+    # =====================================================
+    # PILIH HARGA / SERVER RUMAHOTP (kompatibilitas lama)
     # =====================================================
 
     if data.startswith("otp_rquotes:"):
@@ -3027,7 +3222,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             await query.answer("Produk/stock di harga ini sedang tidak ada.", show_alert=True)
             return
         await process_otp_order(
-            query, user_id, context, "rumahotp",
+            query, user_id, context, str(quote.get("provider") or ""),
             str(quote.get("country") or ""),
             str(quote.get("service") or ""),
             quote=quote
@@ -3057,14 +3252,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
-        await process_otp_order(
-            query,
-            user_id,
-            context,
-            server,
-            country,
-            service
-        )
+        # Compatibility with old buttons: never purchase directly from a
+        # country button; always show the server/price confirmation step.
+        await show_server_choice_page(query, user_id, service, country)
         return
 
     # =====================================================
@@ -3402,7 +3592,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                     order_id,
 
-                    "Pembelian nomor 5SIM gagal."
+                    "Pembelian nomor Server 1 gagal."
 
                 )
 
@@ -3485,7 +3675,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                 order_id,
 
-                "Respons 5SIM tidak lengkap."
+                "Respons Server 1 tidak lengkap."
 
             )
 
@@ -4474,6 +4664,264 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
 
 # =========================================================
+# ADMIN HELPERS
+# =========================================================
+
+ADMIN_PAGE_SIZE = 8
+ADMIN_PROVIDER_NAMES = {
+    "5sim": "5SIM",
+    "rumahotp": "RUMAHOTP",
+}
+ADMIN_SEARCH_USERS = set()
+ADMIN_SEARCH_DEPOSITS = set()
+
+def _admin_user_label(user):
+    name = str(user.get("first_name") or "").strip()
+    username = str(user.get("username") or "").strip()
+    uid = int(user.get("telegram_id"))
+    if username:
+        return f"{escape(name or username)} (@{escape(username)}) — {uid}"
+    return f"{escape(name or 'Tanpa nama')} — {uid}"
+
+
+async def _admin_users_page(query, page=0):
+    with get_db() as db:
+        total = int(db.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"])
+        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+        page = max(0, min(page, total_pages - 1))
+        users = db.execute(
+            """
+            SELECT telegram_id, username, first_name, balance, created_at
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (ADMIN_PAGE_SIZE, page * ADMIN_PAGE_SIZE),
+        ).fetchall()
+
+    keyboard = []
+    for user in users:
+        keyboard.append([InlineKeyboardButton(
+            _admin_user_label(user),
+            callback_data=f"admin_user:{int(user['telegram_id'])}"
+        )])
+
+    keyboard.append([
+        InlineKeyboardButton("◀️", callback_data=f"admin_users_page:{max(0, page-1)}"),
+        InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="admin_noop"),
+        InlineKeyboardButton("▶️", callback_data=f"admin_users_page:{min(total_pages-1, page+1)}"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("🔎 Cari ID User", callback_data="admin_users_search"),
+        InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+    ])
+
+    await query.edit_message_text(
+        f"👥 <b>USERS</b>\
+\
+Total user: <b>{total}</b>\
+Pilih user untuk melihat saldo, transaksi, dan riwayat deposit.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _admin_user_detail(query, telegram_id):
+    with get_db() as db:
+        user = db.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,)).fetchone()
+        if not user:
+            await query.answer("User tidak ditemukan.", show_alert=True)
+            return
+        orders = int(db.execute("SELECT COUNT(*) AS total FROM orders WHERE telegram_id = %s", (telegram_id,)).fetchone()["total"])
+        deposits = int(db.execute("SELECT COUNT(*) AS total FROM deposits WHERE telegram_id = %s", (telegram_id,)).fetchone()["total"])
+        success_deposits = int(db.execute("SELECT COUNT(*) AS total FROM deposits WHERE telegram_id = %s AND status = 'SUCCESS'", (telegram_id,)).fetchone()["total"])
+
+    name = escape(str(user.get("first_name") or "Tanpa nama"))
+    username = escape(str(user.get("username") or "-"))
+    keyboard = [
+        [
+            InlineKeyboardButton("💰 Saldo", callback_data=f"admin_user:{telegram_id}"),
+            InlineKeyboardButton("📦 Transaksi", callback_data=f"admin_user_orders:{telegram_id}"),
+        ],
+        [
+            InlineKeyboardButton("💳 Riwayat Deposit", callback_data=f"admin_user_deposits:{telegram_id}"),
+            InlineKeyboardButton("📒 Ledger", callback_data=f"admin_user_ledger:{telegram_id}"),
+        ],
+        [InlineKeyboardButton("⬅️ Daftar User", callback_data="admin_users")],
+    ]
+    await query.edit_message_text(
+        "👤 <b>DETAIL USER</b>\
+\
+"
+        f"Nama: <b>{name}</b>\
+"
+        f"Username: <b>@{username}</b>\
+"
+        f"ID: <code>{telegram_id}</code>\
+\
+"
+        f"💰 Saldo: <b>{format_rupiah(user['balance'])}</b>\
+"
+        f"📦 Total transaksi/order: <b>{orders}</b>\
+"
+        f"💳 Total deposit: <b>{deposits}</b>\
+"
+        f"✅ Deposit sukses: <b>{success_deposits}</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _admin_user_orders(query, telegram_id):
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT order_id, service, country, provider, sell_price, status, created_at
+               FROM orders WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 12""",
+            (telegram_id,),
+        ).fetchall()
+    lines = [f"📦 <b>TRANSAKSI USER {telegram_id}</b>\
+"]
+    if not rows:
+        lines.append("Belum ada transaksi.")
+    for row in rows:
+        lines.append(
+            f"• <code>{escape(str(row['order_id']))}</code> | {escape(str(row['service'] or '-'))} | "
+            f"{escape(str(row['country'] or '-'))} | {escape(str(row['provider'] or '-'))} | "
+            f"{format_rupiah(row['sell_price'])} | <b>{escape(str(row['status']))}</b>"
+        )
+    await query.edit_message_text(
+        "\
+".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Detail User", callback_data=f"admin_user:{telegram_id}")]])
+    )
+
+
+async def _admin_user_deposits(query, telegram_id):
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT deposit_id, amount, status, payment_reference, created_at, completed_at
+               FROM deposits WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 12""",
+            (telegram_id,),
+        ).fetchall()
+    lines = [f"💳 <b>RIWAYAT DEPOSIT USER {telegram_id}</b>\
+"]
+    if not rows:
+        lines.append("Belum ada deposit.")
+    for row in rows:
+        lines.append(
+            f"• <code>{escape(str(row['deposit_id']))}</code> | {format_rupiah(row['amount'])} | "
+            f"<b>{escape(str(row['status']))}</b> | {escape(str(row['created_at'])[:19])}"
+        )
+    await query.edit_message_text(
+        "\
+".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Detail User", callback_data=f"admin_user:{telegram_id}")]])
+    )
+
+
+async def _admin_user_ledger(query, telegram_id):
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT amount, balance_before, balance_after, transaction_type, reference, description, created_at
+               FROM ledger WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 15""",
+            (telegram_id,),
+        ).fetchall()
+    lines = [f"📒 <b>LEDGER USER {telegram_id}</b>\
+"]
+    if not rows:
+        lines.append("Belum ada transaksi saldo.")
+    for row in rows:
+        lines.append(
+            f"• {escape(str(row['transaction_type']))}: <b>{format_rupiah(row['amount'])}</b>\
+"
+            f"  {format_rupiah(row['balance_before'])} → {format_rupiah(row['balance_after'])} | {escape(str(row['created_at'])[:19])}"
+        )
+    await query.edit_message_text(
+        "\
+".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Detail User", callback_data=f"admin_user:{telegram_id}")]])
+    )
+
+
+async def _admin_deposits_page(query, status="ALL", page=0):
+    status = str(status or "ALL").upper()
+    allowed = {"ALL", "SUCCESS", "FAILED", "PENDING"}
+    if status not in allowed:
+        status = "ALL"
+    with get_db() as db:
+        if status == "ALL":
+            total = int(db.execute("SELECT COUNT(*) AS total FROM deposits").fetchone()["total"])
+            rows = db.execute(
+                """SELECT deposit_id, telegram_id, amount, status, created_at
+                   FROM deposits ORDER BY created_at DESC LIMIT %s OFFSET %s""",
+                (ADMIN_PAGE_SIZE, page * ADMIN_PAGE_SIZE),
+            ).fetchall()
+        else:
+            total = int(db.execute("SELECT COUNT(*) AS total FROM deposits WHERE status = %s", (status,)).fetchone()["total"])
+            rows = db.execute(
+                """SELECT deposit_id, telegram_id, amount, status, created_at
+                   FROM deposits WHERE status = %s ORDER BY created_at DESC LIMIT %s OFFSET %s""",
+                (status, ADMIN_PAGE_SIZE, page * ADMIN_PAGE_SIZE),
+            ).fetchall()
+    total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    # Requery when page was clamped.
+    if page * ADMIN_PAGE_SIZE >= total and total:
+        return await _admin_deposits_page(query, status, page)
+
+    keyboard = []
+    for row in rows:
+        keyboard.append([InlineKeyboardButton(
+            f"{format_rupiah(row['amount'])} • {row['status']} • ID {row['telegram_id']}",
+            callback_data=f"admin_user:{int(row['telegram_id'])}"
+        )])
+    keyboard.append([
+        InlineKeyboardButton("◀️", callback_data=f"admin_deposits_page:{status}:{max(0,page-1)}"),
+        InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="admin_noop"),
+        InlineKeyboardButton("▶️", callback_data=f"admin_deposits_page:{status}:{min(total_pages-1,page+1)}"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("Semua", callback_data="admin_deposits_page:ALL:0"),
+        InlineKeyboardButton("✅ Sukses", callback_data="admin_deposits_page:SUCCESS:0"),
+        InlineKeyboardButton("❌ Gagal", callback_data="admin_deposits_page:FAILED:0"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("⏳ Pending", callback_data="admin_deposits_page:PENDING:0"),
+        InlineKeyboardButton("🔎 Cari ID", callback_data="admin_deposits_search"),
+    ])
+    keyboard.append([InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")])
+    await query.edit_message_text(
+        f"💳 <b>DEPOSIT — {status}</b>\
+\
+Total: <b>{total}</b>",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _admin_deposit_search_result(query, telegram_id):
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT deposit_id, telegram_id, amount, status, created_at
+               FROM deposits WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 30""",
+            (telegram_id,),
+        ).fetchall()
+    lines = [f"🔎 <b>DEPOSIT USER {telegram_id}</b>\
+"]
+    if not rows:
+        lines.append("Tidak ada deposit untuk ID tersebut.")
+    for row in rows:
+        lines.append(f"• <code>{escape(str(row['deposit_id']))}</code> | {format_rupiah(row['amount'])} | <b>{row['status']}</b> | {escape(str(row['created_at'])[:19])}")
+    await query.edit_message_text(
+        "\
+".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Deposit", callback_data="admin_deposits")],
+            [InlineKeyboardButton("👤 Detail User", callback_data=f"admin_user:{telegram_id}")],
+        ])
+    )
+
+
+# =========================================================
 # ADMIN CALLBACK
 # =========================================================
 
@@ -4493,77 +4941,73 @@ async def admin_callback(
     ]
 
     if query.data == "admin_users":
+        await _admin_users_page(query, 0)
 
-        with get_db() as db:
+    elif query.data.startswith("admin_users_page:"):
+        try:
+            page = int(query.data.split(":", 1)[1])
+        except Exception:
+            page = 0
+        await _admin_users_page(query, page)
 
-            total = db.execute(
-
-                """
-                SELECT COUNT(*) AS total
-                FROM users
-                """
-
-            ).fetchone()["total"]
-
+    elif query.data == "admin_users_search":
+        ADMIN_SEARCH_USERS.add(query.from_user.id)
         await query.edit_message_text(
-
-            f"👥 <b>USERS</b>\n\n"
-            f"Total user: <b>{total}</b>",
-
+            "🔎 <b>CARI USER BERDASARKAN ID</b>\n\nKetik Telegram ID user yang ingin dicari.",
             parse_mode="HTML",
-
-            reply_markup=InlineKeyboardMarkup(
-                back
-            )
-
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="admin_users")]])
         )
 
+    elif query.data.startswith("admin_user:"):
+        try:
+            telegram_id = int(query.data.split(":", 1)[1])
+        except Exception:
+            await query.answer("ID user tidak valid.", show_alert=True)
+            return
+        await _admin_user_detail(query, telegram_id)
+
+    elif query.data.startswith("admin_user_orders:"):
+        try:
+            telegram_id = int(query.data.split(":", 1)[1])
+        except Exception:
+            await query.answer("ID user tidak valid.", show_alert=True)
+            return
+        await _admin_user_orders(query, telegram_id)
+
+    elif query.data.startswith("admin_user_deposits:"):
+        try:
+            telegram_id = int(query.data.split(":", 1)[1])
+        except Exception:
+            await query.answer("ID user tidak valid.", show_alert=True)
+            return
+        await _admin_user_deposits(query, telegram_id)
+
+    elif query.data.startswith("admin_user_ledger:"):
+        try:
+            telegram_id = int(query.data.split(":", 1)[1])
+        except Exception:
+            await query.answer("ID user tidak valid.", show_alert=True)
+            return
+        await _admin_user_ledger(query, telegram_id)
+
     elif query.data == "admin_deposits":
+        await _admin_deposits_page(query, "ALL", 0)
 
-        with get_db() as db:
+    elif query.data.startswith("admin_deposits_page:"):
+        parts = query.data.split(":", 2)
+        status = parts[1] if len(parts) > 1 else "ALL"
+        try:
+            page = int(parts[2]) if len(parts) > 2 else 0
+        except Exception:
+            page = 0
+        await _admin_deposits_page(query, status, page)
 
-            total = db.execute(
-
-                """
-                SELECT COUNT(*) AS total
-                FROM deposits
-                """
-
-            ).fetchone()["total"]
-
-            pending = db.execute(
-
-                """
-                SELECT COUNT(*) AS total
-                FROM deposits
-                WHERE status = 'PENDING'
-                """
-
-            ).fetchone()["total"]
-
-            success = db.execute(
-
-                """
-                SELECT COUNT(*) AS total
-                FROM deposits
-                WHERE status = 'SUCCESS'
-                """
-
-            ).fetchone()["total"]
-
+    elif query.data == "admin_deposits_search":
+        ADMIN_SEARCH_DEPOSITS.add(query.from_user.id)
         await query.edit_message_text(
-
-            f"💳 <b>DEPOSIT</b>\n\n"
-            f"Total transaksi: <b>{total}</b>\n"
-            f"Pending: <b>{pending}</b>\n"
-            f"Success: <b>{success}</b>",
-
+            "🔎 <b>CARI DEPOSIT BERDASARKAN ID USER</b>\n\nKetik Telegram ID user.",
             parse_mode="HTML",
-
-            reply_markup=InlineKeyboardMarkup(
-                back
-            )
-
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="admin_deposits")]])
         )
 
     elif query.data == "admin_orders":
@@ -4643,8 +5087,8 @@ async def admin_callback(
 
         await query.edit_message_text(
             "💰 <b>PROVIDER STATUS</b>\n\n"
-            f"⚡ <b>Server 1</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
-            f"⚡ <b>Server 2</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
+            f"⚡ <b>Server 1 — {ADMIN_PROVIDER_NAMES['5sim']}</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
+            f"⚡ <b>Server 2 — {ADMIN_PROVIDER_NAMES['rumahotp']}</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
             f"💱 Kurs: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
             f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
             parse_mode="HTML",
@@ -4718,6 +5162,9 @@ async def admin_callback(
 
         )
 
+    elif query.data == "admin_noop":
+        await query.answer()
+
     elif query.data == "admin_home":
 
         await query.edit_message_text(
@@ -4768,7 +5215,20 @@ async def button_handler(
 
     }
 
-    if query.data in admin_callbacks:
+    is_extended_admin_callback = (
+        query.data in admin_callbacks
+        or query.data == "admin_noop"
+        or query.data.startswith("admin_users_page:")
+        or query.data.startswith("admin_user:")
+        or query.data.startswith("admin_user_orders:")
+        or query.data.startswith("admin_user_deposits:")
+        or query.data.startswith("admin_user_ledger:")
+        or query.data.startswith("admin_deposits_page:")
+        or query.data == "admin_users_search"
+        or query.data == "admin_deposits_search"
+    )
+
+    if is_extended_admin_callback:
 
         if not is_admin(
             user_id
@@ -4831,6 +5291,53 @@ async def text_handler(
 
         return
 
+    # Admin search: user ID
+    if is_admin(update.effective_user.id):
+        uid = update.effective_user.id
+        text = update.message.text.strip()
+        if uid in ADMIN_SEARCH_USERS:
+            ADMIN_SEARCH_USERS.discard(uid)
+            try:
+                target_id = int(text)
+            except ValueError:
+                await update.message.reply_text("❌ Telegram ID harus berupa angka.")
+                return
+            # Render through a lightweight synthetic callback-free message.
+            with get_db() as db:
+                user = db.execute("SELECT * FROM users WHERE telegram_id = %s", (target_id,)).fetchone()
+            if not user:
+                await update.message.reply_text("❌ User dengan ID tersebut tidak ditemukan.")
+                return
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Buka Detail User", callback_data=f"admin_user:{target_id}")], [InlineKeyboardButton("⬅️ Users", callback_data="admin_users")]])
+            await update.message.reply_text(
+                f"🔎 User ditemukan: <b>{escape(str(user.get('first_name') or 'Tanpa nama'))}</b>\nID: <code>{target_id}</code>\nSaldo: <b>{format_rupiah(user['balance'])}</b>",
+                parse_mode="HTML", reply_markup=keyboard
+            )
+            return
+        if uid in ADMIN_SEARCH_DEPOSITS:
+            ADMIN_SEARCH_DEPOSITS.discard(uid)
+            try:
+                target_id = int(text)
+            except ValueError:
+                await update.message.reply_text("❌ Telegram ID harus berupa angka.")
+                return
+            with get_db() as db:
+                rows = db.execute(
+                    """SELECT deposit_id, amount, status, created_at FROM deposits WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 30""",
+                    (target_id,),
+                ).fetchall()
+            lines = [f"🔎 <b>DEPOSIT USER {target_id}</b>"]
+            if not rows:
+                lines.append("\nTidak ada deposit untuk ID tersebut.")
+            else:
+                for row in rows:
+                    lines.append(f"\n• <code>{escape(str(row['deposit_id']))}</code> | {format_rupiah(row['amount'])} | <b>{row['status']}</b> | {escape(str(row['created_at'])[:19])}")
+            await update.message.reply_text(
+                "".join(lines), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Deposit", callback_data="admin_deposits")]])
+            )
+            return
+
     # Search negara dari menu pemilihan negara.
     if context.user_data.get("waiting_otp_country_search", False):
         context.user_data["waiting_otp_country_search"] = False
@@ -4882,10 +5389,10 @@ async def text_handler(
                     live_cost = float(item.get("cost_idr") or item.get("price_idr") or 0)
                     price = int(round(live_cost * (1 + PROFIT_PERCENT / 100) / 100) * 100) if live_cost > 0 else 0
                     label = f"{country_flag(item.get('iso_code') or name)} {name} | mulai {format_rupiah(price)} | 📦 {stock}"
-                    cb = f"otp_rquotes:{server}:{service}:{country}:0"
+                    cb = f"otp_choose_server:{server}:{service}:{country}"
                 else:
                     label = f"{country_flag(item.get('iso_code') or name)} {name} | 💰 {format_rupiah(price)} | 📦 {stock}"
-                    cb = f"otp_buy:{server}:{service}:{country}"
+                    cb = f"otp_choose_server:{server}:{service}:{country}"
             keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
 
         back_cb = "order" if server == "legacy" else f"otp_service_countries:{server}:{service}:0"

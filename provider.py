@@ -265,6 +265,29 @@ def get_prices(
             )
             return {}
 
+        # The documented /guest/prices endpoint is shaped as:
+        # {country: {product: {operator: {cost, count, ...}}}}.
+        # It accepts a country filter, but product filtering is done here
+        # client-side. The previous code sent ?product=... and then treated
+        # the unfiltered matrix as if it were already product-filtered, which
+        # made WhatsApp/other services appear to have zero stock.
+        if product:
+            target = str(product).strip().lower()
+            filtered = {}
+            for country_name, country_data in data.items():
+                if not isinstance(country_data, dict):
+                    continue
+                matched_key = None
+                for product_name in country_data.keys():
+                    if str(product_name).strip().lower() == target:
+                        matched_key = product_name
+                        break
+                if matched_key is not None:
+                    filtered[country_name] = {
+                        matched_key: country_data[matched_key]
+                    }
+            return filtered
+
         return data
 
     except Exception as error:
@@ -556,3 +579,85 @@ def cancel_number(
             "message":
                 str(error)
         }
+
+
+# =========================================================
+# GROUP PRICE/STOCK OPTIONS
+# =========================================================
+
+def get_price_options(country, product):
+    """Return 5SIM price tiers with stock merged across operators.
+
+    Multiple operators can publish the exact same provider price. For the
+    user-facing bot we merge those quantities into one tier while retaining
+    the operator list so checkout can try the available operators in turn.
+    """
+    data = get_prices(country=country, product=product)
+    if not isinstance(data, dict):
+        return []
+
+    country_data = data.get(country)
+    if not isinstance(country_data, dict):
+        target_country = str(country).strip().lower()
+        for key, value in data.items():
+            if str(key).strip().lower() == target_country:
+                country_data = value
+                break
+    if not isinstance(country_data, dict):
+        return []
+
+    product_data = country_data.get(product)
+    if not isinstance(product_data, dict):
+        target_product = str(product).strip().lower()
+        for key, value in country_data.items():
+            if str(key).strip().lower() == target_product:
+                product_data = value
+                break
+    if not isinstance(product_data, dict):
+        return []
+
+    groups = {}
+    for operator, info in product_data.items():
+        if not isinstance(info, dict):
+            continue
+        try:
+            cost = float(info.get("cost") or 0)
+            count = int(info.get("count") or 0)
+        except Exception:
+            continue
+        if cost <= 0:
+            continue
+        # Normalize tiny floating-point differences so equal displayed
+        # prices are merged reliably.
+        key = round(cost, 6)
+        group = groups.setdefault(key, {
+            "cost": cost,
+            "stock": 0,
+            "operators": [],
+        })
+        group["stock"] += max(count, 0)
+        if str(operator).strip():
+            group["operators"].append(str(operator).strip())
+
+    result = list(groups.values())
+    result.sort(key=lambda item: item["cost"])
+    return result
+
+
+def buy_number_any_operator(country, product, operators):
+    """Try the merged 5SIM operator tier without exposing operators to users."""
+    operators = [str(x).strip() for x in (operators or []) if str(x).strip()]
+    if not operators:
+        operators = ["any"]
+
+    last_error = None
+    for operator in operators:
+        result = buy_number(country, product, operator)
+        if result and result.get("response") != "ERROR" and result.get("id") and result.get("phone"):
+            return result
+        last_error = result
+
+    return last_error or {
+        "response": "ERROR",
+        "message": "Nomor tidak tersedia."
+    }
