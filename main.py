@@ -1852,6 +1852,21 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
         keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
         available += 1
 
+    # Sort ALL offer buttons globally by selling price (cheapest first),
+    # regardless of whether the offer came from Server 1 or Server 2.
+    # Offer buttons are the first `available` rows; navigation buttons are
+    # appended afterwards, so this does not disturb pagination/back controls.
+    def _offer_price(row):
+        try:
+            text = row[0].text if row and row[0] else ""
+            token = text.split("💰", 1)[1].split("•", 1)[0].strip()
+            return int(token.replace("Rp", "").replace(".", "").replace(",", ""))
+        except Exception:
+            return 10**18
+
+    if available > 1:
+        keyboard[:available] = sorted(keyboard[:available], key=_offer_price)
+
     if not available:
         keyboard.append([
             InlineKeyboardButton(
