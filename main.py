@@ -1959,7 +1959,12 @@ async def show_rumahotp_quote_page(query, service, country, page=0):
         quotes = []
 
     quotes = [q for q in quotes if float(q.get("cost_idr") or 0) > 0]
-    quotes.sort(key=lambda q: (float(q.get("cost_idr") or 0), str(q.get("provider_id") or "")))
+    # Always sort by the actual displayed selling price, cheapest first.
+    quotes.sort(key=lambda q: (
+        float(q.get("cost_idr") or 0) * (1 + PROFIT_PERCENT / 100),
+        str(q.get("provider_id") or ""),
+        str(q.get("server_id") or ""),
+    ))
 
     if not quotes:
         await query.edit_message_text(

@@ -8,6 +8,7 @@ import logging
 import requests
 import time
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import RUMAHOTP_API_KEY, KURS_DOLAR
 
@@ -270,38 +271,89 @@ def get_quotes_for_country(country, service):
 
 
 def get_operator_quotes(country, service):
-    """Return live operator-specific quotes for one country/service."""
-    found=find_service(service)
-    if not found: return []
-    sid=found.get("id")
-    item=find_country(country, sid)
-    if not item: return []
-    out=[]
+    """Return live operator-specific quotes for one country/service.
+
+    Operator endpoints for multiple price tiers are independent. Resolve
+    uncached tiers in parallel so the Telegram callback does not wait for a
+    long chain of sequential HTTP requests.
+    """
+    found = find_service(service)
+    if not found:
+        return []
+    sid = found.get("id")
+    item = find_country(country, sid)
+    if not item:
+        return []
+
+    rows = []
     for row in item.get("pricelist") or []:
-        if not isinstance(row,dict): continue
+        if not isinstance(row, dict):
+            continue
         provider_id = row.get("provider_id")
         price = float(row.get("price") or row.get("rate") or 0)
         stock = int(float(row.get("stock") or 0))
         if provider_id is None or price <= 0 or stock <= 0:
             continue
+        rows.append((row, provider_id, price, stock))
+
+    def resolve(row_info):
+        row, provider_id, price, stock = row_info
         cache_key = f"operators:{str(item.get('name')).lower()}:{provider_id}"
         operators = _cached(cache_key)
         if operators is None:
-            ops=_get("/v2/operators", {"country":item.get("name"),"provider_id":provider_id})
-            operators=ops.get("data") if ops.get("success") and isinstance(ops.get("data"),list) else []
+            ops = _get("/v2/operators", {
+                "country": item.get("name"),
+                "provider_id": provider_id,
+            })
+            operators = ops.get("data") if ops.get("success") and isinstance(ops.get("data"), list) else []
             _put_cache(cache_key, operators)
-        for op in operators:
-            opid=op.get("id"); name=str(op.get("name") or "any").strip()
-            if opid is None or not name: continue
-            # Keep an explicit operator only; AUTO/any stays available via the catch-all.
-            key=name.lower().replace("_"," ").strip()
-            if key in {"any","all","auto","automatic"}: continue
+        return row, provider_id, price, stock, operators
+
+    resolved = []
+    if len(rows) > 1:
+        with ThreadPoolExecutor(max_workers=min(6, len(rows))) as executor:
+            futures = [executor.submit(resolve, row_info) for row_info in rows]
+            for future in as_completed(futures):
+                try:
+                    resolved.append(future.result())
+                except Exception:
+                    logger.exception("[RUMAHOTP] operator lookup failed")
+    else:
+        for row_info in rows:
+            try:
+                resolved.append(resolve(row_info))
+            except Exception:
+                logger.exception("[RUMAHOTP] operator lookup failed")
+
+    out = []
+    for row, provider_id, price, stock, operators in resolved:
+        for op in operators or []:
+            opid = op.get("id")
+            name = str(op.get("name") or "any").strip()
+            if opid is None or not name:
+                continue
+            key = name.lower().replace("_", " ").strip()
+            if key in {"any", "all", "auto", "automatic"}:
+                continue
             out.append({
-                "provider":"rumahotp", "country":str(item.get("number_id") or item.get("name")),
-                "country_name":str(item.get("name") or country), "service":str(sid), "service_name":str(service),
-                "operator":name, "provider_operator":name,
-                "pool":json.dumps({"number_id":item.get("number_id"),"provider_id":provider_id,"operator_id":opid}, separators=(",",":")),
-                "cost_usd":price/float(KURS_DOLAR), "cost_idr":price, "stock":stock,
+                "provider": "rumahotp",
+                "country": str(item.get("number_id") or item.get("name")),
+                "country_name": str(item.get("name") or country),
+                "service": str(sid),
+                "service_name": str(service),
+                "operator": name,
+                "provider_operator": name,
+                "provider_id": str(provider_id),
+                "server_id": str(row.get("server_id") or "2"),
+                "pool": json.dumps({
+                    "number_id": item.get("number_id"),
+                    "provider_id": provider_id,
+                    "operator_id": opid,
+                    "server_id": row.get("server_id"),
+                }, separators=(",", ":")),
+                "cost_usd": price / float(KURS_DOLAR),
+                "cost_idr": price,
+                "stock": stock,
             })
     return out
 

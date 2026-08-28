@@ -1,4 +1,6 @@
 import requests
+import time
+import threading
 
 from config import (
     FIVESIM_API_KEY,
@@ -12,6 +14,28 @@ from config import (
 # =========================================================
 
 BASE_URL = "https://5sim.net/v1"
+
+# Short-lived caches reduce repeated catalog calls when users navigate
+# service -> country -> price. Provider data is refreshed frequently so
+# price/stock does not become stale for long.
+_CACHE_TTL = 15.0
+_price_cache = {}
+_price_cache_lock = threading.Lock()
+
+def _cached_prices(key):
+    with _price_cache_lock:
+        item = _price_cache.get(key)
+        if item and time.monotonic() - item[0] < _CACHE_TTL:
+            return item[1]
+        if item:
+            _price_cache.pop(key, None)
+    return None
+
+def _put_prices_cache(key, value):
+    with _price_cache_lock:
+        _price_cache[key] = (time.monotonic(), value)
+    return value
+
 
 
 # =========================================================
@@ -232,6 +256,11 @@ def get_prices(
     instead of silently turning an API failure into "stock empty".
     """
     try:
+        cache_key = (str(country or "").strip().lower(), str(product or "").strip().lower())
+        cached = _cached_prices(cache_key)
+        if cached is not None:
+            return cached
+
         params = {}
 
         if country:
@@ -312,9 +341,9 @@ def get_prices(
                                 str(product_key): country_data
                             }
 
-            return normalized
+            return _put_prices_cache(cache_key, normalized)
 
-        return data
+        return _put_prices_cache(cache_key, data)
 
     except Exception as error:
         print(f"[5SIM] prices request error: {error}")
