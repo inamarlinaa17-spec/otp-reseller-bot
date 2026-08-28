@@ -699,6 +699,56 @@ def get_price_options(country, product):
     return result
 
 
+def get_price_options_for_operator(country, product, operator):
+    """Return 5SIM price tiers for one exact operator, cheapest first."""
+    data = get_prices(country=country, product=product)
+    if not isinstance(data, dict):
+        return []
+
+    country_data = data.get(country)
+    if not isinstance(country_data, dict):
+        target_country = str(country).strip().lower()
+        for key, value in data.items():
+            if str(key).strip().lower() == target_country:
+                country_data = value
+                break
+    if not isinstance(country_data, dict):
+        return []
+
+    product_data = country_data.get(product)
+    if not isinstance(product_data, dict):
+        target_product = str(product).strip().lower()
+        for key, value in country_data.items():
+            if str(key).strip().lower() == target_product:
+                product_data = value
+                break
+    if not isinstance(product_data, dict):
+        return []
+
+    target = str(operator or '').strip().lower()
+    rows = []
+    for op_name, info in product_data.items():
+        if str(op_name).strip().lower() != target:
+            continue
+        if not isinstance(info, dict):
+            continue
+        try:
+            cost = float(info.get('cost') or 0)
+            count = int(info.get('count') or 0)
+        except Exception:
+            continue
+        if cost <= 0:
+            continue
+        rows.append({
+            'cost': cost,
+            'stock': max(count, 0),
+            'operators': [str(op_name).strip()],
+        })
+
+    rows.sort(key=lambda item: item['cost'])
+    return rows
+
+
 def buy_number_any_operator(country, product, operators):
     """Try the merged 5SIM operator tier without exposing operators to users."""
     operators = [str(x).strip() for x in (operators or []) if str(x).strip()]
