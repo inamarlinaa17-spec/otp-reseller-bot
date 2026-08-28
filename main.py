@@ -5016,7 +5016,8 @@ async def _admin_deposit_search_result(query, telegram_id):
 # =========================================================
 
 async def admin_callback(
-    query
+    query,
+    context
 ):
 
     back = [
@@ -5049,6 +5050,7 @@ async def admin_callback(
         )
 
     elif query.data.startswith("admin_user:"):
+        context.user_data.pop("admin_balance_target", None)
         try:
             telegram_id = int(query.data.split(":", 1)[1])
         except Exception:
@@ -5071,7 +5073,7 @@ async def admin_callback(
             await query.answer("User tidak ditemukan.", show_alert=True)
             return
         ADMIN_SEARCH_USERS.discard(query.from_user.id)
-        query.application.bot_data.setdefault("admin_balance_targets", {})[query.from_user.id] = telegram_id
+        context.user_data["admin_balance_target"] = telegram_id
         await query.edit_message_text(
             "➕ <b>TAMBAH SALDO USER</b>\n\n"
             f"👤 User: <b>{escape(str(user.get('first_name') or user.get('username') or '-'))}</b>\n"
@@ -5373,7 +5375,8 @@ async def button_handler(
             return
 
         await admin_callback(
-            query
+            query,
+            context
         )
 
         return
@@ -5417,16 +5420,16 @@ async def text_handler(
     if is_admin(update.effective_user.id):
         uid = update.effective_user.id
         text = update.message.text.strip()
-        balance_targets = context.application.bot_data.setdefault("admin_balance_targets", {})
-        if uid in balance_targets:
-            target_id = int(balance_targets.pop(uid))
+        target_value = context.user_data.pop("admin_balance_target", None)
+        if target_value is not None:
+            target_id = int(target_value)
             try:
                 normalized = text.replace(".", "").replace(",", "").replace("Rp", "").replace("rp", "").strip()
                 amount = int(normalized)
                 if amount <= 0:
                     raise ValueError
             except Exception:
-                balance_targets[uid] = target_id
+                context.user_data["admin_balance_target"] = target_id
                 await update.message.reply_text(
                     "❌ Nominal tidak valid. Masukkan angka bulat, contoh: <code>10000</code>.",
                     parse_mode="HTML",
