@@ -99,6 +99,7 @@ from rumahotp import (
     find_service as find_rumahotp_service,
     get_all_quotes as get_rumahotp_all_quotes,
     get_quotes_for_country as get_rumahotp_quotes_for_country,
+    get_operator_quotes as get_rumahotp_operator_quotes,
     get_cheapest_quote as get_rumahotp_cheapest_quote,
     buy_number as buy_rumahotp_number,
     get_sms as get_rumahotp_sms,
@@ -1719,161 +1720,143 @@ async def show_service_country_page(
 
 
 async def show_server_choice_page(query, user_id, service, country, source_server="5sim"):
-    """Show both servers after country selection; buying only happens after a server/price is chosen.
+    """Show price/server choices only from the server the user selected.
 
-    source_server is the server whose country page the user came from.  It is
-    preserved so the Back button returns to that exact service/country list
-    instead of always jumping to Server 1.
+    Server 1 is isolated to 5SIM. Server 2 is isolated to RumahOTP.
+    We never mix provider offers here; this keeps the selected server context
+    intact while still sorting its own offers from cheapest to most expensive.
     """
     if source_server not in OTP_SERVERS:
         source_server = "5sim"
+
     service_label = (
         rumah_service_label(service)
         if source_server == "rumahotp"
         else dict(OTP_SERVICES).get(service, str(service).title())
     )
     display_country = str(country)
-    server1_service = canonical_5sim_service(service)
 
-    async def five_options():
-        try:
-            return await asyncio.to_thread(get_price_options, country, server1_service)
-        except Exception:
-            logger.exception("5SIM offer lookup failed")
-            return []
-
-    async def rumah_options():
-        try:
-            return await asyncio.to_thread(get_rumahotp_quotes_for_country, country, service)
-        except Exception:
-            logger.exception("Server 2 offer lookup failed")
-            return []
-
-    five, rumah = await asyncio.gather(five_options(), rumah_options())
     keyboard = []
     available = 0
 
-    # Server 1: same nominal provider price = merged stock across operators.
-    for option in five or []:
-        stock = int(option.get("stock") or 0)
-        if stock <= 0:
-            continue
-        cost_usd = float(option.get("cost") or 0)
-        sell_price = hitung_harga_jual(cost_usd)
-        quote_id = "5Q-" + uuid.uuid4().hex[:12].upper()
-        save_otp_quote(
-            quote_id=quote_id,
-            telegram_id=user_id,
-            provider="5sim",
-            country=country,
-            country_name=display_country,
-            service=server1_service,
-            operator=(option.get("operators") or ["any"])[0],
-            pool=json.dumps({"operators": option.get("operators") or ["any"]}, separators=(",", ":")),
-            cost_usd=cost_usd,
-            stock=stock,
-        )
-        operators = [str(x).strip() for x in (option.get("operators") or []) if str(x).strip()]
-        if len(operators) == 1:
-            operator_label = f"👤 {operators[0]}"
-        elif operators:
-            operator_label = f"👤 {len(operators)} operator"
-        else:
+    if source_server == "5sim":
+        server_service = canonical_5sim_service(service)
+        try:
+            offers = await asyncio.to_thread(get_price_options, country, server_service)
+        except Exception:
+            logger.exception("5SIM offer lookup failed")
+            offers = []
+
+        # get_price_options already merges equal provider prices across all
+        # 5SIM operators and retains the operator list for checkout.
+        offers = sorted(offers or [], key=lambda item: float(item.get("cost") or 0))
+
+        for option in offers:
+            stock = int(option.get("stock") or 0)
+            if stock <= 0:
+                continue
+            cost_usd = float(option.get("cost") or 0)
+            sell_price = hitung_harga_jual(cost_usd)
+            operators = [str(x).strip() for x in (option.get("operators") or []) if str(x).strip()]
+            quote_id = "5Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id,
+                telegram_id=user_id,
+                provider="5sim",
+                country=country,
+                country_name=display_country,
+                service=server_service,
+                operator=operators[0] if operators else "any",
+                pool=json.dumps({"operators": operators}, separators=(",", ":")),
+                cost_usd=cost_usd,
+                stock=stock,
+            )
             operator_label = ""
-        label = (
-            f"💰 {format_rupiah(sell_price)} • 📦 {stock}"
-            + (f" • {operator_label}" if operator_label else "")
-            + "\n⚡ Server 1"
-        )
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
-        available += 1
+            if len(operators) == 1:
+                operator_label = f" • 👤 {operators[0]}"
+            elif operators:
+                operator_label = f" • 👤 {len(operators)} operator"
+            label = (
+                f"💰 {format_rupiah(sell_price)} • 📦 {stock}{operator_label}\n"
+                "⚡ Server 1"
+            )
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
+            available += 1
 
-    # Server 2: same nominal price = merged stock across its price tiers.
-    grouped = {}
-    for q in rumah or []:
+    elif source_server == "rumahotp":
         try:
-            cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
-            stock = int(q.get("stock") or 0)
+            quotes = await asyncio.to_thread(get_rumahotp_quotes_for_country, country, service)
         except Exception:
-            continue
-        if cost_idr <= 0 or stock <= 0:
-            continue
-        sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
-        key = sell_price
-        group = grouped.setdefault(key, {"cost_idr": cost_idr, "stock": 0, "quotes": []})
-        group["stock"] += stock
-        group["quotes"].append(q)
-        # Use the lowest underlying cost as the displayed route price.
-        if cost_idr < group["cost_idr"]:
-            group["cost_idr"] = cost_idr
+            logger.exception("RumahOTP offer lookup failed")
+            quotes = []
 
-    for option in sorted(grouped.values(), key=lambda x: x["cost_idr"]):
-        quotes_for_price = option["quotes"]
-        q = min(quotes_for_price, key=lambda item: float(item.get("cost_idr") or item.get("price_idr") or 0))
-        stock = int(option["stock"])
-        cost_idr = float(option["cost_idr"])
-        sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
-        quote_id = "2Q-" + uuid.uuid4().hex[:12].upper()
-        # The selected pool remains tied to a concrete provider tier; the
-        # displayed stock is the merged quantity for that exact nominal price.
-        routes = []
-        for route in quotes_for_price:
+        # Group by the displayed selling price. Stock from equal selling-price
+        # tiers is merged, while all underlying routes are retained in the
+        # quote pool for checkout.
+        grouped = {}
+        for q in quotes or []:
             try:
-                meta = json.loads(route.get("pool") or "{}")
+                cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
+                stock = int(q.get("stock") or 0)
             except Exception:
-                meta = {}
-            if meta:
-                routes.append(meta)
-        save_otp_quote(
-            quote_id=quote_id,
-            telegram_id=user_id,
-            provider="rumahotp",
-            country=str(q.get("country") or country),
-            country_name=str(q.get("country_name") or display_country),
-            service=str(q.get("service") or service),
-            operator=str(q.get("provider_operator") or "any"),
-            pool=json.dumps({"routes": routes}, separators=(",", ":")),
-            cost_usd=cost_idr / float(KURS_DOLAR),
-            stock=stock,
-        )
-        provider_operator = str(
-            q.get("provider_operator") or ""
-        ).strip()
-        operator_label = (
-            f"👤 {provider_operator}"
-            if provider_operator and provider_operator.lower() not in {"any", "-"}
-            else ""
-        )
-        label = (
-            f"💰 {format_rupiah(sell_price)} • 📦 {stock}"
-            + (f" • {operator_label}" if operator_label else "")
-            + "\n⚡ Server 2"
-        )
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
-        available += 1
+                continue
+            if cost_idr <= 0 or stock <= 0:
+                continue
+            sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+            group = grouped.setdefault(sell_price, {"cost_idr": cost_idr, "stock": 0, "quotes": []})
+            group["stock"] += stock
+            group["quotes"].append(q)
+            group["cost_idr"] = min(group["cost_idr"], cost_idr)
 
-    # Sort ALL offer buttons globally by selling price (cheapest first),
-    # regardless of whether the offer came from Server 1 or Server 2.
-    # Offer buttons are the first `available` rows; navigation buttons are
-    # appended afterwards, so this does not disturb pagination/back controls.
-    def _offer_price(row):
-        try:
-            text = row[0].text if row and row[0] else ""
-            token = text.split("💰", 1)[1].split("•", 1)[0].strip()
-            return int(token.replace("Rp", "").replace(".", "").replace(",", ""))
-        except Exception:
-            return 10**18
+        for sell_price in sorted(grouped):
+            group = grouped[sell_price]
+            quotes_for_price = group["quotes"]
+            q = min(quotes_for_price, key=lambda item: float(item.get("cost_idr") or item.get("price_idr") or 0))
+            stock = int(group["stock"])
+            cost_idr = float(group["cost_idr"])
+            routes = []
+            operators = []
+            for route in quotes_for_price:
+                try:
+                    meta = json.loads(route.get("pool") or "{}")
+                except Exception:
+                    meta = {}
+                if meta:
+                    routes.append(meta)
+                op = str(route.get("provider_operator") or route.get("operator") or "").strip()
+                if op and op.lower() not in {"any", "-"} and op not in operators:
+                    operators.append(op)
 
-    if available > 1:
-        keyboard[:available] = sorted(keyboard[:available], key=_offer_price)
+            quote_id = "2Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id,
+                telegram_id=user_id,
+                provider="rumahotp",
+                country=str(q.get("country") or country),
+                country_name=str(q.get("country_name") or display_country),
+                service=str(q.get("service") or service),
+                operator=operators[0] if operators else "any",
+                pool=json.dumps({"routes": routes}, separators=(",", ":")),
+                cost_usd=cost_idr / float(KURS_DOLAR),
+                stock=stock,
+            )
+            operator_label = ""
+            if operators:
+                operator_label = " • 👤 " + "/".join(operators[:5])
+                if len(operators) > 5:
+                    operator_label += f" +{len(operators)-5}"
+            label = (
+                f"💰 {format_rupiah(sell_price)} • 📦 {stock}{operator_label}\n"
+                "⚡ Server 2"
+            )
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
+            available += 1
 
     if not available:
-        keyboard.append([
-            InlineKeyboardButton(
-                "🔄 Refresh",
-                callback_data=f"otp_choose_server:{source_server}:{service}:{country}"
-            )
-        ])
+        keyboard.append([InlineKeyboardButton(
+            "🔄 Refresh",
+            callback_data=f"otp_choose_server:{source_server}:{service}:{country}"
+        )])
 
     keyboard.append([
         InlineKeyboardButton(
@@ -1884,10 +1867,81 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
     ])
 
     await query.edit_message_text(
-        "💰 <b>PILIH SERVER / HARGA</b>\n\n"
+        "💰 <b>PILIH HARGA / SERVER</b>\n\n"
         f"{country_flag(display_country)} Negara: <b>{display_country}</b>\n"
         f"📱 Layanan: <b>{service_label}</b>\n\n"
-        "Pilih harga/server untuk melanjutkan pembelian.",
+        "Harga diurutkan dari yang termurah. Pilih untuk melanjutkan pembelian.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def show_rumahotp_operator_page(query, user_id, quote):
+    """Show real RumahOTP mobile operators for the selected price tier."""
+    service = str(quote.get("service") or "")
+    country = str(quote.get("country") or "")
+    country_name = str(quote.get("country_name") or country)
+    base_cost_idr = float(quote.get("cost_usd") or 0) * float(KURS_DOLAR)
+    target_sell = int(round(base_cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+
+    try:
+        operator_quotes = await asyncio.wait_for(
+            asyncio.to_thread(get_rumahotp_operator_quotes, country, service),
+            timeout=20,
+        )
+    except Exception:
+        logger.exception("RumahOTP operator lookup failed: service=%s country=%s", service, country)
+        operator_quotes = []
+
+    # Keep only operator routes belonging to the selected displayed price.
+    matching = []
+    seen = set()
+    for item in operator_quotes or []:
+        try:
+            cost_idr = float(item.get("cost_idr") or item.get("price_idr") or 0)
+        except Exception:
+            continue
+        if cost_idr <= 0:
+            continue
+        sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        name = str(item.get("provider_operator") or item.get("operator") or "").strip()
+        if sell != target_sell or not name or name.lower() in {"any", "all", "auto", "automatic", "-"}:
+            continue
+        key = (name.lower(), str(item.get("provider_id") or ""), str(item.get("pool") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        matching.append(item)
+
+    matching.sort(key=lambda x: (str(x.get("provider_operator") or x.get("operator") or "").lower(), float(x.get("cost_idr") or 0)))
+
+    keyboard = []
+    for idx, item in enumerate(matching):
+        name = str(item.get("provider_operator") or item.get("operator") or "Operator").strip()
+        keyboard.append([InlineKeyboardButton(
+            f"👤 {name}",
+            callback_data=f"otp_roperator:{quote['quote_id']}:{idx}",
+        )])
+
+    if not matching:
+        # If the operator endpoint is unavailable, keep the original quote
+        # usable instead of blocking checkout completely.
+        keyboard.append([InlineKeyboardButton(
+            "🎲 Semua Operator / Acak",
+            callback_data=f"otp_quote:{quote['quote_id']}",
+        )])
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Pilih Harga", callback_data=f"otp_quote_back:{quote['quote_id']}"),
+        InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
+    ])
+
+    await query.edit_message_text(
+        "📡 <b>PILIH OPERATOR</b>\n\n"
+        f"{country_flag(country_name)} Negara: <b>{escape(country_name)}</b>\n"
+        f"📱 Layanan: <b>{escape(rumah_service_label(service))}</b>\n"
+        f"💰 Harga: <b>{format_rupiah(target_sell)}</b>\n\n"
+        "Pilih operator yang ingin digunakan:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -3307,6 +3361,98 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         await show_rumahotp_quote_page(query, service, country, page)
         return
 
+    if data.startswith("otp_quote_back:"):
+        quote_id = data.split(":", 1)[1].strip()
+        quote = get_otp_quote(quote_id, user_id)
+        if not quote:
+            await query.answer("Harga sudah kedaluwarsa. Silakan pilih ulang.", show_alert=True)
+            return
+        await show_server_choice_page(
+            query,
+            user_id,
+            str(quote.get("service") or ""),
+            str(quote.get("country") or ""),
+            source_server=str(quote.get("provider") or "rumahotp"),
+        )
+        return
+
+    if data.startswith("otp_roperator:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            await query.answer("Data operator tidak valid.", show_alert=True)
+            return
+        base_quote_id = parts[1]
+        try:
+            operator_index = int(parts[2])
+        except Exception:
+            await query.answer("Operator tidak valid.", show_alert=True)
+            return
+        base_quote = get_otp_quote(base_quote_id, user_id)
+        if not base_quote:
+            await query.answer("Harga sudah kedaluwarsa. Silakan pilih ulang.", show_alert=True)
+            return
+        try:
+            operator_quotes = await asyncio.wait_for(
+                asyncio.to_thread(
+                    get_rumahotp_operator_quotes,
+                    str(base_quote.get("country") or ""),
+                    str(base_quote.get("service") or ""),
+                ),
+                timeout=20,
+            )
+        except Exception:
+            logger.exception("RumahOTP operator lookup failed at selection")
+            operator_quotes = []
+
+        base_cost_idr = float(base_quote.get("cost_usd") or 0) * float(KURS_DOLAR)
+        target_sell = int(round(base_cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        matching = []
+        seen = set()
+        for item in operator_quotes or []:
+            try:
+                cost_idr = float(item.get("cost_idr") or item.get("price_idr") or 0)
+            except Exception:
+                continue
+            name = str(item.get("provider_operator") or item.get("operator") or "").strip()
+            sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100) if cost_idr > 0 else 0
+            key = (name.lower(), str(item.get("provider_id") or ""), str(item.get("pool") or ""))
+            if cost_idr <= 0 or sell != target_sell or not name or name.lower() in {"any", "all", "auto", "automatic", "-"} or key in seen:
+                continue
+            seen.add(key)
+            matching.append(item)
+        matching.sort(key=lambda x: (str(x.get("provider_operator") or x.get("operator") or "").lower(), float(x.get("cost_idr") or 0)))
+        if operator_index < 0 or operator_index >= len(matching):
+            await query.answer("Operator sudah berubah. Silakan pilih ulang.", show_alert=True)
+            return
+        selected = matching[operator_index]
+        quote_id = "ROQ-" + uuid.uuid4().hex[:12].upper()
+        save_otp_quote(
+            quote_id=quote_id,
+            telegram_id=user_id,
+            provider="rumahotp",
+            country=str(selected.get("country") or base_quote.get("country") or ""),
+            country_name=str(selected.get("country_name") or base_quote.get("country_name") or ""),
+            service=str(selected.get("service") or base_quote.get("service") or ""),
+            operator=str(selected.get("provider_operator") or selected.get("operator") or "any"),
+            pool=str(selected.get("pool") or ""),
+            cost_usd=float(selected.get("cost_usd") or 0),
+            stock=int(selected.get("stock") or base_quote.get("stock") or 0),
+        )
+        final_quote = get_otp_quote(quote_id, user_id)
+        context.user_data["otp_server"] = "rumahotp"
+        context.user_data["otp_service"] = str(final_quote.get("service") or "")
+        context.user_data["otp_country"] = str(final_quote.get("country") or "")
+        await process_otp_order(
+            query,
+            user_id,
+            context,
+            "rumahotp",
+            str(final_quote.get("country") or ""),
+            str(final_quote.get("service") or ""),
+            quote=final_quote,
+        )
+        return
+
     if data.startswith("otp_quote:"):
         quote_id = data.split(":", 1)[1].strip()
         quote = get_otp_quote(quote_id, user_id)
@@ -3319,6 +3465,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         selected_provider = str(quote.get("provider") or "")
         selected_country = str(quote.get("country") or "")
         selected_service = str(quote.get("service") or "")
+        if selected_provider == "rumahotp":
+            await show_rumahotp_operator_page(query, user_id, quote)
+            return
         context.user_data["otp_server"] = selected_provider
         context.user_data["otp_service"] = selected_service
         context.user_data["otp_country"] = selected_country
@@ -3356,7 +3505,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         # Compatibility with old buttons: never purchase directly from a
         # country button; always show the server/price confirmation step.
-        await show_server_choice_page(query, user_id, service, country)
+        await show_server_choice_page(query, user_id, service, country, source_server=server)
         return
 
     # =====================================================
@@ -5422,6 +5571,22 @@ async def button_handler(
 # TEXT HANDLER
 # =========================================================
 
+async def _notify_user_admin_topup(context, telegram_id, amount, new_balance, admin_user):
+    """Notify the credited user after a successful manual admin top-up."""
+    try:
+        message = (
+            "🎉 <b>INFO SALDO AZHURA [BOT NOKO]</b>\n\n"
+            f"💰 Penambahan saldo oleh admin <b>AZHURA [BOT NOKO]</b> sebesar <b>+{format_rupiah(amount)}</b>.\n"
+            f"💳 Saldo kamu sekarang: <b>{format_rupiah(new_balance)}</b>\n\n"
+            "🔥 Saldo sudah masuk dan siap digunakan untuk order OTP.\n"
+            "🚀 Yuk pilih layanan favoritmu, cari harga terbaik, dan langsung order sekarang. "
+            "Semoga order lancar dan cuan terus bersama AZHURA! 💎"
+        )
+        await context.bot.send_message(chat_id=telegram_id, text=message, parse_mode="HTML")
+    except Exception:
+        logger.exception("Gagal mengirim notifikasi admin topup ke user=%s", telegram_id)
+
+
 async def text_handler(
     update,
     context
@@ -5478,6 +5643,7 @@ async def text_handler(
                     InlineKeyboardButton("⬅️ Users", callback_data="admin_users")
                 ]])
             )
+            await _notify_user_admin_topup(context, target_id, amount, new_balance, update.effective_user)
             return
 
     # Admin search: user ID
@@ -6007,6 +6173,7 @@ async def admin_add_balance(
 
         )
 
+        await _notify_user_admin_topup(context, telegram_id, amount, new_balance, update.effective_user)
         return
 
     await update.message.reply_text(
