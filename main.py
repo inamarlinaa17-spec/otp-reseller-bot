@@ -5575,7 +5575,7 @@ async def _notify_user_admin_topup(context, telegram_id, amount, new_balance, ad
     """Notify the credited user after a successful manual admin top-up."""
     try:
         message = (
-            "🎉 <b>INFO SALDO AZHURA [BOT NOKO]</b>\n\n"
+            "🎉 <b>INFO SALDO AZHURA [BOT NOKOS]</b>\n\n"
             f"💰 Penambahan saldo oleh admin <b>AZHURA [BOT NOKO]</b> sebesar <b>+{format_rupiah(amount)}</b>.\n"
             f"💳 Saldo kamu sekarang: <b>{format_rupiah(new_balance)}</b>\n\n"
             "🔥 Saldo sudah masuk dan siap digunakan untuk order OTP.\n"
