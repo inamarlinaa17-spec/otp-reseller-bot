@@ -1523,6 +1523,7 @@ def _country_items_5sim(service):
             continue
 
         groups = {}
+        total_stock = 0
         for operator, info in product_data.items():
             if not isinstance(info, dict):
                 continue
@@ -1533,19 +1534,31 @@ def _country_items_5sim(service):
                 continue
             if cost <= 0:
                 continue
+            count = max(count, 0)
             key = round(cost, 6)
             group = groups.setdefault(key, {"cost": cost, "stock": 0})
-            group["stock"] += max(count, 0)
+            group["stock"] += count
+            total_stock += count
 
         if groups:
-            cheapest = min(groups.values(), key=lambda x: x["cost"])
+            # IMPORTANT: a country must be marked available when *any*
+            # price/operator has stock. Previously we used the cheapest
+            # price tier even when that tier had count=0, so the country
+            # showed ❌ although clicking it revealed valid stock at a
+            # different price.
+            available_groups = [g for g in groups.values() if g["stock"] > 0]
+            cheapest_available = min(
+                available_groups,
+                key=lambda x: x["cost"]
+            ) if available_groups else min(groups.values(), key=lambda x: x["cost"])
+
             country_name = str(country).replace("_", " ").title()
             items.append({
                 "country": str(country),
                 "name": country_name,
                 "iso_code": str(country).strip().lower(),
-                "cost": float(cheapest["cost"]),
-                "stock": int(cheapest["stock"]),
+                "cost": float(cheapest_available["cost"]),
+                "stock": int(total_stock),
             })
 
     return items
@@ -4815,6 +4828,9 @@ async def _admin_user_detail(query, telegram_id):
     keyboard = [
         [
             InlineKeyboardButton("💰 Saldo", callback_data=f"admin_user:{telegram_id}"),
+            InlineKeyboardButton("➕ Tambah Saldo", callback_data=f"admin_user_add_balance:{telegram_id}"),
+        ],
+        [
             InlineKeyboardButton("📦 Transaksi", callback_data=f"admin_user_orders:{telegram_id}"),
         ],
         [
@@ -5039,6 +5055,37 @@ async def admin_callback(
             await query.answer("ID user tidak valid.", show_alert=True)
             return
         await _admin_user_detail(query, telegram_id)
+
+    elif query.data.startswith("admin_user_add_balance:"):
+        try:
+            telegram_id = int(query.data.split(":", 1)[1])
+        except Exception:
+            await query.answer("ID user tidak valid.", show_alert=True)
+            return
+        with get_db() as db:
+            user = db.execute(
+                "SELECT telegram_id, first_name, username, balance FROM users WHERE telegram_id = %s",
+                (telegram_id,)
+            ).fetchone()
+        if not user:
+            await query.answer("User tidak ditemukan.", show_alert=True)
+            return
+        ADMIN_SEARCH_USERS.discard(query.from_user.id)
+        query.application.bot_data.setdefault("admin_balance_targets", {})[query.from_user.id] = telegram_id
+        await query.edit_message_text(
+            "➕ <b>TAMBAH SALDO USER</b>\n\n"
+            f"👤 User: <b>{escape(str(user.get('first_name') or user.get('username') or '-'))}</b>\n"
+            f"🆔 ID: <code>{telegram_id}</code>\n"
+            f"💰 Saldo sekarang: <b>{format_rupiah(user['balance'])}</b>\n\n"
+            "Ketik nominal saldo yang ingin ditambahkan.\n"
+            "Contoh: <code>10000</code>\n\n"
+            "Nominal harus bilangan bulat lebih dari Rp0.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Batal", callback_data=f"admin_user:{telegram_id}")
+            ]])
+        )
+        return
 
     elif query.data.startswith("admin_user_orders:"):
         try:
@@ -5297,6 +5344,7 @@ async def button_handler(
         or query.data.startswith("admin_user_orders:")
         or query.data.startswith("admin_user_deposits:")
         or query.data.startswith("admin_user_ledger:")
+        or query.data.startswith("admin_user_add_balance:")
         or query.data.startswith("admin_deposits_page:")
         or query.data == "admin_users_search"
         or query.data == "admin_deposits_search"
@@ -5364,6 +5412,55 @@ async def text_handler(
     if not update.message:
 
         return
+
+    # Admin manual balance: amount is entered after selecting a user.
+    if is_admin(update.effective_user.id):
+        uid = update.effective_user.id
+        text = update.message.text.strip()
+        balance_targets = context.application.bot_data.setdefault("admin_balance_targets", {})
+        if uid in balance_targets:
+            target_id = int(balance_targets.pop(uid))
+            try:
+                normalized = text.replace(".", "").replace(",", "").replace("Rp", "").replace("rp", "").strip()
+                amount = int(normalized)
+                if amount <= 0:
+                    raise ValueError
+            except Exception:
+                balance_targets[uid] = target_id
+                await update.message.reply_text(
+                    "❌ Nominal tidak valid. Masukkan angka bulat, contoh: <code>10000</code>.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data=f"admin_user:{target_id}")]])
+                )
+                return
+            try:
+                new_balance = add_balance(
+                    target_id,
+                    amount,
+                    "ADMIN_CREDIT",
+                    reference=f"ADMIN-{uid}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    description=f"Penambahan saldo manual oleh admin {uid}"
+                )
+            except Exception as error:
+                logger.exception("Admin add balance gagal")
+                await update.message.reply_text(
+                    f"❌ Gagal menambah saldo: <code>{escape(str(error))}</code>",
+                    parse_mode="HTML"
+                )
+                return
+
+            await update.message.reply_text(
+                "✅ <b>SALDO BERHASIL DITAMBAHKAN</b>\n\n"
+                f"👤 User ID: <code>{target_id}</code>\n"
+                f"➕ Ditambahkan: <b>{format_rupiah(amount)}</b>\n"
+                f"💰 Saldo baru: <b>{format_rupiah(new_balance)}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("👤 Detail User", callback_data=f"admin_user:{target_id}"),
+                    InlineKeyboardButton("⬅️ Users", callback_data="admin_users")
+                ]])
+            )
+            return
 
     # Admin search: user ID
     if is_admin(update.effective_user.id):
