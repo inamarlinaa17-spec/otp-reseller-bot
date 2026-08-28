@@ -15,7 +15,7 @@ from config import RUMAHOTP_API_KEY, KURS_DOLAR
 logger = logging.getLogger(__name__)
 BASE_URL = "https://www.rumahotp.io/api"
 TIMEOUT = 15
-_CACHE_TTL = 30.0
+_CACHE_TTL = 300.0
 _cache = {}
 
 
@@ -29,7 +29,7 @@ def _get(path, params=None):
         return {"success": False, "error": {"message": "RUMAHOTP_API_KEY belum diatur."}}
 
     last_error = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             r = requests.get(
                 f"{BASE_URL}{path}",
@@ -56,7 +56,7 @@ def _get(path, params=None):
         except Exception as exc:
             last_error = exc
             if attempt < 2:
-                time.sleep(0.8)
+                time.sleep(0.25)
 
     logger.warning("[RUMAHOTP] request %s failed: %s", path, last_error)
     return {"success": False, "error": {"message": str(last_error or "Request gagal.")}}

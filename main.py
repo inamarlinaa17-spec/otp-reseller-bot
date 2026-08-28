@@ -1747,7 +1747,7 @@ async def _get_otp_operator_names(server, country, service):
                 if str(key).strip().lower() == target:
                     product_data = value
                     break
-        names = []
+        names = {}
         for name, info in (product_data or {}).items():
             try:
                 stock = int(info.get("count") or 0)
@@ -1755,9 +1755,36 @@ async def _get_otp_operator_names(server, country, service):
                 stock = 0
             if isinstance(info, dict) and stock > 0:
                 text = str(name).strip()
-                if text and text.lower() not in {"any", "all", "auto", "automatic", "-"} and text not in names:
-                    names.append(text)
-        return sorted(names, key=str.lower)
+                if not text or text.lower() in {"any", "all", "auto", "automatic", "-"}:
+                    continue
+                key = text.lower().replace("_", " ").strip()
+                # Merge common aliases/casing so AXIS/Axis and 3/Three are
+                # shown as one operator button.
+                if key in {"3", "three", "3 (three)"}:
+                    display = "3 (Three)"
+                    key = "three"
+                elif key in {"tsel", "telkom", "telkomsel", "telkomsel indonesia"}:
+                    display = "Telkomsel"
+                    key = "telkomsel"
+                elif key in {"xl", "xl axiata"}:
+                    display = "XL"
+                    key = "xl"
+                elif key in {"im3", "im3 ooredoo", "indosat", "indosat ooredoo"}:
+                    display = "Indosat"
+                    key = "indosat"
+                elif key in {"axis"}:
+                    display = "Axis"
+                    key = "axis"
+                elif key in {"smartfren"}:
+                    display = "Smartfren"
+                    key = "smartfren"
+                elif key in {"byu", "by.u"}:
+                    display = "By.U"
+                    key = "byu"
+                else:
+                    display = text
+                names.setdefault(key, display)
+        return sorted(names.values(), key=str.lower)
 
     if server == "rumahotp":
         try:
@@ -1768,16 +1795,34 @@ async def _get_otp_operator_names(server, country, service):
         except Exception:
             logger.exception("RumahOTP operator lookup failed")
             rows = []
-        names = []
+        names = {}
         for item in rows or []:
             try:
                 stock = int(item.get("stock") or 0)
             except Exception:
                 stock = 0
             name = str(item.get("provider_operator") or item.get("operator") or "").strip()
-            if stock > 0 and name and name.lower() not in {"any", "all", "auto", "automatic", "-"} and name not in names:
-                names.append(name)
-        return sorted(names, key=str.lower)
+            if stock <= 0 or not name or name.lower() in {"any", "all", "auto", "automatic", "-"}:
+                continue
+            key = name.lower().replace("_", " ").strip()
+            if key in {"3", "three", "3 (three)"}:
+                display, key = "3 (Three)", "three"
+            elif key in {"tsel", "telkom", "telkomsel", "telkomsel indonesia"}:
+                display, key = "Telkomsel", "telkomsel"
+            elif key in {"xl", "xl axiata"}:
+                display, key = "XL", "xl"
+            elif key in {"im3", "im3 ooredoo", "indosat", "indosat ooredoo"}:
+                display, key = "Indosat", "indosat"
+            elif key == "axis":
+                display = "Axis"
+            elif key == "smartfren":
+                display = "Smartfren"
+            elif key in {"byu", "by.u"}:
+                display, key = "By.U", "byu"
+            else:
+                display = name
+            names.setdefault(key, display)
+        return sorted(names.values(), key=str.lower)
 
     return []
 
@@ -3791,9 +3836,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         selected_provider = str(quote.get("provider") or "")
         selected_country = str(quote.get("country") or "")
         selected_service = str(quote.get("service") or "")
-        if selected_provider == "rumahotp":
-            await show_rumahotp_operator_page(query, user_id, quote)
-            return
+        # The operator was already selected (or "any") before the price table.
+        # Do NOT open another operator page here: clicking a price/stock row
+        # must proceed directly to checkout using the quote's saved route pool.
         context.user_data["otp_server"] = selected_provider
         context.user_data["otp_service"] = selected_service
         context.user_data["otp_country"] = selected_country
