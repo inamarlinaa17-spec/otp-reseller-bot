@@ -56,6 +56,7 @@ from database import (
     create_user,
     get_balance,
     add_balance,
+    subtract_balance,
     get_db,
     now,
     get_total_users,
@@ -5367,6 +5368,7 @@ async def _admin_user_detail(query, telegram_id):
         ],
         [
             InlineKeyboardButton("📦 Transaksi", callback_data=f"admin_user_orders:{telegram_id}"),
+            InlineKeyboardButton("➖ Pengurangan Saldo", callback_data=f"admin_user_subtract_balance:{telegram_id}"),
         ],
         [
             InlineKeyboardButton("💳 Riwayat Deposit", callback_data=f"admin_user_deposits:{telegram_id}"),
@@ -5586,6 +5588,7 @@ async def admin_callback(
 
     elif query.data.startswith("admin_user:"):
         context.user_data.pop("admin_balance_target", None)
+        context.user_data.pop("admin_balance_action", None)
         try:
             telegram_id = int(query.data.split(":", 1)[1])
         except Exception:
@@ -5609,6 +5612,7 @@ async def admin_callback(
             return
         ADMIN_SEARCH_USERS.discard(query.from_user.id)
         context.user_data["admin_balance_target"] = telegram_id
+        context.user_data["admin_balance_action"] = "topup"
         await query.edit_message_text(
             "➕ <b>TAMBAH SALDO USER</b>\n\n"
             f"👤 User: <b>{escape(str(user.get('first_name') or user.get('username') or '-'))}</b>\n"
@@ -5617,6 +5621,38 @@ async def admin_callback(
             "Ketik nominal saldo yang ingin ditambahkan.\n"
             "Contoh: <code>10000</code>\n\n"
             "Nominal harus bilangan bulat lebih dari Rp0.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Batal", callback_data=f"admin_user:{telegram_id}")
+            ]])
+        )
+        return
+
+    elif query.data.startswith("admin_user_subtract_balance:"):
+        try:
+            telegram_id = int(query.data.split(":", 1)[1])
+        except Exception:
+            await query.answer("ID user tidak valid.", show_alert=True)
+            return
+        with get_db() as db:
+            user = db.execute(
+                "SELECT telegram_id, first_name, username, balance FROM users WHERE telegram_id = %s",
+                (telegram_id,)
+            ).fetchone()
+        if not user:
+            await query.answer("User tidak ditemukan.", show_alert=True)
+            return
+        ADMIN_SEARCH_USERS.discard(query.from_user.id)
+        context.user_data["admin_balance_target"] = telegram_id
+        context.user_data["admin_balance_action"] = "subtract"
+        await query.edit_message_text(
+            "➖ <b>PENGURANGAN SALDO USER</b>\n\n"
+            f"👤 User: <b>{escape(str(user.get('first_name') or user.get('username') or '-'))}</b>\n"
+            f"🆔 ID: <code>{telegram_id}</code>\n"
+            f"💰 Saldo sekarang: <b>{format_rupiah(user['balance'])}</b>\n\n"
+            "Ketik nominal saldo yang ingin dikurangi.\n"
+            "Contoh: <code>10000</code>\n\n"
+            "Saldo tidak boleh menjadi minus.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ Batal", callback_data=f"admin_user:{telegram_id}")
@@ -5882,6 +5918,7 @@ async def button_handler(
         or query.data.startswith("admin_user_deposits:")
         or query.data.startswith("admin_user_ledger:")
         or query.data.startswith("admin_user_add_balance:")
+        or query.data.startswith("admin_user_subtract_balance:")
         or query.data.startswith("admin_deposits_page:")
         or query.data == "admin_users_search"
         or query.data == "admin_deposits_search"
@@ -5942,20 +5979,44 @@ async def button_handler(
 # TEXT HANDLER
 # =========================================================
 
-async def _notify_user_admin_topup(context, telegram_id, amount, new_balance, admin_user):
-    """Notify the credited user after a successful manual admin top-up."""
+async def _notify_user_admin_balance(context, telegram_id, amount, new_balance, action="topup"):
+    """Notify a user after an admin manually changes the user's balance."""
     try:
+        if action == "subtract":
+            amount_text = f"-{format_rupiah(amount)}"
+            body = (
+                f"💰 Pengurangan saldo oleh admin <b>AZHURA [BOT NOKOS]</b> sebesar <b>{amount_text}</b>.\n"
+                f"💳 Saldo kamu sekarang: <b>{format_rupiah(new_balance)}</b>\n\n"
+                "🔥 Mohon maaf atas kekeliruan ADMIN yang salah memasukan NOMINAL🙏\n"
+            )
+        else:
+            amount_text = f"+{format_rupiah(amount)}"
+            body = (
+                f"💰 Penambahan saldo oleh admin <b>AZHURA [BOT NOKOS]</b> sebesar <b>{amount_text}</b>.\n"
+                f"💳 Saldo kamu sekarang: <b>{format_rupiah(new_balance)}</b>\n\n"
+                "🔥 Saldo sudah masuk dan siap digunakan untuk order OTP.\n"
+            )
         message = (
             "🎉 <b>INFO SALDO AZHURA [BOT NOKOS]</b>\n\n"
-            f"💰 Penambahan saldo oleh admin <b>AZHURA [BOT NOKOS]</b> sebesar <b>+{format_rupiah(amount)}</b>.\n"
-            f"💳 Saldo kamu sekarang: <b>{format_rupiah(new_balance)}</b>\n\n"
-            "🔥 Saldo sudah masuk dan siap digunakan untuk order OTP.\n"
-            "🚀 Yuk pilih layanan favoritmu, cari harga terbaik, dan langsung order sekarang. "
-            "Semoga order lancar dan cuan terus bersama AZHURA! 💎"
+            + body
+            + "Yuk pilih layanan favoritmu, cari harga terbaik, dan langsung order sekarang. "
+              "Semoga order lancar dan cuan terus bersama AZHURA! 💎"
         )
-        await context.bot.send_message(chat_id=telegram_id, text=message, parse_mode="HTML")
+        await context.bot.send_message(
+            chat_id=telegram_id,
+            text=message,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🚀 Order OTP Sekarang", callback_data="user_home")
+            ]])
+        )
     except Exception:
-        logger.exception("Gagal mengirim notifikasi admin topup ke user=%s", telegram_id)
+        logger.exception("Gagal mengirim notifikasi admin balance ke user=%s action=%s", telegram_id, action)
+
+
+# Backward-compatible helper for any existing call sites.
+async def _notify_user_admin_topup(context, telegram_id, amount, new_balance, admin_user=None):
+    await _notify_user_admin_balance(context, telegram_id, amount, new_balance, "topup")
 
 
 async def text_handler(
@@ -5972,6 +6033,7 @@ async def text_handler(
         uid = update.effective_user.id
         text = update.message.text.strip()
         target_value = context.user_data.pop("admin_balance_target", None)
+        action = context.user_data.pop("admin_balance_action", "topup")
         if target_value is not None:
             target_id = int(target_value)
             try:
@@ -5981,6 +6043,7 @@ async def text_handler(
                     raise ValueError
             except Exception:
                 context.user_data["admin_balance_target"] = target_id
+                context.user_data["admin_balance_action"] = action
                 await update.message.reply_text(
                     "❌ Nominal tidak valid. Masukkan angka bulat, contoh: <code>10000</code>.",
                     parse_mode="HTML",
@@ -5988,13 +6051,23 @@ async def text_handler(
                 )
                 return
             try:
-                new_balance = add_balance(
-                    target_id,
-                    amount,
-                    "ADMIN_CREDIT",
-                    reference=f"ADMIN-{uid}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                    description=f"Penambahan saldo manual oleh admin {uid}"
-                )
+                reference = f"ADMIN-{uid}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+                if action == "subtract":
+                    new_balance = subtract_balance(
+                        target_id,
+                        amount,
+                        "ADMIN_DEBIT",
+                        reference=reference,
+                        description=f"Pengurangan saldo manual oleh admin {uid}"
+                    )
+                else:
+                    new_balance = add_balance(
+                        target_id,
+                        amount,
+                        "ADMIN_CREDIT",
+                        reference=reference,
+                        description=f"Penambahan saldo manual oleh admin {uid}"
+                    )
             except Exception as error:
                 logger.exception("Admin add balance gagal")
                 await update.message.reply_text(
@@ -6003,18 +6076,29 @@ async def text_handler(
                 )
                 return
 
+            if action == "subtract":
+                result_text = (
+                    "➖ <b>SALDO BERHASIL DIKURANGI</b>\n\n"
+                    f"👤 User ID: <code>{target_id}</code>\n"
+                    f"➖ Dikurangi: <b>{format_rupiah(amount)}</b>\n"
+                    f"💰 Saldo baru: <b>{format_rupiah(new_balance)}</b>"
+                )
+            else:
+                result_text = (
+                    "✅ <b>SALDO BERHASIL DITAMBAHKAN</b>\n\n"
+                    f"👤 User ID: <code>{target_id}</code>\n"
+                    f"➕ Ditambahkan: <b>{format_rupiah(amount)}</b>\n"
+                    f"💰 Saldo baru: <b>{format_rupiah(new_balance)}</b>"
+                )
             await update.message.reply_text(
-                "✅ <b>SALDO BERHASIL DITAMBAHKAN</b>\n\n"
-                f"👤 User ID: <code>{target_id}</code>\n"
-                f"➕ Ditambahkan: <b>{format_rupiah(amount)}</b>\n"
-                f"💰 Saldo baru: <b>{format_rupiah(new_balance)}</b>",
+                result_text,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("👤 Detail User", callback_data=f"admin_user:{target_id}"),
                     InlineKeyboardButton("⬅️ Users", callback_data="admin_users")
                 ]])
             )
-            await _notify_user_admin_topup(context, target_id, amount, new_balance, update.effective_user)
+            await _notify_user_admin_balance(context, target_id, amount, new_balance, action)
             return
 
     # Admin search: user ID
@@ -6544,7 +6628,6 @@ async def admin_add_balance(
 
         )
 
-        await _notify_user_admin_topup(context, telegram_id, amount, new_balance, update.effective_user)
         return
 
     await update.message.reply_text(
@@ -6560,6 +6643,10 @@ async def admin_add_balance(
 
         parse_mode="HTML"
 
+    )
+
+    await _notify_user_admin_balance(
+        context, telegram_id, amount, new_balance, "topup"
     )
 
 
