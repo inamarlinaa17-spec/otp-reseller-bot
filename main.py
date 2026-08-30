@@ -4618,6 +4618,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         )
 
+        cancel_result = {"response": "OK", "provider_status": "not_required"}
+
         if provider_order_id:
 
             provider = (
@@ -4630,10 +4632,43 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             else:
                 canceler = cancel_number
 
-            await asyncio.to_thread(
+            cancel_result = await asyncio.to_thread(
                 canceler,
                 provider_order_id
             )
+
+            logger.info(
+                "[OTP CANCEL] local=%s provider=%s provider_order=%s result=%s",
+                order_id,
+                provider,
+                provider_order_id,
+                cancel_result,
+            )
+
+            # IMPORTANT: never refund the user's balance when the upstream
+            # provider did not confirm cancellation.  The old code refunded
+            # locally even if RumahOTP rejected/failed the cancellation,
+            # leaving the provider order in WAITING while our bot said REFUND.
+            if not cancel_result or cancel_result.get("response") != "OK":
+                provider_error = str(
+                    cancel_result.get("error")
+                    or cancel_result.get("message")
+                    or "Provider belum mengonfirmasi pembatalan."
+                )
+                await query.edit_message_text(
+                    "⚠️ <b>Order belum berhasil dibatalkan di provider.</b>\n\n"
+                    f"🧾 Order: <code>{order_id}</code>\n"
+                    f"📡 Provider: <b>{'RumahOTP' if provider == 'rumahotp' else '5SIM'}</b>\n"
+                    f"❗ <b>{escape(provider_error)}</b>\n\n"
+                    "Saldo <b>belum</b> dikembalikan agar tidak terjadi refund ganda. "
+                    "Silakan coba tombol <b>❌ Batal / Refund</b> lagi beberapa saat kemudian.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Coba Batalkan Lagi", callback_data=f"otp_cancel:{order_id}")],
+                        [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
+                    ])
+                )
+                return
 
         try:
 
@@ -4641,7 +4676,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                 order_id,
 
-                "User membatalkan order OTP."
+                "User membatalkan order OTP setelah provider mengonfirmasi pembatalan."
 
             )
 
@@ -5410,17 +5445,138 @@ async def _admin_user_orders(query, telegram_id):
 "]
     if not rows:
         lines.append("Belum ada transaksi.")
+    keyboard = []
     for row in rows:
         lines.append(
             f"• <code>{escape(str(row['order_id']))}</code> | {escape(str(row['service'] or '-'))} | "
             f"{escape(str(row['country'] or '-'))} | {escape(str(row['provider'] or '-'))} | "
             f"{format_rupiah(row['sell_price'])} | <b>{escape(str(row['status']))}</b>"
         )
+        if (str(row.get("status") or "").upper() == "PENDING" and
+                str(row.get("provider") or "").lower() in {"rumahotp", "5sim"}):
+            keyboard.append([InlineKeyboardButton(
+                f"🛑 Batalkan & Refund {str(row['order_id'])}",
+                callback_data=f"admin_cancel_order:{row['order_id']}"
+            )])
+    keyboard.append([InlineKeyboardButton("⬅️ Detail User", callback_data=f"admin_user:{telegram_id}")])
     await query.edit_message_text(
         "\
 ".join(lines), parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Detail User", callback_data=f"admin_user:{telegram_id}")]])
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def _admin_cancel_order(query, context, order_id):
+    """Admin: cancel an existing provider order, verify cancellation, then refund once."""
+    order = get_order(order_id)
+    if not order:
+        await query.answer("Order tidak ditemukan di database bot.", show_alert=True)
+        return
+
+    provider = str(order.get("provider") or "5sim").lower()
+    provider_order_id = str(order.get("provider_order_id") or "").strip()
+    if not provider_order_id:
+        await query.answer("Order belum memiliki ID order provider.", show_alert=True)
+        return
+
+    if str(order.get("refund_status") or "").upper() == "REFUNDED":
+        await query.answer("Order ini sudah pernah direfund.", show_alert=True)
+        return
+
+    if str(order.get("status") or "").upper() == "SUCCESS":
+        await query.answer("Order sudah SUCCESS dan tidak bisa dibatalkan.", show_alert=True)
+        return
+
+    await query.edit_message_text(
+        "⏳ <b>MEMBATALKAN ORDER PROVIDER...</b>\n\n"
+        f"🧾 Order Bot: <code>{escape(order_id)}</code>\n"
+        f"📡 Provider: <b>{escape(ADMIN_PROVIDER_NAMES.get(provider, provider.upper()))}</b>\n"
+        f"🆔 Provider Order: <code>{escape(provider_order_id)}</code>\n\n"
+        "Mohon tunggu, bot sedang meminta pembatalan ke provider dan memverifikasinya.",
+        parse_mode="HTML"
+    )
+
+    try:
+        if provider == "rumahotp":
+            cancel_result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
+        elif provider == "5sim":
+            cancel_result = await asyncio.to_thread(cancel_number, provider_order_id)
+        else:
+            cancel_result = {"response": "ERROR", "error": f"Provider {provider} belum didukung."}
+
+        logger.info(
+            "[ADMIN CANCEL] local=%s provider=%s provider_order=%s result=%s",
+            order_id, provider, provider_order_id, cancel_result
+        )
+
+        if not cancel_result or cancel_result.get("response") != "OK":
+            error = str((cancel_result or {}).get("error") or "Provider belum mengonfirmasi pembatalan.")
+            await query.edit_message_text(
+                "⚠️ <b>PEMBATALAN BELUM BERHASIL</b>\n\n"
+                f"🧾 Order: <code>{escape(order_id)}</code>\n"
+                f"📡 Provider: <b>{escape(ADMIN_PROVIDER_NAMES.get(provider, provider.upper()))}</b>\n"
+                f"🆔 Provider Order: <code>{escape(provider_order_id)}</code>\n"
+                f"❗ {escape(error)}\n\n"
+                "Saldo user <b>belum</b> dikembalikan karena provider belum mengonfirmasi cancel.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"admin_cancel_order:{order_id}")],
+                    [InlineKeyboardButton("📦 Transaksi User", callback_data=f"admin_user_orders:{int(order['telegram_id'])}")],
+                ])
+            )
+            return
+
+        result = refund_order(
+            order_id,
+            "Admin membatalkan order provider dan provider mengonfirmasi pembatalan."
+        )
+
+        # Notify the user about the admin-triggered cancellation/refund.
+        try:
+            await context.bot.send_message(
+                chat_id=int(order["telegram_id"]),
+                text=(
+                    "🎉 <b>INFO REFUND AZHURA [BOT NOKOS]</b>\n\n"
+                    f"🧾 Order: <code>{escape(order_id)}</code>\n"
+                    f"❌ Pesanan dibatalkan oleh admin.\n"
+                    f"💸 Saldo dikembalikan: <b>{format_rupiah(order['sell_price'])}</b>\n"
+                    f"💳 Saldo kamu sekarang: <b>{format_rupiah(result['balance'])}</b>\n\n"
+                    "🔥 Silakan order kembali kapan saja. Semoga order lancar dan cuan terus bersama AZHURA! 💎"
+                ),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🚀 Order OTP Sekarang", callback_data="user_home")
+                ]])
+            )
+        except Exception:
+            logger.exception("Gagal mengirim notifikasi refund admin ke user=%s", order["telegram_id"])
+
+        await query.edit_message_text(
+            "✅ <b>ORDER BERHASIL DIBATALKAN & REFUND</b>\n\n"
+            f"🧾 Order Bot: <code>{escape(order_id)}</code>\n"
+            f"📡 Provider: <b>{escape(ADMIN_PROVIDER_NAMES.get(provider, provider.upper()))}</b>\n"
+            f"🆔 Provider Order: <code>{escape(provider_order_id)}</code>\n"
+            f"💸 Refund user: <b>{format_rupiah(order['sell_price'])}</b>\n"
+            f"💰 Saldo user sekarang: <b>{format_rupiah(result['balance'])}</b>\n\n"
+            "Provider sudah mengonfirmasi pembatalan sebelum saldo dikembalikan.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📦 Transaksi User", callback_data=f"admin_user_orders:{int(order['telegram_id'])}")],
+                [InlineKeyboardButton("👤 Detail User", callback_data=f"admin_user:{int(order['telegram_id'])}")],
+            ])
+        )
+    except Exception as error:
+        logger.exception("[ADMIN CANCEL] gagal order=%s", order_id)
+        await query.edit_message_text(
+            "❌ <b>PROSES BATAL/REFUND GAGAL</b>\n\n"
+            f"Order: <code>{escape(order_id)}</code>\n"
+            f"Error: <code>{escape(str(error))}</code>\n\n"
+            "Saldo user tidak diubah jika refund belum berhasil.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📦 Transaksi User", callback_data=f"admin_user_orders:{int(order['telegram_id'])}")
+            ]])
+        )
 
 
 async def _admin_user_deposits(query, telegram_id):
@@ -5658,6 +5814,11 @@ async def admin_callback(
                 InlineKeyboardButton("❌ Batal", callback_data=f"admin_user:{telegram_id}")
             ]])
         )
+        return
+
+    elif query.data.startswith("admin_cancel_order:"):
+        order_id = query.data.split(":", 1)[1].strip()
+        await _admin_cancel_order(query, context, order_id)
         return
 
     elif query.data.startswith("admin_user_orders:"):
@@ -5919,6 +6080,7 @@ async def button_handler(
         or query.data.startswith("admin_user_ledger:")
         or query.data.startswith("admin_user_add_balance:")
         or query.data.startswith("admin_user_subtract_balance:")
+        or query.data.startswith("admin_cancel_order:")
         or query.data.startswith("admin_deposits_page:")
         or query.data == "admin_users_search"
         or query.data == "admin_deposits_search"
