@@ -364,26 +364,101 @@ def _metadata(pool):
 
 
 def buy_number(country, service, operator="any", metadata=None):
-    found=find_service(service)
-    if not found: return {"response":"ERROR", "error":"Layanan RumahOTP tidak ditemukan."}
-    item=find_country(country, found.get("id"))
-    if not item: return {"response":"ERROR", "error":"Negara RumahOTP tidak ditemukan."}
-    meta=metadata or {}
-    provider_id=meta.get("provider_id")
-    operator_id=meta.get("operator_id")
-    number_id=meta.get("number_id") or item.get("number_id")
+    """Create exactly one RumahOTP order using the selected quote route.
+
+    This purchase endpoint is deliberately not retried: a timeout can happen
+    after the provider has already created an order, so retrying could create
+    a duplicate purchase.
+    """
+    found = find_service(service)
+    if not found:
+        return {"response": "ERROR", "error": f"Layanan RumahOTP tidak ditemukan: {service}"}
+    item = find_country(country, found.get("id"))
+    if not item:
+        return {"response": "ERROR", "error": f"Negara RumahOTP tidak ditemukan: {country}"}
+
+    meta = metadata or {}
+    provider_id = meta.get("provider_id")
+    operator_id = meta.get("operator_id")
+    number_id = meta.get("number_id") or item.get("number_id")
+
     if not provider_id:
-        rows=item.get("pricelist") or []
-        active=[x for x in rows if isinstance(x,dict) and int(float(x.get("stock") or 0))>0 and float(x.get("price") or 0)>0]
-        if not active: return {"response":"ERROR", "error":"Stok RumahOTP habis."}
-        chosen=min(active,key=lambda x:float(x.get("price") or 0)); provider_id=chosen.get("provider_id")
+        rows = item.get("pricelist") or []
+        active = [
+            x for x in rows
+            if isinstance(x, dict)
+            and int(float(x.get("stock") or 0)) > 0
+            and float(x.get("price") or 0) > 0
+        ]
+        if not active:
+            return {"response": "ERROR", "error": "Stok RumahOTP habis."}
+        chosen = min(active, key=lambda x: float(x.get("price") or 0))
+        provider_id = chosen.get("provider_id")
+
     if not operator_id:
-        operator_id=1
-    data=_get("/v2/orders", {"number_id":number_id,"provider_id":provider_id,"operator_id":operator_id})
-    if not data.get("success"):
-        return {"response":"ERROR", "error":(data.get("error") or {}).get("message","RumahOTP order gagal.")}
-    d=data.get("data") or {}
-    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),"number":d.get("phone_number"),"service":d.get("service"),"country":d.get("country"),"operator":d.get("operator"),"created_at":d.get("created_at"),"expired_at":d.get("expired_at"),"response":"OK"}
+        operator_id = 1
+
+    params = {
+        "number_id": number_id,
+        "provider_id": provider_id,
+        "operator_id": operator_id,
+    }
+    if not all(str(params[k]).strip() for k in params):
+        return {"response": "ERROR", "error": f"Parameter order RumahOTP tidak lengkap: {params}"}
+
+    logger.info(
+        "[RUMAHOTP ORDER] service=%s service_id=%s country=%s number_id=%s provider_id=%s operator_id=%s",
+        service, found.get("id"), country, number_id, provider_id, operator_id,
+    )
+
+    if not RUMAHOTP_API_KEY:
+        return {"response": "ERROR", "error": "RUMAHOTP_API_KEY belum diatur."}
+
+    try:
+        response = requests.get(
+            f"{BASE_URL}/v2/orders",
+            headers=_headers(),
+            params=params,
+            timeout=20,
+        )
+        try:
+            data = response.json()
+        except Exception:
+            data = {"success": False, "error": {"message": response.text[:500]}}
+    except requests.Timeout:
+        logger.exception("[RUMAHOTP ORDER] timeout params=%s", params)
+        return {"response": "ERROR", "error": "Request order RumahOTP timeout. Jangan retry otomatis; cek order di RumahOTP terlebih dahulu."}
+    except requests.RequestException as exc:
+        logger.exception("[RUMAHOTP ORDER] request error params=%s", params)
+        return {"response": "ERROR", "error": f"Request RumahOTP gagal: {exc}"}
+    except Exception as exc:
+        logger.exception("[RUMAHOTP ORDER] unexpected error params=%s", params)
+        return {"response": "ERROR", "error": f"Error order RumahOTP: {exc}"}
+
+    logger.info("[RUMAHOTP ORDER] HTTP=%s response=%s", response.status_code, data)
+    if response.status_code >= 400 or not data.get("success"):
+        message = (data.get("error") or {}).get("message") or data.get("message") or f"HTTP {response.status_code}"
+        return {"response": "ERROR", "error": str(message), "http_status": response.status_code, "raw": data}
+
+    d = data.get("data") or {}
+    order_id = d.get("order_id")
+    phone = d.get("phone_number")
+    if not order_id or not phone:
+        return {"response": "ERROR", "error": "RumahOTP tidak mengembalikan order_id/nomor.", "raw": data}
+
+    return {
+        "id": order_id,
+        "order_id": order_id,
+        "phone": phone,
+        "number": phone,
+        "service": d.get("service"),
+        "country": d.get("country"),
+        "operator": d.get("operator"),
+        "price": d.get("price"),
+        "created_at": d.get("created_at"),
+        "expired_at": d.get("expired_at"),
+        "response": "OK",
+    }
 
 
 def get_sms(order_id):
