@@ -3278,13 +3278,17 @@ async def process_otp_order(
             routes = [None]
         result = None
         for metadata in routes:
-            candidate = await asyncio.to_thread(
-                buy_rumahotp_number,
-                country,
-                service,
-                operator,
-                metadata
-            )
+            try:
+                candidate = await asyncio.to_thread(
+                    buy_rumahotp_number,
+                    country,
+                    service,
+                    operator,
+                    metadata
+                )
+            except Exception as exc:
+                logger.exception("RumahOTP order request crashed")
+                candidate = {"response": "ERROR", "error": str(exc)}
             if candidate and candidate.get("response") != "ERROR" and (candidate.get("order_id") or candidate.get("id")) and (candidate.get("phone") or candidate.get("number")):
                 result = candidate
                 break
