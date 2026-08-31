@@ -137,6 +137,11 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Runtime fallback for a rare database stall immediately after a provider purchase.
+# This does not change order logic; it only prevents the Telegram callback from
+# remaining stuck when the provider has already issued the number.
+_RUNTIME_PROVIDER_CACHE = {}
+
 
 # =========================================================
 # FLASK
@@ -3189,11 +3194,9 @@ async def process_otp_order(
         return
 
     # Keep human-readable service/country in history without changing provider codes.
-    with get_db() as db:
-        db.execute(
-            "UPDATE orders SET service_name=%s, country_name=%s WHERE order_id=%s",
-            (service_label, display_country, order_id)
-        )
+    await asyncio.to_thread(
+        _save_order_labels, order_id, service_label, display_country
+    )
 
     # -----------------------------------------------------
     # BELI NOMOR
@@ -3312,14 +3315,36 @@ async def process_otp_order(
 
     # Provider may already have charged the order. Do not let a database write
     # block the Telegram callback after a successful provider purchase.
-    await asyncio.to_thread(
-        save_provider_order,
-        order_id,
-        provider_order_id,
-        provider_cost_rp,
-        phone,
-        provider_expired_at
+    # Save provider data without allowing a slow/locked database connection to
+    # keep the Telegram order callback stuck after RumahOTP has already charged
+    # and issued the number. The worker is allowed to finish in the background.
+    _RUNTIME_PROVIDER_CACHE[order_id] = {
+        "provider_order_id": provider_order_id,
+        "phone": phone,
+        "expired_at": provider_expired_at,
+    }
+    save_task = asyncio.create_task(
+        asyncio.to_thread(
+            save_provider_order,
+            order_id,
+            provider_order_id,
+            provider_cost_rp,
+            phone,
+            provider_expired_at
+        )
     )
+    try:
+        await asyncio.wait_for(asyncio.shield(save_task), timeout=5.0)
+        _RUNTIME_PROVIDER_CACHE.pop(order_id, None)
+        logger.info("[ORDER FLOW] provider data saved order_id=%s", order_id)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[ORDER FLOW] database save slow after provider success; "
+            "continuing with runtime cache order_id=%s provider_order_id=%s",
+            order_id, provider_order_id
+        )
+    except Exception:
+        logger.exception("[ORDER FLOW] provider data save failed order_id=%s", order_id)
 
     await query.edit_message_text(
         "✅ <b>ORDER BERHASIL</b>\n\n"
@@ -4471,11 +4496,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        provider_order_id = (
-            order[
-                "provider_order_id"
-            ]
-        )
+        provider_order_id = order.get("provider_order_id")
+        runtime_provider = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
+        if not provider_order_id:
+            provider_order_id = runtime_provider.get("provider_order_id")
 
         if not provider_order_id:
 
@@ -4544,8 +4568,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     current_order = get_order(order_id) or order
                     service_name = current_order.get("service_name") or current_order.get("service") or "-"
                     country_name = current_order.get("country_name") or current_order.get("country") or "-"
-                    phone = current_order.get("phone") or "-"
-                    expired_at = data_sms.get("expired_at") or current_order.get("expired_at")
+                    phone = current_order.get("phone") or runtime_provider.get("phone") or "-"
+                    expired_at = data_sms.get("expired_at") or current_order.get("expired_at") or runtime_provider.get("expired_at")
                     detail_lines = (
                         "🎉 <b>OTP DITERIMA</b>\n\n"
                         f"🧾 Order: <code>{order_id}</code>\n"
