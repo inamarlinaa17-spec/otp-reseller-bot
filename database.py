@@ -142,7 +142,7 @@ def init_database():
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS operator TEXT
         """)
         db.execute("""
-            ALTER TABLE orders ADD COLUMN IF NOT EXISTS expires_at TEXT
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS expired_at TEXT
         """)
         db.execute("""
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS phone TEXT
@@ -701,8 +701,7 @@ def create_pending_order(
     country,
     service,
     sell_price,
-    provider="5sim",
-    operator=None
+    provider="5sim"
 ):
 
     with get_db() as db:
@@ -804,13 +803,10 @@ def create_pending_order(
                 status,
                 provider_order_id,
                 refund_status,
-                created_at,
-                operator,
-                expires_at,
-                phone
+                created_at
             )
             VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 order_id,
@@ -823,10 +819,7 @@ def create_pending_order(
                 "PENDING",
                 None,
                 "NONE",
-                now(),
-                operator,
-                None,
-                None
+                now()
             )
         )
 
@@ -836,6 +829,20 @@ def create_pending_order(
 # =========================================================
 # SAVE PROVIDER ORDER
 # =========================================================
+
+def update_order_context(order_id, operator=None, expired_at=None, phone=None):
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE orders
+            SET operator = COALESCE(%s, operator),
+                expired_at = COALESCE(%s, expired_at),
+                phone = COALESCE(%s, phone)
+            WHERE order_id = %s
+            """,
+            (operator, str(expired_at) if expired_at is not None else None, phone, order_id)
+        )
+
 
 def save_provider_order(
     order_id,
@@ -858,20 +865,6 @@ def save_provider_order(
                 int(provider_cost),
                 order_id
             )
-        )
-
-
-def update_order_provider_meta(order_id, operator=None, expires_at=None, phone=None):
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE orders
-            SET operator = COALESCE(%s, operator),
-                expires_at = COALESCE(%s, expires_at),
-                phone = COALESCE(%s, phone)
-            WHERE order_id = %s
-            """,
-            (operator, expires_at, phone, order_id)
         )
 
 
