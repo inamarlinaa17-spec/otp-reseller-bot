@@ -195,20 +195,8 @@ def _country_quotes(country_item, service_name, service_id=None):
     if not isinstance(country_item, dict):
         return quotes
 
-    # RumahOTP payloads have used several field names across API versions.
-    # Never fall back to number_id for the display name when a real country
-    # name is available under another key.
-    country_name = str(
-        country_item.get("name")
-        or country_item.get("country_name")
-        or country_item.get("country")
-        or country_item.get("title")
-        or country_item.get("label")
-        or country_item.get("iso_name")
-        or country_item.get("iso_code")
-        or ""
-    ).strip()
-    number_id = country_item.get("number_id") or country_item.get("id")
+    country_name = str(country_item.get("name") or country_item.get("iso_code") or "")
+    number_id = country_item.get("number_id")
 
     for row in country_item.get("pricelist") or []:
         if not isinstance(row, dict):
@@ -375,18 +363,6 @@ def _metadata(pool):
     except Exception: return {}
 
 
-def _first_value(data, *keys):
-    """Read the first non-empty value from provider payloads, case-insensitively."""
-    if not isinstance(data, dict):
-        return None
-    lowered = {str(k).lower(): v for k, v in data.items()}
-    for key in keys:
-        value = lowered.get(str(key).lower())
-        if value not in (None, ""):
-            return value
-    return None
-
-
 def buy_number(country, service, operator="any", metadata=None):
     found=find_service(service)
     if not found: return {"response":"ERROR", "error":"Layanan RumahOTP tidak ditemukan."}
@@ -395,7 +371,7 @@ def buy_number(country, service, operator="any", metadata=None):
     meta=metadata or {}
     provider_id=meta.get("provider_id")
     operator_id=meta.get("operator_id")
-    number_id=meta.get("number_id") or item.get("number_id") or item.get("id")
+    number_id=meta.get("number_id") or item.get("number_id")
     if not provider_id:
         rows=item.get("pricelist") or []
         active=[x for x in rows if isinstance(x,dict) and int(float(x.get("stock") or 0))>0 and float(x.get("price") or 0)>0]
@@ -405,35 +381,9 @@ def buy_number(country, service, operator="any", metadata=None):
         operator_id=1
     data=_get("/v2/orders", {"number_id":number_id,"provider_id":provider_id,"operator_id":operator_id})
     if not data.get("success"):
-        err = data.get("error") or {}
-        return {"response":"ERROR", "error":err.get("message") if isinstance(err,dict) else str(err or "RumahOTP order gagal.")}
-
-    d=data.get("data") or data.get("result") or {}
-    if isinstance(d, list):
-        d = d[0] if d and isinstance(d[0], dict) else {}
-    if not isinstance(d, dict):
-        logger.error("[RUMAHOTP] order success payload tidak dikenali: type=%s", type(d).__name__)
-        return {"response":"ERROR", "error":"Respons order RumahOTP tidak dapat dibaca."}
-
-    # Dashboard RumahOTP shows a TRX ID such as R00047792145. Depending on
-    # API version that identifier may be named trx_id instead of order_id.
-    provider_order_id = _first_value(d, "order_id", "trx_id", "transaction_id", "reference", "id")
-    phone = _first_value(d, "phone_number", "phone", "number", "msisdn", "mobile", "phoneNumber")
-    expires_at = _first_value(d, "expires_at", "expired_at", "expiration", "expire_at", "expires", "expired")
-
-    # Some responses wrap the actual order one level deeper.
-    nested = _first_value(d, "order", "transaction")
-    if isinstance(nested, dict):
-        provider_order_id = provider_order_id or _first_value(nested, "order_id", "trx_id", "transaction_id", "reference", "id")
-        phone = phone or _first_value(nested, "phone_number", "phone", "number", "msisdn", "mobile")
-        expires_at = expires_at or _first_value(nested, "expires_at", "expired_at", "expiration", "expire_at", "expires")
-
-    if not provider_order_id or not phone:
-        logger.error("[RUMAHOTP] order berhasil tetapi field penting hilang; keys=%s", list(d.keys()))
-        return {"response":"ERROR", "error":"RumahOTP menerima order tetapi respons tidak berisi ID transaksi atau nomor.", "raw_keys":list(d.keys())}
-
-    return {"id":str(provider_order_id),"order_id":str(provider_order_id),"phone":str(phone),
-            "number":str(phone),"expires_at":expires_at,"response":"OK"}
+        return {"response":"ERROR", "error":(data.get("error") or {}).get("message","RumahOTP order gagal.")}
+    d=data.get("data") or {}
+    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),"number":d.get("phone_number"),"response":"OK"}
 
 
 def get_sms(order_id):
@@ -441,22 +391,9 @@ def get_sms(order_id):
     if not data.get("success"): return {"response":"ERROR", "error":(data.get("error") or {}).get("message","Gagal mengecek RumahOTP.")}
     d=data.get("data") or {}; status=str(d.get("status") or "").lower()
     code=d.get("otp_code"); text=d.get("otp_msg") or ""
-    expires_at = (d.get("expires_at") or d.get("expired_at") or d.get("expiration") or
-                  d.get("expire_at") or d.get("expires"))
     if code:
-        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status, "expires_at":expires_at}
-    return {"response":"OK", "sms":[], "status":status, "expires_at":expires_at}
-
-
-def resend_otp(order_id):
-    """Ask RumahOTP to repeat SMS. Provider response is normalized; no local state changes."""
-    order_id = str(order_id or '').strip()
-    if not order_id:
-        return {"response": "ERROR", "error": "Provider order ID kosong."}
-    data = _get("/v1/orders/set_status", {"order_id": order_id, "status": "repeat"})
-    if not data.get("success"):
-        return {"response": "ERROR", "error": (data.get("error") or {}).get("message", "Resend OTP RumahOTP gagal."), "raw": data}
-    return {"response": "OK", "raw": data}
+        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status}
+    return {"response":"OK", "sms":[], "status":status}
 
 
 def cancel_number(order_id):

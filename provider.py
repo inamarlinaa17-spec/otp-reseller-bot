@@ -586,11 +586,6 @@ def get_sms(
         }
 
 
-def resend_otp(order_id):
-    """5SIM has no documented SMS-resend endpoint for an already completed activation."""
-    return {"response": "ERROR", "error": "5SIM tidak menyediakan endpoint resend OTP untuk order ini."}
-
-
 # =========================================================
 # CANCEL NUMBER
 # =========================================================
@@ -628,24 +623,7 @@ def cancel_number(
                     data
             }
 
-        data = response.json()
-        # 5SIM returns the updated order object (for example status=CANCELED),
-        # not our internal response=OK convention. Normalize only terminal
-        # cancellation states so callers never refund on an ambiguous response.
-        status = str(data.get("status") or "").strip().lower() if isinstance(data, dict) else ""
-        if status in {"canceled", "cancelled", "cancel"}:
-            if isinstance(data, dict):
-                data = dict(data)
-                data["response"] = "OK"
-            return data
-        if isinstance(data, dict) and data.get("response") == "OK":
-            return data
-        return {
-            "response": "ERROR",
-            "message": (data.get("message") if isinstance(data, dict) else str(data)) or
-                       f"5SIM belum mengonfirmasi pembatalan (status={status or 'unknown'}).",
-            "raw": data,
-        }
+        return response.json()
 
     except Exception as error:
 

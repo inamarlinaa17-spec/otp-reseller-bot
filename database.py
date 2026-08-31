@@ -111,20 +111,13 @@ def init_database():
                 order_id TEXT UNIQUE NOT NULL,
                 telegram_id BIGINT NOT NULL,
                 country TEXT,
-                country_name TEXT,
                 service TEXT,
-                service_name TEXT,
                 provider TEXT NOT NULL DEFAULT '5sim',
-                operator TEXT,
-                phone TEXT,
-                expires_at TEXT,
                 sell_price BIGINT NOT NULL,
                 provider_cost BIGINT NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 provider_order_id TEXT,
                 refund_status TEXT NOT NULL DEFAULT 'NONE',
-                cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
-                cancel_requested_at TEXT,
                 created_at TEXT NOT NULL,
                 completed_at TEXT
             )
@@ -140,20 +133,9 @@ def init_database():
         """)
 
         db.execute("""
-            ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT '5sim'
-        """)
-        for col, typ in [("country_name", "TEXT"), ("service_name", "TEXT"), ("operator", "TEXT"), ("phone", "TEXT"), ("expires_at", "TEXT")]:
-            db.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {col} {typ}")
-        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE")
-        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TEXT")
-
-        # Railway/PostgreSQL lama bisa masih memiliki expires_at sebagai BIGINT.
-        # PostgreSQL tidak dapat menjalankan COALESCE(text, bigint), sehingga order
-        # provider sudah sukses tetapi proses bot berhenti saat menyimpan order.
-        db.execute("""
             ALTER TABLE orders
-            ALTER COLUMN expires_at TYPE TEXT
-            USING expires_at::text
+            ADD COLUMN IF NOT EXISTS provider
+            TEXT NOT NULL DEFAULT '5sim'
         """)
 
 
@@ -709,10 +691,7 @@ def create_pending_order(
     country,
     service,
     sell_price,
-    provider="5sim",
-    country_name=None,
-    service_name=None,
-    operator=None
+    provider="5sim"
 ):
 
     with get_db() as db:
@@ -806,9 +785,9 @@ def create_pending_order(
             (
                 order_id,
                 telegram_id,
-                country, country_name,
-                service, service_name,
-                provider, operator,
+                country,
+                service,
+                provider,
                 sell_price,
                 provider_cost,
                 status,
@@ -817,14 +796,14 @@ def create_pending_order(
                 created_at
             )
             VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 order_id,
                 telegram_id,
-                country, country_name,
-                service, service_name,
-                provider, operator,
+                country,
+                service,
+                provider,
                 sell_price,
                 0,
                 "PENDING",
@@ -844,9 +823,7 @@ def create_pending_order(
 def save_provider_order(
     order_id,
     provider_order_id,
-    provider_cost,
-    phone=None,
-    expires_at=None
+    provider_cost
 ):
 
     with get_db() as db:
@@ -856,16 +833,12 @@ def save_provider_order(
             UPDATE orders
             SET
                 provider_order_id = %s,
-                provider_cost = %s,
-                phone = COALESCE(%s, phone),
-                expires_at = COALESCE(%s, expires_at)
+                provider_cost = %s
             WHERE order_id = %s
             """,
             (
                 str(provider_order_id),
                 int(provider_cost),
-                phone,
-                str(expires_at) if expires_at is not None else None,
                 order_id
             )
         )
@@ -940,34 +913,6 @@ def get_order(
             """,
             (order_id,)
         ).fetchone()
-
-
-def claim_cancel_request(order_id):
-    """Atomically reserve the single upstream cancel request for an order.
-
-    Returns True only for the first caller. This prevents Telegram double-clicks
-    or repeated callbacks from charging the provider with multiple cancel calls.
-    """
-    with get_db() as db:
-        row = db.execute("""
-            UPDATE orders
-            SET cancel_requested = TRUE, cancel_requested_at = %s, status = 'CANCEL_REQUESTED'
-            WHERE order_id = %s
-              AND status = 'PENDING'
-              AND COALESCE(cancel_requested, FALSE) = FALSE
-            RETURNING order_id
-        """, (now(), order_id)).fetchone()
-        return bool(row)
-
-
-def mark_cancel_request_failed(order_id):
-    """Keep the one-shot marker but expose a terminal local state for the UI."""
-    with get_db() as db:
-        db.execute("""
-            UPDATE orders SET status = 'CANCEL_REQUEST_FAILED'
-            WHERE order_id = %s AND status = 'CANCEL_REQUESTED'
-        """, (order_id,))
-
 
 
 # =========================================================
