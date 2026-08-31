@@ -138,6 +138,16 @@ def init_database():
             TEXT NOT NULL DEFAULT '5sim'
         """)
 
+        db.execute("""
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS operator TEXT
+        """)
+        db.execute("""
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS expires_at TEXT
+        """)
+        db.execute("""
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS phone TEXT
+        """)
+
 
 # =========================================================
 # TIME
@@ -691,7 +701,8 @@ def create_pending_order(
     country,
     service,
     sell_price,
-    provider="5sim"
+    provider="5sim",
+    operator=None
 ):
 
     with get_db() as db:
@@ -793,10 +804,13 @@ def create_pending_order(
                 status,
                 provider_order_id,
                 refund_status,
-                created_at
+                created_at,
+                operator,
+                expires_at,
+                phone
             )
             VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 order_id,
@@ -809,7 +823,10 @@ def create_pending_order(
                 "PENDING",
                 None,
                 "NONE",
-                now()
+                now(),
+                operator,
+                None,
+                None
             )
         )
 
@@ -841,6 +858,20 @@ def save_provider_order(
                 int(provider_cost),
                 order_id
             )
+        )
+
+
+def update_order_provider_meta(order_id, operator=None, expires_at=None, phone=None):
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE orders
+            SET operator = COALESCE(%s, operator),
+                expires_at = COALESCE(%s, expires_at),
+                phone = COALESCE(%s, phone)
+            WHERE order_id = %s
+            """,
+            (operator, expires_at, phone, order_id)
         )
 
 
