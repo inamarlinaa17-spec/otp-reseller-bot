@@ -143,6 +143,15 @@ def init_database():
         for col, typ in [("country_name", "TEXT"), ("service_name", "TEXT"), ("operator", "TEXT"), ("phone", "TEXT"), ("expires_at", "TEXT")]:
             db.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {col} {typ}")
 
+        # Railway/PostgreSQL lama bisa masih memiliki expires_at sebagai BIGINT.
+        # PostgreSQL tidak dapat menjalankan COALESCE(text, bigint), sehingga order
+        # provider sudah sukses tetapi proses bot berhenti saat menyimpan order.
+        db.execute("""
+            ALTER TABLE orders
+            ALTER COLUMN expires_at TYPE TEXT
+            USING expires_at::text
+        """)
+
 
 # =========================================================
 # TIME
@@ -852,7 +861,7 @@ def save_provider_order(
                 str(provider_order_id),
                 int(provider_cost),
                 phone,
-                expires_at,
+                str(expires_at) if expires_at is not None else None,
                 order_id
             )
         )

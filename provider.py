@@ -623,7 +623,24 @@ def cancel_number(
                     data
             }
 
-        return response.json()
+        data = response.json()
+        # 5SIM returns the updated order object (for example status=CANCELED),
+        # not our internal response=OK convention. Normalize only terminal
+        # cancellation states so callers never refund on an ambiguous response.
+        status = str(data.get("status") or "").strip().lower() if isinstance(data, dict) else ""
+        if status in {"canceled", "cancelled", "cancel"}:
+            if isinstance(data, dict):
+                data = dict(data)
+                data["response"] = "OK"
+            return data
+        if isinstance(data, dict) and data.get("response") == "OK":
+            return data
+        return {
+            "response": "ERROR",
+            "message": (data.get("message") if isinstance(data, dict) else str(data)) or
+                       f"5SIM belum mengonfirmasi pembatalan (status={status or 'unknown'}).",
+            "raw": data,
+        }
 
     except Exception as error:
 

@@ -3118,6 +3118,18 @@ async def process_otp_order(
         country = quote["country"]
         display_country = quote.get("country_name") or country
         service = quote["service"]
+        # RumahOTP memakai number_id internal (mis. 837). Jangan tampilkan ID
+        # sebagai nama negara; resolve kembali ke daftar negara provider.
+        if server == "rumahotp" and str(display_country).strip().isdigit():
+            try:
+                country_meta = await asyncio.to_thread(find_country, country, service)
+                if isinstance(country_meta, dict):
+                    real_name = (country_meta.get("name") or country_meta.get("country_name") or
+                                 country_meta.get("title") or country_meta.get("label"))
+                    if real_name:
+                        display_country = str(real_name)
+            except Exception:
+                logger.exception("Gagal resolve nama negara RumahOTP")
         operator = quote.get("provider_operator") or quote.get("operator") or "any"
         provider_cost_usd = float(quote["cost_usd"])
         quote_operators = []
@@ -3182,6 +3194,16 @@ async def process_otp_order(
             return
         country = quote.get("country") or country
         display_country = quote.get("country_name") or display_country
+        if str(display_country).strip().isdigit():
+            try:
+                country_meta = await asyncio.to_thread(find_country, country, service)
+                if isinstance(country_meta, dict):
+                    real_name = (country_meta.get("name") or country_meta.get("country_name") or
+                                 country_meta.get("title") or country_meta.get("label"))
+                    if real_name:
+                        display_country = str(real_name)
+            except Exception:
+                logger.exception("Gagal resolve nama negara RumahOTP")
         operator = quote.get("provider_operator") or "any"
         provider_cost_usd = float(quote.get("cost_usd") or 0)
     else:
@@ -3382,7 +3404,21 @@ async def process_otp_order(
                 expires_at = provider_state.get("expires_at") or expires_at
         except Exception:
             logger.exception("Tidak dapat membaca expiry RumahOTP")
-    save_provider_order(order_id, provider_order_id, provider_cost_rp, phone=phone, expires_at=expires_at)
+    try:
+        save_provider_order(order_id, provider_order_id, provider_cost_rp, phone=phone, expires_at=expires_at)
+    except Exception as exc:
+        # Provider may already have charged/created the number. Do not hide the
+        # exception behind an endless "Memproses order" screen. Log full data
+        # and show a recoverable error with the local order reference.
+        logger.exception("Gagal menyimpan order provider local=%s provider=%s", order_id, provider_order_id)
+        await query.edit_message_text(
+            "⚠️ <b>Nomor berhasil dibuat, tetapi penyimpanan order bot gagal.</b>\n\n"
+            f"🧾 Order: <code>{order_id}</code>\n"
+            f"📞 Nomor: <code>{phone}</code>\n"
+            "Jangan membuat order ulang. Hubungi admin dengan ID order di atas.",
+            parse_mode="HTML"
+        )
+        return
 
     await query.edit_message_text(
         "✅ <b>ORDER BERHASIL</b>\n\n"
@@ -4245,7 +4281,11 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                     service=product,
 
-                    sell_price=sell_price
+                    sell_price=sell_price,
+                    provider="5sim",
+                    country_name=str(country),
+                    service_name=str(product),
+                    operator=str(operator)
 
                 )
             )
@@ -4410,13 +4450,16 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         )
 
+        expires_at = result.get("expires_at") or result.get("expires") or result.get("expiration") or result.get("expire_at")
         save_provider_order(
 
             order_id,
 
             provider_order_id,
 
-            provider_cost_rp
+            provider_cost_rp,
+            phone=phone,
+            expires_at=expires_at
 
         )
 
@@ -4822,7 +4865,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             f"🧾 Order: "
             f"<code>{order_id}</code>\n"
-
+            f"🖥 Server: <b>{OTP_SERVERS.get(order.get('provider'), order.get('provider') or '-')}</b>\n"
+            f"{country_flag(_order_country(order))} Negara: <b>{escape(_order_country(order))}</b>\n"
+            f"📱 Layanan: <b>{escape(_order_service(order))}</b>\n"
+            f"📞 Nomor: <code>{order.get('phone') or '-'}</code>\n\n"
             f"💸 Refund: "
             f"<b>{format_rupiah(order['sell_price'])}</b>\n"
 
