@@ -383,7 +383,7 @@ def buy_number(country, service, operator="any", metadata=None):
     if not data.get("success"):
         return {"response":"ERROR", "error":(data.get("error") or {}).get("message","RumahOTP order gagal.")}
     d=data.get("data") or {}
-    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),"number":d.get("phone_number"),"expired_at":d.get("expired_at"),"response":"OK"}
+    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),"number":d.get("phone_number"),"response":"OK"}
 
 
 def get_sms(order_id):
@@ -392,20 +392,8 @@ def get_sms(order_id):
     d=data.get("data") or {}; status=str(d.get("status") or "").lower()
     code=d.get("otp_code"); text=d.get("otp_msg") or ""
     if code:
-        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status, "expired_at":d.get("expired_at")}
-    return {"response":"OK", "sms":[], "status":status, "expired_at":d.get("expired_at")}
-
-
-def resend_otp(order_id):
-    """Request another OTP from RumahOTP while the order is still active."""
-    order_id = str(order_id or "").strip()
-    if not order_id:
-        return {"response": "ERROR", "error": "Provider order ID kosong."}
-    data = _get("/v1/orders/set_status", {"order_id": order_id, "status": "resend"})
-    if not data.get("success"):
-        return {"response": "ERROR", "error": (data.get("error") or {}).get("message", "Resend OTP gagal."), "raw": data}
-    payload = data.get("data") or {}
-    return {"response": "OK", "status": str(payload.get("status") or "resend"), "expired_at": payload.get("expired_at"), "raw": data}
+        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status}
+    return {"response":"OK", "sms":[], "status":status}
 
 
 def cancel_number(order_id):
