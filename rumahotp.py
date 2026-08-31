@@ -383,7 +383,11 @@ def buy_number(country, service, operator="any", metadata=None):
     if not data.get("success"):
         return {"response":"ERROR", "error":(data.get("error") or {}).get("message","RumahOTP order gagal.")}
     d=data.get("data") or {}
-    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),"number":d.get("phone_number"),"response":"OK"}
+    # Preserve RumahOTP's own expiry field instead of inventing a local timer.
+    expires_at = (d.get("expires_at") or d.get("expired_at") or d.get("expiration") or
+                  d.get("expire_at") or d.get("expires"))
+    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),
+            "number":d.get("phone_number"),"expires_at":expires_at,"response":"OK"}
 
 
 def get_sms(order_id):
@@ -391,9 +395,11 @@ def get_sms(order_id):
     if not data.get("success"): return {"response":"ERROR", "error":(data.get("error") or {}).get("message","Gagal mengecek RumahOTP.")}
     d=data.get("data") or {}; status=str(d.get("status") or "").lower()
     code=d.get("otp_code"); text=d.get("otp_msg") or ""
+    expires_at = (d.get("expires_at") or d.get("expired_at") or d.get("expiration") or
+                  d.get("expire_at") or d.get("expires"))
     if code:
-        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status}
-    return {"response":"OK", "sms":[], "status":status}
+        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status, "expires_at":expires_at}
+    return {"response":"OK", "sms":[], "status":status, "expires_at":expires_at}
 
 
 def cancel_number(order_id):

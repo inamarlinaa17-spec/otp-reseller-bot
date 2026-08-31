@@ -111,8 +111,13 @@ def init_database():
                 order_id TEXT UNIQUE NOT NULL,
                 telegram_id BIGINT NOT NULL,
                 country TEXT,
+                country_name TEXT,
                 service TEXT,
+                service_name TEXT,
                 provider TEXT NOT NULL DEFAULT '5sim',
+                operator TEXT,
+                phone TEXT,
+                expires_at TEXT,
                 sell_price BIGINT NOT NULL,
                 provider_cost BIGINT NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'PENDING',
@@ -133,10 +138,10 @@ def init_database():
         """)
 
         db.execute("""
-            ALTER TABLE orders
-            ADD COLUMN IF NOT EXISTS provider
-            TEXT NOT NULL DEFAULT '5sim'
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT '5sim'
         """)
+        for col, typ in [("country_name", "TEXT"), ("service_name", "TEXT"), ("operator", "TEXT"), ("phone", "TEXT"), ("expires_at", "TEXT")]:
+            db.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {col} {typ}")
 
 
 # =========================================================
@@ -691,7 +696,10 @@ def create_pending_order(
     country,
     service,
     sell_price,
-    provider="5sim"
+    provider="5sim",
+    country_name=None,
+    service_name=None,
+    operator=None
 ):
 
     with get_db() as db:
@@ -785,9 +793,9 @@ def create_pending_order(
             (
                 order_id,
                 telegram_id,
-                country,
-                service,
-                provider,
+                country, country_name,
+                service, service_name,
+                provider, operator,
                 sell_price,
                 provider_cost,
                 status,
@@ -796,14 +804,14 @@ def create_pending_order(
                 created_at
             )
             VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 order_id,
                 telegram_id,
-                country,
-                service,
-                provider,
+                country, country_name,
+                service, service_name,
+                provider, operator,
                 sell_price,
                 0,
                 "PENDING",
@@ -823,7 +831,9 @@ def create_pending_order(
 def save_provider_order(
     order_id,
     provider_order_id,
-    provider_cost
+    provider_cost,
+    phone=None,
+    expires_at=None
 ):
 
     with get_db() as db:
@@ -833,12 +843,16 @@ def save_provider_order(
             UPDATE orders
             SET
                 provider_order_id = %s,
-                provider_cost = %s
+                provider_cost = %s,
+                phone = COALESCE(%s, phone),
+                expires_at = COALESCE(%s, expires_at)
             WHERE order_id = %s
             """,
             (
                 str(provider_order_id),
                 int(provider_cost),
+                phone,
+                expires_at,
                 order_id
             )
         )

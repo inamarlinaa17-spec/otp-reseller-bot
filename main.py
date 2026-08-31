@@ -3036,6 +3036,66 @@ async def post_init(application):
 # =========================================================
 
 
+async def user_start_preserve_history(query):
+    user = query.from_user
+    create_user(user.id, user.username, user.first_name)
+    saldo = get_balance(user.id)
+    total_user = get_total_users()
+    text = f"""👋 <b>{user.first_name.upper()}</b>
+{get_wib_time()}
+
+<b>User Info :</b>
+├ ID : <code>{user.id}</code>
+├ Username : @{user.username or '-'}
+
+<b>Balance Info :</b>
+├ Balance : <b>{format_rupiah(saldo)}</b>
+
+<b>Bot Stats :</b>
+├ Total User : {total_user}
+
+Pilih menu di bawah:"""
+    await query.message.reply_text(text, parse_mode="HTML", reply_markup=user_menu())
+
+
+def _order_country(order):
+    return str(order.get("country_name") or order.get("country") or "-")
+
+
+def _order_service(order):
+    return str(order.get("service_name") or order.get("service") or "-")
+
+
+def _order_expiry_text(order):
+    """Use the expiry returned by the upstream provider whenever available."""
+    raw = order.get("expires_at")
+    if raw:
+        try:
+            value = str(raw).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = pytz.utc.localize(dt)
+            return dt.astimezone(pytz.timezone("Asia/Jakarta")).strftime("%H:%M:%S WIB")
+        except Exception:
+            return str(raw)
+    return "mengikuti batas waktu provider"
+
+
+def _active_order_text(order, waiting_note="Menunggu SMS OTP..."):
+    country = _order_country(order)
+    service = _order_service(order)
+    return (
+        "⏳ <b>MENUNGGU SMS OTP</b>\n\n"
+        f"🧾 Order: <code>{order['order_id']}</code>\n"
+        f"🖥 Server: <b>{OTP_SERVERS.get(order.get('provider'), order.get('provider'))}</b>\n"
+        f"{country_flag(country)} Negara: <b>{escape(country)}</b>\n"
+        f"📱 Layanan: <b>{escape(service)}</b>\n"
+        f"📞 Nomor: <code>{order.get('phone') or '-'}</code>\n"
+        f"⏰ Nokos Expired Pada: <b>{escape(_order_expiry_text(order))}</b>\n\n"
+        f"⌛ <b>{waiting_note}</b>"
+    )
+
+
 async def process_otp_order(
     query,
     user_id,
@@ -3178,7 +3238,10 @@ async def process_otp_order(
             country=country,
             service=service,
             sell_price=sell_price,
-            provider=server
+            provider=server,
+            country_name=str(display_country),
+            service_name=str(service_label),
+            operator=str(operator)
         )
     except ValueError as error:
         await query.edit_message_text(
@@ -3299,11 +3362,23 @@ async def process_otp_order(
         round(provider_cost_usd * KURS_DOLAR)
     )
 
-    save_provider_order(
-        order_id,
-        provider_order_id,
-        provider_cost_rp
-    )
+    # Simpan data provider yang diperlukan untuk tampilan riwayat/order aktif.
+    # API provider dapat mengembalikan batas waktu dengan nama field berbeda.
+    expires_at = None
+    if isinstance(result, dict):
+        expires_at = (result.get("expires_at") or result.get("expires") or
+                      result.get("expiration") or result.get("expire_at") or
+                      result.get("expiry"))
+    # RumahOTP dapat menyimpan expiry hanya pada endpoint status; baca sekali
+    # agar tampilan memakai batas waktu asli provider, bukan timer buatan bot.
+    if server == "rumahotp" and not expires_at:
+        try:
+            provider_state = await asyncio.to_thread(get_rumahotp_sms, provider_order_id)
+            if isinstance(provider_state, dict):
+                expires_at = provider_state.get("expires_at") or expires_at
+        except Exception:
+            logger.exception("Tidak dapat membaca expiry RumahOTP")
+    save_provider_order(order_id, provider_order_id, provider_cost_rp, phone=phone, expires_at=expires_at)
 
     await query.edit_message_text(
         "✅ <b>ORDER BERHASIL</b>\n\n"
@@ -3314,6 +3389,7 @@ async def process_otp_order(
         f"📞 Nomor:\n<code>{phone}</code>\n\n"
         f"💰 Harga: <b>{format_rupiah(sell_price)}</b>\n"
         f"💳 Sisa saldo: <b>{format_rupiah(balance_after)}</b>\n\n"
+        f"⏰ Nokos Expired: <b>{expires_at or 'mengikuti batas provider'}</b>\n\n"
         "⏳ <b>Menunggu SMS OTP...</b>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
@@ -4549,15 +4625,32 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                 return
 
-        await query.answer(
-
-            "⏳ OTP belum masuk. "
-            "Coba lagi.",
-
-            show_alert=True
-
+        await query.edit_message_text(
+            _active_order_text(order, "OTP belum masuk. Silakan cek lagi."),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Cek OTP Lagi", callback_data=f"otp_check:{order_id}")],
+                [InlineKeyboardButton("↩️ Kembali", callback_data=f"otp_back_active:{order_id}")],
+                [InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")],
+                [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
+            ])
         )
+        return
 
+    if data.startswith("otp_back_active:"):
+        order_id = data.split(":", 1)[1]
+        order = get_order(order_id)
+        if not order or order.get("telegram_id") != user_id:
+            await query.answer("Order tidak ditemukan.", show_alert=True)
+            return
+        await query.edit_message_text(
+            _active_order_text(order), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
+                [InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")],
+                [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
+            ])
+        )
         return
 
     # =====================================================
@@ -4604,14 +4697,29 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        provider_order_id = (
-            order[
-                "provider_order_id"
-            ]
-        )
+        # Beri provider waktu minimal 2 menit sebelum permintaan cancel/refund.
+        try:
+            created = datetime.fromisoformat(str(order.get("created_at")).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = pytz.utc.localize(created)
+            remaining = 120 - max(0, int((datetime.now(pytz.utc) - created).total_seconds()))
+        except Exception:
+            remaining = 0
+        if remaining > 0:
+            await query.edit_message_text(
+                _active_order_text(order, f"Tunggu {_format_remaining(remaining)} sebelum pembatalan tersedia."),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
+                    [InlineKeyboardButton("🔄 Coba Batalkan Lagi", callback_data=f"otp_cancel:{order_id}")],
+                    [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
+                ])
+            )
+            return
+
+        provider_order_id = order["provider_order_id"]
 
         await query.edit_message_text(
-
             "⏳ <b>Membatalkan order...</b>",
 
             parse_mode="HTML"
@@ -4658,7 +4766,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 await query.edit_message_text(
                     "⚠️ <b>Order belum berhasil dibatalkan di provider.</b>\n\n"
                     f"🧾 Order: <code>{order_id}</code>\n"
-                    f"📡 Provider: <b>{'RumahOTP' if provider == 'rumahotp' else '5SIM'}</b>\n"
+                    f"{country_flag(_order_country(order))} Negara: <b>{escape(_order_country(order))}</b>\n"
+                    f"📱 Layanan: <b>{escape(_order_service(order))}</b>\n"
+                    f"📞 Nomor: <code>{order.get('phone') or '-'}</code>\n"
                     f"❗ <b>{escape(provider_error)}</b>\n\n"
                     "Saldo <b>belum</b> dikembalikan agar tidak terjadi refund ganda. "
                     "Silakan coba tombol <b>❌ Batal / Refund</b> lagi beberapa saat kemudian.",
@@ -4722,7 +4832,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 [
                     InlineKeyboardButton(
                         "📱 Order Lagi",
-                        callback_data="order"
+                        callback_data=f"otp_reorder:{order_id}"
                     )
                 ],
 
@@ -5304,20 +5414,27 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         return
 
+    if data.startswith("otp_reorder:"):
+        old_id = data.split(":", 1)[1]
+        old = get_order(old_id)
+        if not old or old.get("telegram_id") != user_id:
+            await query.answer("Riwayat order tidak ditemukan.", show_alert=True)
+            return
+        context.user_data["otp_server"] = old.get("provider") or "5sim"
+        context.user_data["otp_service"] = old.get("service") or ""
+        context.user_data["otp_country"] = old.get("country") or ""
+        await show_otp_operator_page(query, context.user_data["otp_server"], context.user_data["otp_service"], context.user_data["otp_country"], 0)
+        return
+
     # =====================================================
     # USER HOME
     # =====================================================
 
     if data == "user_home":
-
-        context.chat_data[
-            "waiting_deposit"
-        ] = False
-
-        await user_start(
-            query
-        )
-
+        context.chat_data["waiting_deposit"] = False
+        # Jangan menimpa pesan order aktif/refund; kirim menu baru agar riwayat
+        # order yang masih menunggu OTP/refund tetap terlihat di chat.
+        await user_start_preserve_history(query)
         return
 
 
