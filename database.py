@@ -138,6 +138,11 @@ def init_database():
             TEXT NOT NULL DEFAULT '5sim'
         """)
 
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_name TEXT")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS country_name TEXT")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS phone TEXT")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS expired_at TEXT")
+
 
 # =========================================================
 # TIME
@@ -823,7 +828,9 @@ def create_pending_order(
 def save_provider_order(
     order_id,
     provider_order_id,
-    provider_cost
+    provider_cost,
+    phone=None,
+    expired_at=None
 ):
 
     with get_db() as db:
@@ -833,12 +840,16 @@ def save_provider_order(
             UPDATE orders
             SET
                 provider_order_id = %s,
-                provider_cost = %s
+                provider_cost = %s,
+                phone = COALESCE(%s, phone),
+                expired_at = COALESCE(%s, expired_at)
             WHERE order_id = %s
             """,
             (
                 str(provider_order_id),
                 int(provider_cost),
+                phone,
+                expired_at,
                 order_id
             )
         )
