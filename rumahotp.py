@@ -383,7 +383,7 @@ def buy_number(country, service, operator="any", metadata=None):
     if not data.get("success"):
         return {"response":"ERROR", "error":(data.get("error") or {}).get("message","RumahOTP order gagal.")}
     d=data.get("data") or {}
-    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),"number":d.get("phone_number"),"expired_at":d.get("expired_at"),"response":"OK"}
+    return {"id":d.get("order_id"),"order_id":d.get("order_id"),"phone":d.get("phone_number"),"number":d.get("phone_number"),"response":"OK"}
 
 
 def get_sms(order_id):
@@ -391,31 +391,9 @@ def get_sms(order_id):
     if not data.get("success"): return {"response":"ERROR", "error":(data.get("error") or {}).get("message","Gagal mengecek RumahOTP.")}
     d=data.get("data") or {}; status=str(d.get("status") or "").lower()
     code=d.get("otp_code"); text=d.get("otp_msg") or ""
-    expired_at=d.get("expired_at")
     if code:
-        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status, "expired_at":expired_at, "phone":d.get("phone_number")}
-    return {"response":"OK", "sms":[], "status":status, "expired_at":expired_at, "phone":d.get("phone_number")}
-
-
-def resend_number(order_id):
-    """Ask RumahOTP to resend the OTP code while the order is active."""
-    order_id = str(order_id or '').strip()
-    if not order_id:
-        return {"response": "ERROR", "error": "Provider order ID kosong."}
-    data = _get("/v1/orders/set_status", {"order_id": order_id, "status": "resend"})
-    if not data.get("success"):
-        return {"response": "ERROR", "error": (data.get("error") or {}).get("message", "Resend OTP gagal."), "raw": data}
-    status = str((data.get("data") or {}).get("status") or "").lower()
-    # Refresh status so the bot can retain the current expiry timestamp.
-    current = _get("/v1/orders/get_status", {"order_id": order_id})
-    payload = current.get("data") or {}
-    return {
-        "response": "OK",
-        "provider_status": status or str(payload.get("status") or ""),
-        "expired_at": payload.get("expired_at"),
-        "phone": payload.get("phone_number"),
-        "raw": current,
-    }
+        return {"response":"OK", "sms":[{"code":str(code),"text":text}], "status":status}
+    return {"response":"OK", "sms":[], "status":status}
 
 
 def cancel_number(order_id):
