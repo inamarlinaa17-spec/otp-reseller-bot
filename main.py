@@ -3310,12 +3310,15 @@ async def process_otp_order(
         round(provider_cost_usd * KURS_DOLAR)
     )
 
-    save_provider_order(
+    # Provider may already have charged the order. Do not let a database write
+    # block the Telegram callback after a successful provider purchase.
+    await asyncio.to_thread(
+        save_provider_order,
         order_id,
         provider_order_id,
         provider_cost_rp,
-        phone=phone,
-        expired_at=provider_expired_at
+        phone,
+        provider_expired_at
     )
 
     await query.edit_message_text(
@@ -3350,6 +3353,15 @@ async def process_otp_order(
             ]
         ])
     )
+
+
+def _save_order_labels(order_id, service_name, country_name):
+    """Persist human-readable history labels without blocking Telegram's event loop."""
+    with get_db() as db:
+        db.execute(
+            "UPDATE orders SET service_name=%s, country_name=%s WHERE order_id=%s",
+            (service_name, country_name, order_id)
+        )
 
 
 async def user_callback(
@@ -4474,10 +4486,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        provider = (
-            order.get("provider")
-            or "5sim"
-        )
+        provider = str(order.get("provider") or "5sim").strip().lower()
 
         if provider == "rumahotp":
             sms_checker = get_rumahotp_sms
@@ -4532,24 +4541,31 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
                 if success:
 
-                    await query.edit_message_text(
-
+                    current_order = get_order(order_id) or order
+                    service_name = current_order.get("service_name") or current_order.get("service") or "-"
+                    country_name = current_order.get("country_name") or current_order.get("country") or "-"
+                    phone = current_order.get("phone") or "-"
+                    expired_at = data_sms.get("expired_at") or current_order.get("expired_at")
+                    detail_lines = (
                         "🎉 <b>OTP DITERIMA</b>\n\n"
-
-                        f"🧾 Order: "
-                        f"<code>{order_id}</code>\n\n"
-
-                        f"🔐 OTP:\n"
-                        f"<code>{code}</code>\n\n"
-
+                        f"🧾 Order: <code>{order_id}</code>\n"
+                        f"📱 Layanan: <b>{escape(str(service_name))}</b>\n"
+                        f"🌐 Negara: <b>{escape(str(country_name))}</b>\n"
+                        f"📞 Nomor: <code>{escape(str(phone))}</code>\n"
+                        + (f"⏱️ Expired: <code>{escape(str(expired_at))}</code>\n" if expired_at else "")
+                        + "\n🔐 OTP:\n"
+                        f"<code>{escape(str(code))}</code>\n\n"
                         f"📨 SMS:\n"
-                        f"<code>{text}</code>",
+                        f"<code>{escape(str(text))}</code>"
+                    )
+                    await query.edit_message_text(
+                        detail_lines,
 
                         parse_mode="HTML",
 
                         reply_markup=InlineKeyboardMarkup([
                             ([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")]
-                             if provider == "rumahotp" else []),
+                             if provider.strip().lower() == "rumahotp" else []),
                             [InlineKeyboardButton("⬅️ Kembali ke Order", callback_data=f"otp_order_view:{order_id}")],
                             [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
                         ])
@@ -5511,7 +5527,7 @@ async def _admin_user_detail(query, telegram_id):
 async def _admin_user_orders(query, telegram_id):
     with get_db() as db:
         rows = db.execute(
-            """SELECT order_id, service, country, provider, sell_price, status, created_at
+            """SELECT order_id, service, service_name, country, country_name, phone, provider, sell_price, status, created_at
                FROM orders WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 12""",
             (telegram_id,),
         ).fetchall()
@@ -5522,9 +5538,11 @@ async def _admin_user_orders(query, telegram_id):
     keyboard = []
     for row in rows:
         lines.append(
-            f"• <code>{escape(str(row['order_id']))}</code> | {escape(str(row['service'] or '-'))} | "
-            f"{escape(str(row['country'] or '-'))} | {escape(str(row['provider'] or '-'))} | "
-            f"{format_rupiah(row['sell_price'])} | <b>{escape(str(row['status']))}</b>"
+            f"• <code>{escape(str(row['order_id']))}</code> - <b>{escape(str(row.get('status') or '-'))}</b>\n"
+            f"   📱 {escape(str(row.get('service_name') or row.get('service') or '-'))} | "
+            f"🌐 {escape(str(row.get('country_name') or row.get('country') or '-'))}\n"
+            f"   📞 <code>{escape(str(row.get('phone') or '-'))}</code> | "
+            f"💰 {format_rupiah(row['sell_price'])}"
         )
         if (str(row.get("status") or "").upper() == "PENDING" and
                 str(row.get("provider") or "").lower() in {"rumahotp", "5sim"}):
