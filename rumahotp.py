@@ -448,6 +448,17 @@ def get_sms(order_id):
     return {"response":"OK", "sms":[], "status":status, "expires_at":expires_at}
 
 
+def resend_otp(order_id):
+    """Ask RumahOTP to repeat SMS. Provider response is normalized; no local state changes."""
+    order_id = str(order_id or '').strip()
+    if not order_id:
+        return {"response": "ERROR", "error": "Provider order ID kosong."}
+    data = _get("/v1/orders/set_status", {"order_id": order_id, "status": "repeat"})
+    if not data.get("success"):
+        return {"response": "ERROR", "error": (data.get("error") or {}).get("message", "Resend OTP RumahOTP gagal."), "raw": data}
+    return {"response": "OK", "raw": data}
+
+
 def cancel_number(order_id):
     """Cancel a RumahOTP order and verify the cancellation at provider side.
 

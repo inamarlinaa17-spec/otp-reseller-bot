@@ -68,6 +68,8 @@ from database import (
     save_provider_order,
     get_order,
     mark_order_success,
+    claim_cancel_request,
+    mark_cancel_request_failed,
     refund_order,
     save_otp_quote,
     get_otp_quote
@@ -89,7 +91,8 @@ from provider import (
     buy_number,
     buy_number_any_operator,
     get_sms,
-    cancel_number
+    cancel_number,
+    resend_otp as resend_5sim_otp
 )
 
 
@@ -105,7 +108,8 @@ from rumahotp import (
     get_cheapest_quote as get_rumahotp_cheapest_quote,
     buy_number as buy_rumahotp_number,
     get_sms as get_rumahotp_sms,
-    cancel_number as cancel_rumahotp_number
+    cancel_number as cancel_rumahotp_number,
+    resend_otp as resend_rumahotp_otp
 )
 
 
@@ -2380,13 +2384,6 @@ async def show_country_page(
 
             reply_markup=InlineKeyboardMarkup([
 
-                [
-                    InlineKeyboardButton(
-                        "🏠 Menu Utama",
-                        callback_data="user_home"
-                    )
-                ]
-
             ])
 
         )
@@ -2980,8 +2977,9 @@ async def command_deposit(update, context):
 
 
 def _format_remaining(seconds):
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
+    seconds = max(0, int(seconds or 0))
+    minutes = (seconds + 59) // 60
+    hours, minutes = divmod(minutes, 60)
     return f"{hours} jam {minutes} menit"
 
 
@@ -3445,12 +3443,6 @@ async def process_otp_order(
                     callback_data=f"otp_cancel:{order_id}"
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    "🏠 Menu Utama",
-                    callback_data="user_home"
-                )
-            ]
         ])
     )
 
@@ -4512,13 +4504,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     )
                 ],
 
-                [
-                    InlineKeyboardButton(
-                        "🏠 Menu Utama",
-                        callback_data="user_home"
-                    )
-                ]
-
             ])
 
         )
@@ -4560,13 +4545,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        if order["status"] != "PENDING":
-
-            await query.answer(
-                f"Status: {order['status']}",
-                show_alert=True
-            )
-
+        if str(order.get("status")).upper() not in {"PENDING", "SUCCESS"}:
+            await query.answer(f"Status: {order['status']}", show_alert=True)
             return
 
         provider_order_id = (
@@ -4636,13 +4616,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             if code:
 
-                success = mark_order_success(
-                    order_id
-                )
+                if str(order.get("status")).upper() == "PENDING":
+                    mark_order_success(order_id)
 
-                if success:
-
-                    await query.edit_message_text(
+                await query.edit_message_text(
 
                         "🎉 <b>OTP DITERIMA</b>\n\n"
 
@@ -4658,14 +4635,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                         parse_mode="HTML",
 
                         reply_markup=InlineKeyboardMarkup([
-
-                            [
-                                InlineKeyboardButton(
-                                    "🏠 Menu Utama",
-                                    callback_data="user_home"
-                                )
-                            ]
-
+                            [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
+                            [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                            [InlineKeyboardButton("↩️ Kembali", callback_data=f"otp_back_received:{order_id}")],
                         ])
 
                     )
@@ -4678,8 +4650,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Cek OTP Lagi", callback_data=f"otp_check:{order_id}")],
                 [InlineKeyboardButton("↩️ Kembali", callback_data=f"otp_back_active:{order_id}")],
-                [InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")],
-                [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
             ])
         )
         return
@@ -4695,9 +4665,41 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
                 [InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")],
-                [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
             ])
         )
+        return
+
+    if data.startswith("otp_back_received:"):
+        order_id = data.split(":", 1)[1]
+        order = get_order(order_id)
+        if not order or order.get("telegram_id") != user_id:
+            await query.answer("Order tidak ditemukan.", show_alert=True); return
+        await query.edit_message_text(
+            "🎉 <b>OTP SUDAH DITERIMA</b>\n\n"
+            f"🧾 Order: <code>{order_id}</code>\n"
+            "Refund sudah tidak tersedia karena OTP telah diterima.",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
+                [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                [InlineKeyboardButton("↩️ Kembali", callback_data=f"otp_back_received:{order_id}")],
+            ]))
+        return
+
+    if data.startswith("otp_resend:"):
+        order_id = data.split(":", 1)[1]
+        order = get_order(order_id)
+        if not order or order.get("telegram_id") != user_id:
+            await query.answer("Order tidak ditemukan.", show_alert=True); return
+        if str(order.get("status")).upper() != "SUCCESS":
+            await query.answer("Resend hanya tersedia setelah OTP diterima.", show_alert=True); return
+        provider_order_id = order.get("provider_order_id")
+        provider = order.get("provider") or "5sim"
+        resend = resend_rumahotp_otp if provider == "rumahotp" else resend_5sim_otp
+        result = await asyncio.to_thread(resend, provider_order_id)
+        if result and result.get("response") == "OK":
+            await query.answer("Permintaan OTP baru berhasil dikirim ke provider.", show_alert=True)
+        else:
+            await query.answer(str((result or {}).get("error") or (result or {}).get("message") or "Provider tidak mendukung resend OTP."), show_alert=True)
         return
 
     # =====================================================
@@ -4735,14 +4737,20 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        if order["status"] != "PENDING":
-
-            await query.answer(
-                f"Order sudah {order['status']}.",
-                show_alert=True
-            )
-
+        status = str(order.get("status") or "").upper()
+        if status in {"SUCCESS", "REFUNDED"}:
+            await query.answer(f"Order sudah {status} dan tidak dapat dibatalkan.", show_alert=True)
             return
+        if status in {"CANCEL_REQUESTED", "CANCEL_REQUEST_FAILED"} or order.get("cancel_requested"):
+            await query.edit_message_text(
+                "⏳ <b>PERMINTAAN PEMBATALAN SUDAH DIPROSES</b>\n\n"
+                f"🧾 Order: <code>{order_id}</code>\n"
+                "Request ke provider sudah dikirim 1x dan tidak akan dikirim ulang.",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Perbarui Status", callback_data=f"otp_cancel:{order_id}")]])
+            )
+            return
+        if status != "PENDING":
+            await query.answer(f"Order sudah {status}.", show_alert=True); return
 
         # Beri provider waktu minimal 2 menit sebelum permintaan cancel/refund.
         try:
@@ -4757,21 +4765,26 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 _active_order_text(order, f"Tunggu {_format_remaining(remaining)} sebelum pembatalan tersedia."),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
                     [InlineKeyboardButton("🔄 Coba Batalkan Lagi", callback_data=f"otp_cancel:{order_id}")],
-                    [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
                 ])
             )
             return
 
+        # One upstream cancel request only. Repeated taps only refresh the UI.
+        if not claim_cancel_request(order_id):
+            latest = get_order(order_id) or order
+            await query.edit_message_text(
+                "⏳ <b>PERMINTAAN PEMBATALAN SUDAH DIPROSES</b>\n\n"
+                f"🧾 Order: <code>{order_id}</code>\n"
+                "Request ke provider sudah dikirim 1x. Tidak akan dikirim ulang meskipun tombol ditekan lagi.",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Perbarui Status", callback_data=f"otp_cancel:{order_id}")]
+                ]))
+            return
+
         provider_order_id = order["provider_order_id"]
 
-        await query.edit_message_text(
-            "⏳ <b>Membatalkan order...</b>",
-
-            parse_mode="HTML"
-
-        )
+        await query.edit_message_text("⏳ <b>Membatalkan order...</b>", parse_mode="HTML")
 
         cancel_result = {"response": "OK", "provider_status": "not_required"}
 
@@ -4810,6 +4823,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     or cancel_result.get("message")
                     or "Provider belum mengonfirmasi pembatalan."
                 )
+                mark_cancel_request_failed(order_id)
                 await query.edit_message_text(
                     "⚠️ <b>Order belum berhasil dibatalkan di provider.</b>\n\n"
                     f"🧾 Order: <code>{order_id}</code>\n"
@@ -4818,11 +4832,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     f"📞 Nomor: <code>{order.get('phone') or '-'}</code>\n"
                     f"❗ <b>{escape(provider_error)}</b>\n\n"
                     "Saldo <b>belum</b> dikembalikan agar tidak terjadi refund ganda. "
-                    "Silakan coba tombol <b>❌ Batal / Refund</b> lagi beberapa saat kemudian.",
+                    "Request provider tidak akan dikirim ulang agar tidak terjadi pembatalan ganda.",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Coba Batalkan Lagi", callback_data=f"otp_cancel:{order_id}")],
-                        [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
+                        [InlineKeyboardButton("🔄 Perbarui Status", callback_data=f"otp_cancel:{order_id}")],
                     ])
                 )
                 return
@@ -4885,13 +4898,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                         callback_data=f"otp_reorder:{order_id}"
                     )
                 ],
-
-                [
-                    InlineKeyboardButton(
-                        "🏠 Menu Utama",
-                        callback_data="user_home"
-                    )
-                ]
 
             ])
 

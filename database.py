@@ -123,6 +123,8 @@ def init_database():
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 provider_order_id TEXT,
                 refund_status TEXT NOT NULL DEFAULT 'NONE',
+                cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                cancel_requested_at TEXT,
                 created_at TEXT NOT NULL,
                 completed_at TEXT
             )
@@ -142,6 +144,8 @@ def init_database():
         """)
         for col, typ in [("country_name", "TEXT"), ("service_name", "TEXT"), ("operator", "TEXT"), ("phone", "TEXT"), ("expires_at", "TEXT")]:
             db.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {col} {typ}")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TEXT")
 
         # Railway/PostgreSQL lama bisa masih memiliki expires_at sebagai BIGINT.
         # PostgreSQL tidak dapat menjalankan COALESCE(text, bigint), sehingga order
@@ -936,6 +940,34 @@ def get_order(
             """,
             (order_id,)
         ).fetchone()
+
+
+def claim_cancel_request(order_id):
+    """Atomically reserve the single upstream cancel request for an order.
+
+    Returns True only for the first caller. This prevents Telegram double-clicks
+    or repeated callbacks from charging the provider with multiple cancel calls.
+    """
+    with get_db() as db:
+        row = db.execute("""
+            UPDATE orders
+            SET cancel_requested = TRUE, cancel_requested_at = %s, status = 'CANCEL_REQUESTED'
+            WHERE order_id = %s
+              AND status = 'PENDING'
+              AND COALESCE(cancel_requested, FALSE) = FALSE
+            RETURNING order_id
+        """, (now(), order_id)).fetchone()
+        return bool(row)
+
+
+def mark_cancel_request_failed(order_id):
+    """Keep the one-shot marker but expose a terminal local state for the UI."""
+    with get_db() as db:
+        db.execute("""
+            UPDATE orders SET status = 'CANCEL_REQUEST_FAILED'
+            WHERE order_id = %s AND status = 'CANCEL_REQUESTED'
+        """, (order_id,))
+
 
 
 # =========================================================

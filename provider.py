@@ -586,6 +586,11 @@ def get_sms(
         }
 
 
+def resend_otp(order_id):
+    """5SIM has no documented SMS-resend endpoint for an already completed activation."""
+    return {"response": "ERROR", "error": "5SIM tidak menyediakan endpoint resend OTP untuk order ini."}
+
+
 # =========================================================
 # CANCEL NUMBER
 # =========================================================
