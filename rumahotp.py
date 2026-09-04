@@ -409,52 +409,54 @@ def resend_otp(order_id):
 
 
 def cancel_number(order_id):
-    """Cancel a RumahOTP order and verify the cancellation at provider side.
+    """Cancel a RumahOTP order and verify the provider state before refunding.
 
-    V6 deliberately uses a two-phase flow:
-      1. ask RumahOTP to set the order status to ``cancel``;
-      2. re-read the order status and only report success when the provider
-         actually exposes a terminal cancelled state.
+    RumahOTP's API is rate-limited (5 requests / 10 seconds). The old V6
+    implementation used a burst of GET requests (status -> cancel -> 3
+    status checks), which could itself trigger 429s and make cancellation
+    verification unreliable.
 
-    This prevents the bot from saying "refund sukses" while RumahOTP still
-    shows WAITING.  The caller must only perform the local user refund when
-    this function returns ``response=OK``.
+    Flow:
+      1. Ask RumahOTP to set status=cancel.
+      2. Poll the provider status at a rate that stays below the documented
+         API limit.
+      3. Only return OK after get_status reports canceled/cancelled.
+      4. If the provider is still pending/running/expiring, return ERROR so
+         the caller will NOT refund the user's local balance yet.
     """
-    order_id = str(order_id or '').strip()
+    order_id = str(order_id or "").strip()
     if not order_id:
         return {"response": "ERROR", "error": "Provider order ID kosong."}
 
-    # First check the current provider state. If the order was already
-    # cancelled by another process/admin, it is safe to continue to the
-    # local refund. Never treat a successful HTTP response alone as proof.
-    before = _get("/v1/orders/get_status", {"order_id": order_id})
-    if before.get("success"):
-        before_payload = before.get("data") or {}
-        before_status = str(before_payload.get("status") or "").strip().lower()
-        if before_status in {"cancel", "canceled", "cancelled"}:
-            logger.info("[RUMAHOTP] order already cancelled order_id=%s status=%s", order_id, before_status)
-            return {
-                "response": "OK",
-                "provider_status": before_status,
-                "already_cancelled": True,
-                "raw": before,
-            }
-        if before_status in {"completed", "received", "done"}:
-            return {
-                "response": "ERROR",
-                "error": f"Order RumahOTP sudah berstatus {before_status} dan tidak boleh dibatalkan.",
-                "provider_status": before_status,
-                "raw": before,
-            }
+    # Do not do a status GET before the cancel command. A cancel click should
+    # consume as few provider requests as possible because RumahOTP documents
+    # a limit of 5 requests per 10 seconds.
+    logger.info("[RUMAHOTP] cancel request order_id=%s", order_id)
 
-    # Request cancellation. RumahOTP documents this endpoint as the official
-    # status-change method with status=cancel.
     data = _get(
         "/v1/orders/set_status",
         {"order_id": order_id, "status": "cancel"},
     )
 
     if not data.get("success"):
+        # One fallback status check lets us recognize an order that was
+        # already cancelled by another process without issuing a burst.
+        verify = _get("/v1/orders/get_status", {"order_id": order_id})
+        if verify.get("success"):
+            payload = verify.get("data") or {}
+            status = str(payload.get("status") or "").strip().lower()
+            logger.info(
+                "[RUMAHOTP] cancel fallback status order_id=%s status=%s",
+                order_id, status
+            )
+            if status in {"cancel", "canceled", "cancelled"}:
+                return {
+                    "response": "OK",
+                    "provider_status": status,
+                    "already_cancelled": True,
+                    "raw": verify,
+                }
+
         return {
             "response": "ERROR",
             "error": (data.get("error") or {}).get(
@@ -463,42 +465,64 @@ def cancel_number(order_id):
             "raw": data,
         }
 
-    payload = data.get("data") or {}
-    command_status = str(payload.get("status") or "").strip().lower()
+    command_payload = data.get("data") or {}
+    command_status = str(command_payload.get("status") or "").strip().lower()
+    logger.info(
+        "[RUMAHOTP] cancel command order_id=%s status=%s raw=%s",
+        order_id, command_status, data
+    )
 
-    # The command endpoint normally returns status=cancel. Still verify using
-    # the status endpoint because propagation can lag for a short time.
+    # IMPORTANT: success=true from set_status is only an acknowledgement of
+    # the command. It is not sufficient proof that the order is cancelled.
+    # The provider dashboard can still show the order as active while the
+    # status transition is propagating.
     if command_status in {"completed", "received", "done"}:
         return {
             "response": "ERROR",
-            "error": f"RumahOTP menolak pembatalan; status provider={command_status}.",
+            "error": (
+                f"RumahOTP menolak pembatalan; "
+                f"status provider={command_status}."
+            ),
             "provider_status": command_status,
             "raw": data,
         }
 
+    # Three verification requests, spaced out, keep this cancellation flow
+    # comfortably under the documented 5 requests / 10 seconds limit:
+    # 1 command + up to 3 status checks.
     verify_status = command_status or "unknown"
     verify_raw = data
-    for attempt, delay in enumerate((0.35, 0.75, 1.25), start=1):
-        if delay:
-            time.sleep(delay)
 
-        verify = _get("/v1/orders/get_status", {"order_id": order_id})
+    for attempt, delay in enumerate((2.0, 3.0, 4.0), start=1):
+        time.sleep(delay)
+
+        verify = _get(
+            "/v1/orders/get_status",
+            {"order_id": order_id},
+        )
         verify_raw = verify
+
         if not verify.get("success"):
             logger.warning(
-                "[RUMAHOTP] cancel verify failed order_id=%s attempt=%s error=%s",
+                "[RUMAHOTP] cancel verify failed "
+                "order_id=%s attempt=%s error=%s",
                 order_id, attempt, verify.get("error"),
             )
             continue
 
-        verify_payload = verify.get("data") or {}
-        verify_status = str(verify_payload.get("status") or "").strip().lower()
+        payload = verify.get("data") or {}
+        verify_status = str(payload.get("status") or "").strip().lower()
+
         logger.info(
-            "[RUMAHOTP] cancel verify order_id=%s attempt=%s status=%s",
+            "[RUMAHOTP] cancel verify "
+            "order_id=%s attempt=%s status=%s",
             order_id, attempt, verify_status,
         )
 
         if verify_status in {"cancel", "canceled", "cancelled"}:
+            # Give RumahOTP a moment to finish the balance/order settlement
+            # after the terminal status has been confirmed.
+            time.sleep(1.0)
             logger.info(
                 "[RUMAHOTP] cancel confirmed order_id=%s status=%s",
                 order_id, verify_status,
@@ -513,7 +537,10 @@ def cancel_number(order_id):
         if verify_status in {"completed", "received", "done"}:
             return {
                 "response": "ERROR",
-                "error": f"Order RumahOTP sudah berstatus {verify_status}; refund lokal dibatalkan.",
+                "error": (
+                    f"Order RumahOTP sudah berstatus {verify_status}; "
+                    "refund lokal dibatalkan."
+                ),
                 "provider_status": verify_status,
                 "raw": verify_raw,
             }
@@ -522,7 +549,8 @@ def cancel_number(order_id):
         "response": "ERROR",
         "error": (
             "RumahOTP belum mengonfirmasi pembatalan. "
-            f"Status terakhir: {verify_status}. Saldo user belum dikembalikan."
+            f"Status terakhir: {verify_status}. "
+            "Saldo user belum dikembalikan."
         ),
         "provider_status": verify_status,
         "raw": verify_raw,

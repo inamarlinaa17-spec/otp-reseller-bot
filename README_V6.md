@@ -10,7 +10,7 @@ V6 memperbaiki masalah ketika user menekan **❌ Batal / Refund** tetapi bot sud
 3. Setelah request cancel, bot **tidak langsung refund**.
 4. Bot melakukan verifikasi ulang melalui:
    `/v1/orders/get_status?order_id=...`
-5. Verifikasi dilakukan beberapa kali dengan jeda pendek untuk memberi waktu propagasi status.
+5. Verifikasi dilakukan bertahap (maksimal 3 kali, dengan jeda 2/3/4 detik) agar memberi waktu propagasi status sekaligus tidak membanjiri API RumahOTP yang membatasi 5 request per 10 detik.
 6. Refund saldo user hanya boleh terjadi jika RumahOTP benar-benar mengembalikan status `cancel`, `canceled`, atau `cancelled`.
 7. Jika RumahOTP masih `WAITING`, `expiring`, error, atau status lain yang belum terminal, bot **tidak refund lokal** dan menampilkan tombol **🔄 Coba Batalkan Lagi**.
 8. Jika order sudah `completed/received/done`, bot menolak pembatalan dan tidak mengembalikan saldo user.
@@ -21,7 +21,7 @@ V6 memperbaiki masalah ketika user menekan **❌ Batal / Refund** tetapi bot sud
 
 Cancel RumahOTP dilakukan terlebih dahulu. Setelah RumahOTP mengonfirmasi `cancel`, bot baru mengembalikan saldo user di database bot.
 
-Endpoint status-change RumahOTP mendokumentasikan `status=cancel` sebagai aksi pembatalan. Perubahan saldo akun provider mengikuti sistem RumahOTP; V6 tidak menganggap refund lokal bot sebagai bukti bahwa saldo provider sudah kembali.
+Endpoint status-change RumahOTP mendokumentasikan `status=cancel` sebagai aksi pembatalan. Response `success=true` dari endpoint tersebut hanya dianggap sebagai penerimaan perintah; bot tetap memanggil `get_status` dan baru mengembalikan saldo user setelah status provider benar-benar `cancel/canceled/cancelled`. Perubahan saldo akun provider tetap dilakukan oleh sistem RumahOTP.
 
 ## Deploy Railway
 
