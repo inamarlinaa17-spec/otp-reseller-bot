@@ -587,31 +587,6 @@ def get_sms(
 
 
 # =========================================================
-# RESEND OTP
-# =========================================================
-
-def resend_otp(order_id):
-    """5SIM activation has no official server-side resend endpoint.
-
-    5SIM's documented activation API exposes buy/check/finish/ban and
-    reuse operations, but not a resend operation for an existing
-    activation. Returning a clear error here prevents the bot from
-    pretending that polling/checking is a resend or accidentally buying
-    a second activation.
-    """
-    return {
-        "response": "ERROR",
-        "error": (
-            "Server 1 (5SIM) tidak menyediakan endpoint resmi "
-            "untuk request resend OTP pada order activation yang sama."
-        ),
-        "provider": "5sim",
-        "order_id": str(order_id or ""),
-        "unsupported": True,
-    }
-
-
-# =========================================================
 # CANCEL NUMBER
 # =========================================================
 

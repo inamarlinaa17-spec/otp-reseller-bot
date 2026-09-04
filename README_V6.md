@@ -36,14 +36,3 @@ Cari prefix berikut di Railway Deploy Logs:
 - `[RUMAHOTP] cancel confirmed`
 
 Jika cancel belum dikonfirmasi provider, saldo user tidak disentuh.
-
-
-## Resend OTP — Server 1 & Server 2
-
-Tombol `🔁 Resend OTP` sekarang ditampilkan setelah OTP diterima untuk kedua server.
-
-- **Server 2 — RumahOTP:** tombol benar-benar memanggil endpoint status `resend` provider.
-- **Server 1 — 5SIM:** API activation resmi 5SIM saat ini tidak menyediakan endpoint untuk meminta resend pada order activation yang sama. Karena itu bot sengaja tidak memanggil `/reuse`: endpoint tersebut membuat/reuse activation baru, bukan resend OTP pada order yang sama dan dapat menimbulkan biaya provider baru.
-- Jika Server 1 diklik, bot menampilkan pesan bahwa provider 5SIM tidak mendukung server-side resend.
-
-Jika tujuan Anda adalah mengirim ulang kode dari aplikasi seperti WhatsApp/Telegram, request resend sebenarnya harus dipicu dari aplikasi/layanan tujuan; API 5SIM hanya menerima SMS yang masuk dan menyediakan endpoint untuk mengecek order tersebut.
