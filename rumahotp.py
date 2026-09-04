@@ -8,7 +8,7 @@ import logging
 import requests
 import time
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from config import RUMAHOTP_API_KEY, KURS_DOLAR
 
@@ -18,32 +18,50 @@ TIMEOUT = 15
 _CACHE_TTL = 300.0
 _cache = {}
 
+# RumahOTP documents a hard limit of 5 API requests / 10 seconds.
+# Keep ALL requests (including requests made by concurrent Telegram users)
+# behind one process-wide limiter so catalog/status/cancel calls cannot burst
+# into Cloudflare 429s.
+_API_RATE_LOCK = threading.Lock()
+_LAST_API_REQUEST = 0.0
+_MIN_API_INTERVAL = 2.1  # <= 5 requests per 10 seconds
+
 
 def _headers():
     return {"x-apikey": RUMAHOTP_API_KEY, "Accept": "application/json"}
 
 
 def _get(path, params=None):
-    """GET RumahOTP with a small 429 retry; never turn an API error into cached empty stock."""
+    """GET RumahOTP while enforcing the provider-wide 5/10s request limit."""
+    global _LAST_API_REQUEST
+
     if not RUMAHOTP_API_KEY:
         return {"success": False, "error": {"message": "RUMAHOTP_API_KEY belum diatur."}}
 
     last_error = None
     for attempt in range(2):
         try:
-            r = requests.get(
-                f"{BASE_URL}{path}",
-                headers=_headers(),
-                params=params or {},
-                timeout=TIMEOUT,
-            )
+            # Serialize every RumahOTP request in this process. This is
+            # essential because the bot can have many Telegram callbacks and
+            # the provider applies the rate limit to the API key/IP globally.
+            with _API_RATE_LOCK:
+                wait = _MIN_API_INTERVAL - (time.monotonic() - _LAST_API_REQUEST)
+                if wait > 0:
+                    time.sleep(wait)
+                r = requests.get(
+                    f"{BASE_URL}{path}",
+                    headers=_headers(),
+                    params=params or {},
+                    timeout=TIMEOUT,
+                )
+                _LAST_API_REQUEST = time.monotonic()
 
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
                 try:
-                    delay = max(1.0, min(float(retry_after), 5.0))
+                    delay = max(2.1, min(float(retry_after), 10.0))
                 except (TypeError, ValueError):
-                    delay = 2.0
+                    delay = 2.1
                 time.sleep(delay)
                 continue
 
@@ -55,8 +73,8 @@ def _get(path, params=None):
 
         except Exception as exc:
             last_error = exc
-            if attempt < 2:
-                time.sleep(0.25)
+            if attempt < 1:
+                time.sleep(2.1)
 
     logger.warning("[RUMAHOTP] request %s failed: %s", path, last_error)
     return {"success": False, "error": {"message": str(last_error or "Request gagal.")}}
@@ -309,21 +327,15 @@ def get_operator_quotes(country, service):
             _put_cache(cache_key, operators)
         return row, provider_id, price, stock, operators
 
+    # Do NOT fan these requests out with ThreadPoolExecutor. RumahOTP has a
+    # global 5-requests/10-seconds limit, so concurrent operator lookups can
+    # starve an order cancel/status request and trigger Cloudflare 429s.
     resolved = []
-    if len(rows) > 1:
-        with ThreadPoolExecutor(max_workers=min(6, len(rows))) as executor:
-            futures = [executor.submit(resolve, row_info) for row_info in rows]
-            for future in as_completed(futures):
-                try:
-                    resolved.append(future.result())
-                except Exception:
-                    logger.exception("[RUMAHOTP] operator lookup failed")
-    else:
-        for row_info in rows:
-            try:
-                resolved.append(resolve(row_info))
-            except Exception:
-                logger.exception("[RUMAHOTP] operator lookup failed")
+    for row_info in rows:
+        try:
+            resolved.append(resolve(row_info))
+        except Exception:
+            logger.exception("[RUMAHOTP] operator lookup failed")
 
     out = []
     for row, provider_id, price, stock, operators in resolved:
@@ -408,7 +420,7 @@ def resend_otp(order_id):
     return {"response": "OK", "status": str(payload.get("status") or "resend"), "expired_at": payload.get("expired_at"), "raw": data}
 
 
-def cancel_number(order_id):
+def cancel_number(order_id, expected_cost=None):
     """Cancel a RumahOTP order and verify the provider state before refunding.
 
     RumahOTP's API is rate-limited (5 requests / 10 seconds). The old V6
@@ -427,6 +439,26 @@ def cancel_number(order_id):
     order_id = str(order_id or "").strip()
     if not order_id:
         return {"response": "ERROR", "error": "Provider order ID kosong."}
+
+    # When the expected provider cost is known, capture the RumahOTP balance
+    # before cancellation. We then verify that the provider balance actually
+    # settled the refund before telling the bot it is safe to refund locally.
+    # This uses the full 5-request budget at most: balance -> cancel -> status
+    # -> status -> balance.
+    expected_cost_value = None
+    try:
+        if expected_cost is not None and float(expected_cost) > 0:
+            expected_cost_value = float(expected_cost)
+    except (TypeError, ValueError):
+        expected_cost_value = None
+
+    balance_before = None
+    if expected_cost_value is not None:
+        balance_before = get_balance()
+        logger.info(
+            "[RUMAHOTP] cancel balance_before order_id=%s balance=%s expected_cost=%s",
+            order_id, balance_before, expected_cost_value,
+        )
 
     # Do not do a status GET before the cancel command. A cancel click should
     # consume as few provider requests as possible because RumahOTP documents
@@ -487,13 +519,13 @@ def cancel_number(order_id):
             "raw": data,
         }
 
-    # Three verification requests, spaced out, keep this cancellation flow
-    # comfortably under the documented 5 requests / 10 seconds limit:
-    # 1 command + up to 3 status checks.
+    # With a balance-before check we have room for only two status polls and
+    # one final balance check. Without it we can use three status polls.
     verify_status = command_status or "unknown"
     verify_raw = data
+    delays = (2.2, 2.2) if expected_cost_value is not None else (2.2, 2.2, 2.2)
 
-    for attempt, delay in enumerate((2.0, 3.0, 4.0), start=1):
+    for attempt, delay in enumerate(delays, start=1):
         time.sleep(delay)
 
         verify = _get(
@@ -520,11 +552,36 @@ def cancel_number(order_id):
         )
 
         if verify_status in {"cancel", "canceled", "cancelled"}:
-            # Give RumahOTP a moment to finish the balance/order settlement
-            # after the terminal status has been confirmed.
-            time.sleep(1.0)
+            # If we know the provider cost, verify the actual RumahOTP account
+            # balance increased by that amount. A terminal order status alone
+            # is not enough for this bot because the user's local refund must
+            # not race ahead of the provider settlement.
+            if expected_cost_value is not None and balance_before is not None:
+                time.sleep(0.5)
+                balance_after = get_balance()
+                delta = float(balance_after) - float(balance_before)
+                logger.info(
+                    "[RUMAHOTP] cancel balance_after order_id=%s before=%s after=%s delta=%s expected=%s",
+                    order_id, balance_before, balance_after, delta, expected_cost_value,
+                )
+                if delta + 1.0 < expected_cost_value:
+                    return {
+                        "response": "ERROR",
+                        "error": (
+                            "RumahOTP sudah berstatus cancel, tetapi saldo provider "
+                            "belum terlihat bertambah. Settlement masih berjalan; "
+                            "saldo user belum dikembalikan."
+                        ),
+                        "provider_status": verify_status,
+                        "settlement_pending": True,
+                        "provider_balance_before": balance_before,
+                        "provider_balance_after": balance_after,
+                        "provider_balance_delta": delta,
+                        "expected_cost": expected_cost_value,
+                        "raw": verify_raw,
+                    }
             logger.info(
-                "[RUMAHOTP] cancel confirmed order_id=%s status=%s",
+                "[RUMAHOTP] cancel confirmed and settled order_id=%s status=%s",
                 order_id, verify_status,
             )
             return {

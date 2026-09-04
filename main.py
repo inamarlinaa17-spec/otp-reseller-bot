@@ -4775,9 +4775,11 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             else:
                 canceler = cancel_number
 
+            expected_provider_cost = order.get("provider_cost") or 0
             cancel_result = await asyncio.to_thread(
                 canceler,
-                provider_order_id
+                provider_order_id,
+                expected_provider_cost if provider == "rumahotp" else None,
             )
 
             logger.info(
@@ -5647,7 +5649,11 @@ async def _admin_cancel_order(query, context, order_id):
 
     try:
         if provider == "rumahotp":
-            cancel_result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
+            cancel_result = await asyncio.to_thread(
+                cancel_rumahotp_number,
+                provider_order_id,
+                order.get("provider_cost") or 0,
+            )
         elif provider == "5sim":
             cancel_result = await asyncio.to_thread(cancel_number, provider_order_id)
         else:
@@ -7010,20 +7016,25 @@ async def _auto_expire_one_order(application, order):
         return
 
     try:
-        checker = get_rumahotp_sms if provider == "rumahotp" else get_sms
-        state = await asyncio.to_thread(checker, provider_order_id)
-        status = str((state or {}).get("status") or (state or {}).get("response") or "").strip().lower()
-
         if provider == "rumahotp":
-            if status in {"completed", "received", "done"}:
-                mark_order_success(order_id)
+            # cancel_number performs its own status verification and, when the
+            # provider cost is known, balance-settlement verification. Do not
+            # call get_status first here: that would consume an extra RumahOTP
+            # request and could push the 5-requests/10-seconds limit.
+            cancel_result = await asyncio.to_thread(
+                cancel_rumahotp_number,
+                provider_order_id,
+                order.get("provider_cost") or 0,
+            )
+            if not cancel_result or cancel_result.get("response") != "OK":
+                logger.warning(
+                    "[AUTO EXPIRE] RumahOTP cancel not confirmed order=%s result=%s",
+                    order_id, cancel_result,
+                )
                 return
-            if status not in {"cancel", "canceled", "cancelled"}:
-                cancel_result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
-                if not cancel_result or cancel_result.get("response") != "OK":
-                    logger.warning("[AUTO EXPIRE] RumahOTP cancel not confirmed order=%s result=%s", order_id, cancel_result)
-                    return
         else:
+            state = await asyncio.to_thread(get_sms, provider_order_id)
+            status = str((state or {}).get("status") or (state or {}).get("response") or "").strip().lower()
             if status in {"status_ok", "access_activation"}:
                 mark_order_success(order_id)
                 return
