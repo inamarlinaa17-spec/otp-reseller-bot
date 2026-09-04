@@ -1324,13 +1324,13 @@ async def show_server_page(
     ]
 
     await query.edit_message_text(
-        "💻 <b>PILIH SERVER OTP</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚡ <b>SERVER 1</b>\n"
-        "Server utama dengan layanan, nomor, dan negara yang tersedia.\n\n"
-        "⚡ <b>SERVER 2</b>\n"
-        "Server alternatif dengan layanan, nomor, dan negara yang tersedia.\n\n"
-        "Silakan pilih server melalui tombol di bawah ini:",
+        "🌟 <b>PILIH SERVER OTP</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "⚡ <b>SERVER 1 — HIGH STOCK</b>\n"
+        "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
+        "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
+        "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.⚡\n\n"
+        "Silahkan pilih server melalui tombol di bawah ini",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )

@@ -35,38 +35,38 @@ def _headers():
     return {"x-apikey": RUMAHOTP_API_KEY, "Accept": "application/json"}
 
 
-def _get(path, params=None):
-    """GET RumahOTP while enforcing the provider-wide 5/10s request limit."""
-    global _LAST_API_REQUEST
+def _acquire_request_slot():
+    """Reserve one RumahOTP API slot without holding the lock during sleep/HTTP."""
+    while True:
+        with _API_RATE_LOCK:
+            now = time.monotonic()
+            while _API_REQUEST_TIMES and now - _API_REQUEST_TIMES[0] >= _API_RATE_WINDOW:
+                _API_REQUEST_TIMES.popleft()
+            if len(_API_REQUEST_TIMES) < _API_RATE_MAX:
+                _API_REQUEST_TIMES.append(now)
+                return
+            wait = max(0.05, _API_RATE_WINDOW - (now - _API_REQUEST_TIMES[0]))
+        # IMPORTANT: release the provider-wide lock while waiting. The old
+        # code slept while holding this lock and also held it during HTTP,
+        # causing unrelated Telegram callbacks to pile up and look stuck.
+        time.sleep(wait)
 
+
+def _get(path, params=None):
+    """GET RumahOTP with rate limiting that never blocks other callbacks."""
     if not RUMAHOTP_API_KEY:
         return {"success": False, "error": {"message": "RUMAHOTP_API_KEY belum diatur."}}
 
     last_error = None
     for attempt in range(2):
         try:
-            # Serialize the rate-limit decision so concurrent Telegram
-            # callbacks share the same provider quota. We allow up to 5
-            # requests immediately, then wait until the oldest request falls
-            # outside the 10-second window.
-            with _API_RATE_LOCK:
-                while True:
-                    now = time.monotonic()
-                    while _API_REQUEST_TIMES and now - _API_REQUEST_TIMES[0] >= _API_RATE_WINDOW:
-                        _API_REQUEST_TIMES.popleft()
-                    if len(_API_REQUEST_TIMES) < _API_RATE_MAX:
-                        _API_REQUEST_TIMES.append(now)
-                        break
-                    wait = _API_RATE_WINDOW - (now - _API_REQUEST_TIMES[0])
-                    if wait > 0:
-                        time.sleep(wait)
-
-                r = requests.get(
-                    f"{BASE_URL}{path}",
-                    headers=_headers(),
-                    params=params or {},
-                    timeout=TIMEOUT,
-                )
+            _acquire_request_slot()
+            r = requests.get(
+                f"{BASE_URL}{path}",
+                headers=_headers(),
+                params=params or {},
+                timeout=TIMEOUT,
+            )
 
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
@@ -86,7 +86,7 @@ def _get(path, params=None):
         except Exception as exc:
             last_error = exc
             if attempt < 1:
-                time.sleep(1.0)
+                time.sleep(0.5)
 
     logger.warning("[RUMAHOTP] request %s failed: %s", path, last_error)
     return {"success": False, "error": {"message": str(last_error or "Request gagal.")}}
@@ -311,6 +311,10 @@ def get_operator_quotes(country, service):
     if not found:
         return []
     sid = found.get("id")
+    cache_key = f"operator_quotes:{str(country).strip().lower()}:{sid}"
+    cached_quotes = _cached(cache_key)
+    if cached_quotes is not None:
+        return cached_quotes
     item = find_country(country, sid)
     if not item:
         return []
@@ -379,7 +383,7 @@ def get_operator_quotes(country, service):
                 "cost_idr": price,
                 "stock": stock,
             })
-    return out
+    return _put_cache(cache_key, out)
 
 
 def _metadata(pool):
