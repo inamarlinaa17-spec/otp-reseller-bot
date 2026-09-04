@@ -73,7 +73,10 @@ from database import (
     clear_order_cancel_request,
     get_cancel_queue,
     save_otp_quote,
-    get_otp_quote
+    get_otp_quote,
+    is_maintenance_mode,
+    set_maintenance_mode,
+    get_active_order_for_user
 )
 
 import midtransclient
@@ -144,6 +147,8 @@ logger = logging.getLogger(__name__)
 # This does not change order logic; it only prevents the Telegram callback from
 # remaining stuck when the provider has already issued the number.
 _RUNTIME_PROVIDER_CACHE = {}
+_OTP_CHECK_COOLDOWN = {}
+OTP_CHECK_MIN_INTERVAL = 5.0
 
 
 # =========================================================
@@ -434,9 +439,9 @@ def canonical_5sim_service(service):
 # USER MENU
 # =========================================================
 
-def user_menu():
+def user_menu(active_order_id=None):
 
-    return InlineKeyboardMarkup([
+    rows = [
 
         [
             InlineKeyboardButton(
@@ -488,7 +493,15 @@ def user_menu():
             )
         ]
 
-    ])
+    ]
+
+    if active_order_id:
+        rows.insert(0, [InlineKeyboardButton(
+            "📦 Pesanan Aktif — Kembali ke Order",
+            callback_data=f"otp_order_view:{active_order_id}"
+        )])
+
+    return InlineKeyboardMarkup(rows)
 
 
 # =========================================================
@@ -527,6 +540,10 @@ def admin_menu():
             InlineKeyboardButton(
                 "📊 Statistik",
                 callback_data="admin_stats"
+            ),
+            InlineKeyboardButton(
+                "🚧 Maintenance",
+                callback_data="admin_maintenance"
             )
         ]
 
@@ -1181,6 +1198,15 @@ async def user_start(
             .edit_message_text
         )
 
+    if is_maintenance_mode() and not is_admin(user.id):
+        await send(
+            "🚧 <b>SERVER SEDANG DALAM MAINTENANCE</b>\n\n"
+            "Mohon maaf, layanan sedang dalam perbaikan.\n"
+            "Silakan coba kembali beberapa saat lagi 🙏",
+            parse_mode="HTML"
+        )
+        return
+
     create_user(
 
         user.id,
@@ -1244,7 +1270,7 @@ async def user_start(
     await send(
         text,
         parse_mode="HTML",
-        reply_markup=user_menu()
+        reply_markup=user_menu((get_active_order_for_user(user.id) or {}).get("order_id"))
     )
 
 
@@ -1279,6 +1305,15 @@ async def start(
 ):
 
     user = update.effective_user
+
+    if is_maintenance_mode() and not is_admin(user.id):
+        await update.message.reply_text(
+            "🚧 <b>SERVER SEDANG DALAM MAINTENANCE</b>\n\n"
+            "Mohon maaf, layanan sedang dalam perbaikan.\n"
+            "Silakan coba kembali beberapa saat lagi 🙏",
+            parse_mode="HTML"
+        )
+        return
 
     create_user(
 
@@ -3766,13 +3801,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         context.user_data["otp_service"] = service
         context.user_data["otp_country"] = country
 
-        await show_otp_operator_page(
-            query,
-            source_server,
-            service,
-            country,
-            0,
-        )
+        # RumahOTP already returns price/provider/stock inside the cached
+        # country catalog. Skip the expensive operator fan-out on country tap.
+        if source_server == "rumahotp":
+            await show_rumahotp_quote_page(query, service, country, 0)
+        else:
+            await show_otp_operator_page(query, source_server, service, country, 0)
         return
 
     # =====================================================
@@ -3851,13 +3885,13 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         if not quote:
             await query.answer("Harga sudah kedaluwarsa. Silakan pilih ulang.", show_alert=True)
             return
-        await show_otp_operator_page(
-            query,
-            str(quote.get("provider") or "rumahotp"),
-            str(quote.get("service") or ""),
-            str(quote.get("country") or ""),
-            0,
-        )
+        provider_name = str(quote.get("provider") or "rumahotp")
+        service_name = str(quote.get("service") or "")
+        country_name = str(quote.get("country") or "")
+        if provider_name == "rumahotp":
+            await show_rumahotp_quote_page(query, service_name, country_name, 0)
+        else:
+            await show_otp_operator_page(query, provider_name, service_name, country_name, 0)
         return
 
     if data.startswith("otp_roperator:"):
@@ -4579,6 +4613,14 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             return
 
         provider = str(order.get("provider") or "5sim").strip().lower()
+
+        now_check = asyncio.get_running_loop().time()
+        last_check = _OTP_CHECK_COOLDOWN.get(order_id, 0.0)
+        if now_check - last_check < OTP_CHECK_MIN_INTERVAL:
+            remaining = max(1, int(OTP_CHECK_MIN_INTERVAL - (now_check - last_check) + 0.999))
+            await query.answer(f"⏳ OTP belum tersedia. Tunggu {remaining} detik lalu cek lagi.", show_alert=True)
+            return
+        _OTP_CHECK_COOLDOWN[order_id] = now_check
 
         if provider == "rumahotp":
             sms_checker = get_rumahotp_sms
@@ -5779,6 +5821,42 @@ async def admin_callback(
 
     ]
 
+    if query.data == "admin_maintenance":
+        enabled = is_maintenance_mode()
+        status = "🔴 ON / AKTIF" if enabled else "🟢 OFF / NONAKTIF"
+        action = "Matikan Maintenance" if enabled else "Aktifkan Maintenance"
+        await query.edit_message_text(
+            "🚧 <b>MAINTENANCE MODE</b>\n\n"
+            f"Status saat ini: <b>{status}</b>\n\n"
+            "Saat ON, user biasa akan melihat pesan maintenance. Admin tetap bisa menggunakan bot.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(action, callback_data=f"admin_maintenance_set:{'OFF' if enabled else 'ON'}")],
+                [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]
+            ])
+        )
+        return
+
+    elif query.data.startswith("admin_maintenance_set:"):
+        value = query.data.split(":", 1)[1].strip().upper()
+        if value not in {"ON", "OFF"}:
+            await query.answer("Status maintenance tidak valid.", show_alert=True)
+            return
+        set_maintenance_mode(value == "ON")
+        await query.answer("✅ Status maintenance diperbarui.")
+        enabled = value == "ON"
+        await query.edit_message_text(
+            "🚧 <b>MAINTENANCE MODE</b>\n\n"
+            f"Status sekarang: <b>{'🔴 ON / AKTIF' if enabled else '🟢 OFF / NONAKTIF'}</b>\n\n"
+            "Perubahan tersimpan di database dan tetap berlaku setelah Railway restart.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Kembali", callback_data="admin_maintenance")],
+                [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]
+            ])
+        )
+        return
+
     if query.data == "admin_users":
         await _admin_users_page(query, 0)
 
@@ -6114,6 +6192,15 @@ async def button_handler(
 
     user_id = query.from_user.id
 
+    if is_maintenance_mode() and not is_admin(user_id) and query.data not in {"otp_noop"}:
+        await query.edit_message_text(
+            "🚧 <b>SERVER SEDANG DALAM MAINTENANCE</b>\n\n"
+            "Mohon maaf, layanan sedang dalam perbaikan.\n"
+            "Silakan coba kembali beberapa saat lagi 🙏",
+            parse_mode="HTML"
+        )
+        return
+
     admin_callbacks = {
 
         "admin_users",
@@ -6121,7 +6208,8 @@ async def button_handler(
         "admin_orders",
         "admin_provider",
         "admin_stats",
-        "admin_home"
+        "admin_home",
+        "admin_maintenance"
 
     }
 
@@ -6139,6 +6227,7 @@ async def button_handler(
         or query.data.startswith("admin_deposits_page:")
         or query.data == "admin_users_search"
         or query.data == "admin_deposits_search"
+        or query.data.startswith("admin_maintenance_set:")
     )
 
     if is_extended_admin_callback:
