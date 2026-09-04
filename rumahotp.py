@@ -9,6 +9,7 @@ import requests
 import time
 import re
 import threading
+from collections import deque
 
 from config import RUMAHOTP_API_KEY, KURS_DOLAR
 
@@ -19,12 +20,13 @@ _CACHE_TTL = 300.0
 _cache = {}
 
 # RumahOTP documents a hard limit of 5 API requests / 10 seconds.
-# Keep ALL requests (including requests made by concurrent Telegram users)
-# behind one process-wide limiter so catalog/status/cancel calls cannot burst
-# into Cloudflare 429s.
+# Use a sliding-window limiter instead of a fixed 2.1s delay. This lets the
+# first few navigation requests (service -> country -> operator) respond
+# immediately while still preventing more than 5 requests in any 10s window.
 _API_RATE_LOCK = threading.Lock()
-_LAST_API_REQUEST = 0.0
-_MIN_API_INTERVAL = 2.1  # <= 5 requests per 10 seconds
+_API_REQUEST_TIMES = deque()
+_API_RATE_WINDOW = 10.0
+_API_RATE_MAX = 5
 _CANCEL_LOCKS = {}
 _CANCEL_LOCKS_GUARD = threading.Lock()
 
@@ -43,27 +45,35 @@ def _get(path, params=None):
     last_error = None
     for attempt in range(2):
         try:
-            # Serialize every RumahOTP request in this process. This is
-            # essential because the bot can have many Telegram callbacks and
-            # the provider applies the rate limit to the API key/IP globally.
+            # Serialize the rate-limit decision so concurrent Telegram
+            # callbacks share the same provider quota. We allow up to 5
+            # requests immediately, then wait until the oldest request falls
+            # outside the 10-second window.
             with _API_RATE_LOCK:
-                wait = _MIN_API_INTERVAL - (time.monotonic() - _LAST_API_REQUEST)
-                if wait > 0:
-                    time.sleep(wait)
+                while True:
+                    now = time.monotonic()
+                    while _API_REQUEST_TIMES and now - _API_REQUEST_TIMES[0] >= _API_RATE_WINDOW:
+                        _API_REQUEST_TIMES.popleft()
+                    if len(_API_REQUEST_TIMES) < _API_RATE_MAX:
+                        _API_REQUEST_TIMES.append(now)
+                        break
+                    wait = _API_RATE_WINDOW - (now - _API_REQUEST_TIMES[0])
+                    if wait > 0:
+                        time.sleep(wait)
+
                 r = requests.get(
                     f"{BASE_URL}{path}",
                     headers=_headers(),
                     params=params or {},
                     timeout=TIMEOUT,
                 )
-                _LAST_API_REQUEST = time.monotonic()
 
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
                 try:
-                    delay = max(2.1, min(float(retry_after), 10.0))
+                    delay = max(1.0, min(float(retry_after), 10.0))
                 except (TypeError, ValueError):
-                    delay = 2.1
+                    delay = 2.0
                 time.sleep(delay)
                 continue
 
@@ -76,7 +86,7 @@ def _get(path, params=None):
         except Exception as exc:
             last_error = exc
             if attempt < 1:
-                time.sleep(2.1)
+                time.sleep(1.0)
 
     logger.warning("[RUMAHOTP] request %s failed: %s", path, last_error)
     return {"success": False, "error": {"message": str(last_error or "Request gagal.")}}
