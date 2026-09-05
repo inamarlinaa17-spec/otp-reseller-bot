@@ -151,6 +151,10 @@ def init_database():
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS expired_at TEXT")
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS otp_code TEXT")
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sms_text TEXT")
+        # Remember the OTP that was already received before a resend.
+        # This prevents the auto-poller from treating the old OTP as the
+        # newly resent OTP.
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS previous_otp_code TEXT")
 
         # Older Railway databases may already have expired_at as BIGINT.
         # The provider APIs return this field as text (often an ISO timestamp),
@@ -1025,12 +1029,21 @@ def mark_order_success(
 
 
 def mark_order_waiting_for_otp(order_id):
-    """Put a successful order back into OTP-waiting state after a resend request."""
+    """Put a successful order back into OTP-waiting state after resend.
+
+    Keep the just-received OTP in previous_otp_code so the automatic poller
+    cannot immediately re-announce the old OTP as if it were OTP #2.
+    """
     with get_db() as db:
         result = db.execute(
             """
             UPDATE orders
-            SET status = 'PENDING', completed_at = NULL, otp_code = NULL, sms_text = NULL
+            SET
+                status = 'PENDING',
+                completed_at = NULL,
+                previous_otp_code = COALESCE(otp_code, previous_otp_code),
+                otp_code = NULL,
+                sms_text = NULL
             WHERE order_id = %s AND status = 'SUCCESS'
             """,
             (order_id,),

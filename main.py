@@ -3114,6 +3114,26 @@ def _order_expired(order, runtime_provider=None):
     return bool(dt and dt <= datetime.now(timezone.utc))
 
 
+def _is_real_otp_code(value):
+    """Return True only for a real OTP value, not an empty/provider placeholder.
+
+    Some provider status responses can expose placeholders such as ``-``
+    while the order is still waiting for SMS. Those must never transition the
+    local order to SUCCESS, because that would hide Batal / Refund before the
+    OTP actually arrives.
+    """
+    if value is None:
+        return False
+    code = str(value).strip()
+    if not code:
+        return False
+    if code.lower() in {"-", "--", "n/a", "na", "none", "null", "pending", "waiting"}:
+        return False
+    # OTPs are expected to contain at least one digit. Keep this tolerant of
+    # alphanumeric OTP formats while rejecting status/placeholder text.
+    return any(ch.isdigit() for ch in code) and 3 <= len(code) <= 32
+
+
 async def _send_otp_received_message(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
@@ -3126,7 +3146,16 @@ async def _send_otp_received_message(application, order_id, data_sms):
     sms = sms_list[0] or {}
     code = sms.get("code")
     text = sms.get("text") or ""
-    if not code:
+    if not _is_real_otp_code(code):
+        # Still waiting: do not mark SUCCESS and do not replace the
+        # Batal / Refund button with the OTP controls.
+        return False
+
+    # After Resend OTP, providers can briefly return the previous SMS/code
+    # while the new SMS is being generated. Never announce that old code as
+    # OTP #2. The order stays PENDING until a genuinely new code arrives.
+    previous_code = str(order.get("previous_otp_code") or "").strip()
+    if previous_code and str(code).strip() == previous_code:
         return False
 
     try:
@@ -4879,7 +4908,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 ""
             )
 
-            if code:
+            if _is_real_otp_code(code):
 
                 try:
                     await asyncio.to_thread(save_otp_result, order_id, code, text)
