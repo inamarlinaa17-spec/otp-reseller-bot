@@ -408,6 +408,40 @@ def resend_otp(order_id):
     return {"response": "OK", "status": str(payload.get("status") or "resend"), "expired_at": payload.get("expired_at"), "raw": data}
 
 
+def complete_number(order_id):
+    """Tell the provider that the user has finished using the OTP order."""
+    order_id = str(order_id or '').strip()
+    if not order_id:
+        return {"response": "ERROR", "error": "Provider order ID kosong."}
+
+    data = _get(
+        "/v1/orders/set_status",
+        {"order_id": order_id, "status": "done"},
+    )
+    if not data.get("success"):
+        return {
+            "response": "ERROR",
+            "error": (data.get("error") or {}).get("message", "Pesanan belum dapat diselesaikan."),
+            "raw": data,
+        }
+
+    payload = data.get("data") or {}
+    provider_status = str(payload.get("status") or "done").strip().lower()
+    # The public API documents `done` as the completion status command.
+    if provider_status not in {"done", "completed", "received", "success"}:
+        return {
+            "response": "ERROR",
+            "error": f"Status penyelesaian belum dikonfirmasi: {provider_status}",
+            "provider_status": provider_status,
+            "raw": data,
+        }
+    return {
+        "response": "OK",
+        "provider_status": provider_status,
+        "raw": data,
+    }
+
+
 def cancel_number(order_id):
     """Cancel a RumahOTP order and verify the cancellation at provider side.
 

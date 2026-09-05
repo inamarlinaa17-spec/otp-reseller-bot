@@ -106,6 +106,13 @@ def init_database():
         """)
 
         db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL DEFAULT ''
+            )
+        """)
+
+        db.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 id BIGSERIAL PRIMARY KEY,
                 order_id TEXT UNIQUE NOT NULL,
@@ -923,6 +930,34 @@ def get_otp_quote(quote_id, telegram_id=None):
 # GET ORDER
 # =========================================================
 
+def get_bot_setting(key, default=None):
+    with get_db() as db:
+        row = db.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key = %s",
+            (str(key),)
+        ).fetchone()
+    if not row:
+        return default
+    return row.get("setting_value")
+
+
+def set_bot_setting(key, value):
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO bot_settings (setting_key, setting_value)
+            VALUES (%s, %s)
+            ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value
+            """,
+            (str(key), str(value)),
+        )
+    return value
+
+
+def is_maintenance_enabled():
+    return str(get_bot_setting("maintenance", "0")).strip().lower() in {"1", "true", "on", "yes"}
+
+
 def get_order(
     order_id
 ):
@@ -989,6 +1024,34 @@ def mark_order_success(
         )
 
 
+def mark_order_waiting_for_otp(order_id):
+    """Put a successful order back into OTP-waiting state after a resend request."""
+    with get_db() as db:
+        result = db.execute(
+            """
+            UPDATE orders
+            SET status = 'PENDING', completed_at = NULL, otp_code = NULL, sms_text = NULL
+            WHERE order_id = %s AND status = 'SUCCESS'
+            """,
+            (order_id,),
+        )
+        return result.rowcount > 0
+
+
+def mark_order_completed(order_id):
+    """Mark an OTP order fully completed after the user presses Pesanan Selesai."""
+    with get_db() as db:
+        result = db.execute(
+            """
+            UPDATE orders
+            SET status = 'COMPLETED', completed_at = %s
+            WHERE order_id = %s AND status = 'SUCCESS'
+            """,
+            (now(), order_id),
+        )
+        return result.rowcount > 0
+
+
 # =========================================================
 # REFUND ORDER
 # =========================================================
@@ -1051,7 +1114,7 @@ def refund_order(
                     else 0
             }
 
-        if order["status"] == "SUCCESS":
+        if order["status"] in {"SUCCESS", "COMPLETED"}:
 
             raise ValueError(
                 "Order sudah berhasil dan tidak bisa direfund."

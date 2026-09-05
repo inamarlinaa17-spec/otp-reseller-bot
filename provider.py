@@ -587,6 +587,33 @@ def get_sms(
 
 
 # =========================================================
+# FINISH NUMBER
+# =========================================================
+
+def finish_number(order_id):
+    """Finish a 5SIM activation after the user confirms Pesanan Selesai."""
+    try:
+        response = requests.get(
+            f"{BASE_URL}/user/finish/{order_id}",
+            headers=get_headers(),
+            timeout=20,
+        )
+        if response.status_code != 200:
+            try:
+                data = response.json()
+            except Exception:
+                data = {"message": response.text}
+            return {"response": "ERROR", "message": data}
+        data = response.json()
+        status = str(data.get("status") or "").upper()
+        if status and status not in {"FINISHED", "SUCCESS", "COMPLETED"}:
+            return {"response": "ERROR", "message": data}
+        return {"response": "OK", "status": status or "FINISHED", "data": data}
+    except Exception as error:
+        return {"response": "ERROR", "message": str(error)}
+
+
+# =========================================================
 # RESEND OTP
 # =========================================================
 
