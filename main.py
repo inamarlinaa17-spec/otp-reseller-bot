@@ -3031,11 +3031,74 @@ async def perform_checkin(update, context):
         await update.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
 
+# =========================================================
+# RUMAHOTP REFUND RECONCILIATION
+# =========================================================
+
+async def reconcile_refunded_rumahotp_orders():
+    """Repair historical cases where AZHURA refunded locally but the
+    RumahOTP order was still active.
+
+    Only orders already marked REFUNDED locally are considered.  This task
+    never credits a user's balance; it only asks RumahOTP to cancel an
+    active provider order that should no longer be running.
+    """
+    while True:
+        try:
+            rows = []
+            with get_db() as db:
+                rows = db.execute(
+                    """
+                    SELECT order_id, provider_order_id
+                    FROM orders
+                    WHERE provider = 'rumahotp'
+                      AND status = 'REFUNDED'
+                      AND refund_status = 'REFUNDED'
+                      AND provider_order_id IS NOT NULL
+                      AND created_at >= (NOW() - INTERVAL '2 days')
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                    """
+                ).fetchall()
+
+            for row in rows:
+                provider_order_id = str(row.get("provider_order_id") or "").strip()
+                if not provider_order_id:
+                    continue
+                result = await asyncio.to_thread(
+                    cancel_rumahotp_number,
+                    provider_order_id
+                )
+                if result and result.get("response") == "OK":
+                    logger.warning(
+                        "[RUMAHOTP RECONCILE] provider order cancelled after local refund "
+                        "local=%s provider_order=%s status=%s",
+                        row["order_id"],
+                        provider_order_id,
+                        result.get("provider_status"),
+                    )
+                elif result:
+                    logger.info(
+                        "[RUMAHOTP RECONCILE] no action local=%s provider_order=%s error=%s status=%s",
+                        row["order_id"],
+                        provider_order_id,
+                        result.get("error"),
+                        result.get("provider_status"),
+                    )
+        except Exception:
+            logger.exception("[RUMAHOTP RECONCILE] reconciliation loop failed")
+
+        await asyncio.sleep(45)
+
+
 async def post_init(application):
     await application.bot.set_my_commands([
         __import__('telegram').BotCommand(command, description)
         for command, description in BOT_COMMANDS
     ])
+    # Start a lightweight repair loop for old local-refund/provider-WAITING
+    # inconsistencies. It does not touch user balances.
+    application.create_task(reconcile_refunded_rumahotp_orders())
 
 
 # =========================================================
@@ -5614,7 +5677,7 @@ async def _admin_user_detail(query, telegram_id):
 async def _admin_user_orders(query, telegram_id):
     with get_db() as db:
         rows = db.execute(
-            """SELECT order_id, service, service_name, country, country_name, phone, provider, sell_price, status, created_at
+            """SELECT order_id, service, service_name, country, country_name, phone, provider, sell_price, status, refund_status, provider_order_id, created_at
                FROM orders WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 12""",
             (telegram_id,),
         ).fetchall()
@@ -5631,12 +5694,19 @@ async def _admin_user_orders(query, telegram_id):
             f"   📞 <code>{escape(str(row.get('phone') or '-'))}</code> | "
             f"💰 {format_rupiah(row['sell_price'])}"
         )
-        if (str(row.get("status") or "").upper() == "PENDING" and
-                str(row.get("provider") or "").lower() in {"rumahotp", "5sim"}):
-            keyboard.append([InlineKeyboardButton(
-                f"🛑 Batalkan & Refund {str(row['order_id'])}",
-                callback_data=f"admin_cancel_order:{row['order_id']}"
-            )])
+        if (str(row.get("provider") or "").lower() in {"rumahotp", "5sim"}):
+            if str(row.get("status") or "").upper() == "PENDING":
+                keyboard.append([InlineKeyboardButton(
+                    f"🛑 Batalkan & Refund {str(row['order_id'])}",
+                    callback_data=f"admin_cancel_order:{row['order_id']}"
+                )])
+            elif (str(row.get("provider") or "").lower() == "rumahotp" and
+                  str(row.get("status") or "").upper() == "REFUNDED" and
+                  str(row.get("refund_status") or "").upper() == "REFUNDED"):
+                keyboard.append([InlineKeyboardButton(
+                    f"🔄 Sinkronkan RumahOTP {str(row['order_id'])}",
+                    callback_data=f"admin_cancel_order:{row['order_id']}"
+                )])
     keyboard.append([InlineKeyboardButton("⬅️ Detail User", callback_data=f"admin_user:{telegram_id}")])
     await query.edit_message_text(
         "\
@@ -5658,9 +5728,16 @@ async def _admin_cancel_order(query, context, order_id):
         await query.answer("Order belum memiliki ID order provider.", show_alert=True)
         return
 
-    if str(order.get("refund_status") or "").upper() == "REFUNDED":
-        await query.answer("Order ini sudah pernah direfund.", show_alert=True)
-        return
+    local_refunded = str(order.get("refund_status") or "").upper() == "REFUNDED"
+    if local_refunded:
+        # Historical recovery path: local balance was already refunded, but
+        # the upstream RumahOTP order may still be WAITING. We may cancel the
+        # provider order again, but MUST NOT refund the user a second time.
+        logger.warning(
+            "[ADMIN CANCEL] recovery attempt for locally refunded order=%s provider_order=%s",
+            order_id,
+            provider_order_id,
+        )
 
     if str(order.get("status") or "").upper() == "SUCCESS":
         await query.answer("Order sudah SUCCESS dan tidak bisa dibatalkan.", show_alert=True)
@@ -5696,7 +5773,12 @@ async def _admin_cancel_order(query, context, order_id):
                 f"📡 Provider: <b>{escape(ADMIN_PROVIDER_NAMES.get(provider, provider.upper()))}</b>\n"
                 f"🆔 Provider Order: <code>{escape(provider_order_id)}</code>\n"
                 f"❗ {escape(error)}\n\n"
-                "Saldo user <b>belum</b> dikembalikan karena provider belum mengonfirmasi cancel.",
+                + (
+                    "Saldo user <b>sudah</b> pernah dikembalikan. Bot tidak menambah saldo lagi. "
+                    "Silakan coba sinkronisasi provider kembali."
+                    if local_refunded
+                    else "Saldo user <b>belum</b> dikembalikan karena provider belum mengonfirmasi cancel."
+                ),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"admin_cancel_order:{order_id}")],
@@ -5705,12 +5787,23 @@ async def _admin_cancel_order(query, context, order_id):
             )
             return
 
-        result = refund_order(
-            order_id,
-            "Admin membatalkan order provider dan provider mengonfirmasi pembatalan."
-        )
+        if local_refunded:
+            result = {
+                "balance": get_balance(int(order["telegram_id"])),
+                "already_refunded": True,
+            }
+        else:
+            result = refund_order(
+                order_id,
+                "Admin membatalkan order provider dan provider mengonfirmasi pembatalan."
+            )
 
         # Notify the user about the admin-triggered cancellation/refund.
+        refund_notice = (
+            "💸 Saldo sudah pernah dikembalikan sebelumnya.\n"
+            if local_refunded
+            else f"💸 Saldo dikembalikan: <b>{format_rupiah(order['sell_price'])}</b>\n"
+        )
         try:
             await context.bot.send_message(
                 chat_id=int(order["telegram_id"]),
@@ -5718,7 +5811,7 @@ async def _admin_cancel_order(query, context, order_id):
                     "🎉 <b>INFO REFUND AZHURA [BOT NOKOS]</b>\n\n"
                     f"🧾 Order: <code>{escape(order_id)}</code>\n"
                     f"❌ Pesanan dibatalkan oleh admin.\n"
-                    f"💸 Saldo dikembalikan: <b>{format_rupiah(order['sell_price'])}</b>\n"
+                    f"{refund_notice}"
                     f"💳 Saldo kamu sekarang: <b>{format_rupiah(result['balance'])}</b>\n\n"
                     "🔥 Silakan order kembali kapan saja. Semoga order lancar dan cuan terus bersama AZHURA! 💎"
                 ),
@@ -5730,14 +5823,25 @@ async def _admin_cancel_order(query, context, order_id):
         except Exception:
             logger.exception("Gagal mengirim notifikasi refund admin ke user=%s", order["telegram_id"])
 
+        success_heading = (
+            "✅ <b>PROVIDER BERHASIL DISINKRONKAN</b>\n\n"
+            if local_refunded
+            else "✅ <b>ORDER BERHASIL DIBATALKAN & REFUND</b>\n\n"
+        )
         await query.edit_message_text(
-            "✅ <b>ORDER BERHASIL DIBATALKAN & REFUND</b>\n\n"
-            f"🧾 Order Bot: <code>{escape(order_id)}</code>\n"
-            f"📡 Provider: <b>{escape(ADMIN_PROVIDER_NAMES.get(provider, provider.upper()))}</b>\n"
-            f"🆔 Provider Order: <code>{escape(provider_order_id)}</code>\n"
-            f"💸 Refund user: <b>{format_rupiah(order['sell_price'])}</b>\n"
-            f"💰 Saldo user sekarang: <b>{format_rupiah(result['balance'])}</b>\n\n"
-            "Provider sudah mengonfirmasi pembatalan sebelum saldo dikembalikan.",
+            success_heading
+            + (
+                f"🧾 Order Bot: <code>{escape(order_id)}</code>\n"
+                f"📡 Provider: <b>{escape(ADMIN_PROVIDER_NAMES.get(provider, provider.upper()))}</b>\n"
+                f"🆔 Provider Order: <code>{escape(provider_order_id)}</code>\n"
+                + (
+                    "💸 Saldo user sudah pernah dikembalikan sebelumnya.\n"
+                    if local_refunded
+                    else f"💸 Refund user: <b>{format_rupiah(order['sell_price'])}</b>\n"
+                )
+                + f"💰 Saldo user sekarang: <b>{format_rupiah(result['balance'])}</b>\n\n"
+                + "Provider sudah mengonfirmasi pembatalan."
+            ),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📦 Transaksi User", callback_data=f"admin_user_orders:{int(order['telegram_id'])}")],
