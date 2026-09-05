@@ -465,6 +465,10 @@ def cancel_number(order_id):
 
     payload = data.get("data") or {}
     command_status = str(payload.get("status") or "").strip().lower()
+    logger.info(
+        "[RUMAHOTP] cancel request order_id=%s success=%s command_status=%s raw=%s",
+        order_id, data.get("success"), command_status, data,
+    )
 
     # The command endpoint normally returns status=cancel. Still verify using
     # the status endpoint because propagation can lag for a short time.
@@ -478,7 +482,10 @@ def cancel_number(order_id):
 
     verify_status = command_status or "unknown"
     verify_raw = data
-    for attempt, delay in enumerate((0.5, 1.0, 1.5, 2.0, 2.5), start=1):
+    # RumahOTP documents a limit of 5 API requests per 10 seconds.
+    # We already used get_status + set_status above, so use only three
+    # verification reads to stay within that limit.
+    for attempt, delay in enumerate((2.0, 4.0, 6.0), start=1):
         if delay:
             time.sleep(delay)
 

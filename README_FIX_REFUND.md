@@ -45,3 +45,10 @@ This version also fixes a PostgreSQL schema mismatch found in Railway:
 Some existing databases had `orders.expired_at` as `BIGINT`, while the bot/provider data is handled as text. On startup, the migration now normalizes the existing column to `TEXT` using `expired_at::text`.
 
 No user balance or order balance is changed by this migration.
+
+
+## FIX4 - prevent refund when provider ID is missing
+
+If the provider purchase succeeded but the database save failed, the user cancel flow must not silently refund locally while the RumahOTP order remains WAITING. The cancel handler now recovers the provider order ID from the runtime cache when available; if no provider ID exists anywhere, it refuses the refund and asks for a retry/admin recovery.
+
+After a successful provider cancellation, a recovered provider order ID is persisted back into the local order record.

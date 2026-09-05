@@ -142,6 +142,8 @@ def init_database():
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS country_name TEXT")
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS phone TEXT")
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS expired_at TEXT")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS otp_code TEXT")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sms_text TEXT")
 
         # Older Railway databases may already have expired_at as BIGINT.
         # The provider APIs return this field as text (often an ISO timestamp),
@@ -935,6 +937,26 @@ def get_order(
             """,
             (order_id,)
         ).fetchone()
+
+
+def save_otp_result(order_id, otp_code=None, sms_text=None):
+
+    with get_db() as db:
+
+        db.execute(
+            """
+            UPDATE orders
+            SET
+                otp_code = COALESCE(%s, otp_code),
+                sms_text = COALESCE(%s, sms_text)
+            WHERE order_id = %s
+            """,
+            (
+                str(otp_code) if otp_code is not None else None,
+                str(sms_text) if sms_text is not None else None,
+                order_id,
+            )
+        )
 
 
 # =========================================================
