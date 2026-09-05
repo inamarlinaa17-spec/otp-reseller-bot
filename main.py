@@ -3047,15 +3047,19 @@ async def reconcile_refunded_rumahotp_orders():
         try:
             rows = []
             with get_db() as db:
+                # IMPORTANT: created_at is TEXT in the existing schema.
+                # Do not compare it directly with PostgreSQL timestamps; that
+                # crashes the reconciliation loop and leaves provider orders
+                # running. We intentionally scan recent REFUNDED RumahOTP
+                # rows by their stored ISO string ordering instead.
                 rows = db.execute(
                     """
-                    SELECT order_id, provider_order_id
+                    SELECT order_id, provider_order_id, created_at
                     FROM orders
                     WHERE provider = 'rumahotp'
                       AND status = 'REFUNDED'
                       AND refund_status = 'REFUNDED'
                       AND provider_order_id IS NOT NULL
-                      AND created_at >= (NOW() - INTERVAL '2 days')
                     ORDER BY created_at DESC
                     LIMIT 50
                     """

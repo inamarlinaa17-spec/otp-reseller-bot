@@ -478,7 +478,7 @@ def cancel_number(order_id):
 
     verify_status = command_status or "unknown"
     verify_raw = data
-    for attempt, delay in enumerate((0.35, 0.75, 1.25), start=1):
+    for attempt, delay in enumerate((0.5, 1.0, 1.5, 2.0, 2.5), start=1):
         if delay:
             time.sleep(delay)
 
