@@ -35,3 +35,13 @@ Setelah deploy, cek Railway Logs. Prefix penting:
 - `[ADMIN CANCEL]`
 
 Target akhirnya: **saldo user tidak boleh direfund sebelum cancel provider terkonfirmasi, dan kasus refund lama yang terlanjur tidak sinkron akan dicoba diperbaiki otomatis.**
+
+
+## Fix database `expired_at` (Railway)
+
+This version also fixes a PostgreSQL schema mismatch found in Railway:
+`psycopg.errors.DatatypeMismatch: COALESCE types bigint and text cannot be matched`.
+
+Some existing databases had `orders.expired_at` as `BIGINT`, while the bot/provider data is handled as text. On startup, the migration now normalizes the existing column to `TEXT` using `expired_at::text`.
+
+No user balance or order balance is changed by this migration.

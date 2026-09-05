@@ -143,6 +143,17 @@ def init_database():
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS phone TEXT")
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS expired_at TEXT")
 
+        # Older Railway databases may already have expired_at as BIGINT.
+        # The provider APIs return this field as text (often an ISO timestamp),
+        # and save_provider_order() passes it as text. Normalize the existing
+        # column to TEXT so PostgreSQL does not raise:
+        # "COALESCE types bigint and text cannot be matched".
+        db.execute("""
+            ALTER TABLE orders
+            ALTER COLUMN expired_at TYPE TEXT
+            USING expired_at::text
+        """)
+
 
 # =========================================================
 # TIME
