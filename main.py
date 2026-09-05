@@ -67,6 +67,7 @@ from database import (
     claim_checkin,
     save_provider_order,
     save_otp_result,
+    save_order_message_id,
     get_order,
     mark_order_success,
     refund_order,
@@ -3185,18 +3186,29 @@ async def _send_otp_received_message(application, order_id, data_sms):
         f"📨 SMS:\n<code>{escape(str(text))}</code>"
     )
     try:
-        await application.bot.send_message(
-            chat_id=int(current["telegram_id"]),
-            text=text_body,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
-                [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
-                [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
-            ]),
-        )
+        message_id = current.get("telegram_message_id") or runtime.get("telegram_message_id")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+            [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+        ])
+        if message_id:
+            await application.bot.edit_message_text(
+                chat_id=int(current["telegram_id"]),
+                message_id=int(message_id),
+                text=text_body,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        else:
+            # Backward compatibility for an order created before this patch.
+            await application.bot.send_message(
+                chat_id=int(current["telegram_id"]),
+                text=text_body,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
     except Exception:
-        logger.exception("[AUTO OTP] failed to notify user order=%s", order_id)
+        logger.exception("[AUTO OTP] failed to update user message order=%s", order_id)
     return True
 
 
@@ -3682,6 +3694,7 @@ async def process_otp_order(
         "provider_order_id": provider_order_id,
         "phone": phone,
         "expired_at": provider_expired_at,
+        "telegram_message_id": getattr(query.message, "message_id", None),
     }
     save_task = asyncio.create_task(
         asyncio.to_thread(
@@ -3728,6 +3741,14 @@ async def process_otp_order(
             ]
         ])
     )
+    # The order card is a single Telegram message. The automatic OTP worker
+    # will edit this same message when the OTP arrives.
+    message_id = getattr(query.message, "message_id", None)
+    if message_id:
+        try:
+            await asyncio.to_thread(save_order_message_id, order_id, message_id)
+        except Exception:
+            logger.exception("[ORDER FLOW] failed to save Telegram message id order=%s", order_id)
 
 
 def _save_order_labels(order_id, service_name, country_name):
@@ -3780,8 +3801,8 @@ Setelah order berhasil, nomor diberikan oleh bot.
 8️⃣ <b>Menunggu SMS</b>
 Masukkan nomor tersebut ke aplikasi tujuan dan tunggu OTP.
 
-9️⃣ <b>Cek OTP</b>
-Tekan tombol <b>🔄 Cek OTP</b> sampai SMS masuk.
+9️⃣ <b>OTP otomatis</b>
+OTP akan ditampilkan otomatis setelah SMS benar-benar diterima.
 
 🔟 <b>Refund</b>
 Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
@@ -4944,7 +4965,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                         parse_mode="HTML",
 
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")],
                             [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
                             [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
                         ])
@@ -5009,14 +5029,40 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             # Keep the original expiration captured at first purchase.
             # After resend, the worker waits for the new OTP automatically.
             await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
-            await query.edit_message_text(
-                "⏳ <b>Menunggu OTP baru...</b>\n\n"
-                "Kode akan dikirim otomatis saat sudah diterima.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")
-                ]]),
+            current = get_order(order_id) or order
+            runtime = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
+            service_name = current.get("service_name") or current.get("service") or "-"
+            country_name = current.get("country_name") or current.get("country") or "-"
+            phone = current.get("phone") or runtime.get("phone") or "-"
+            expired_at = current.get("expired_at") or runtime.get("expired_at")
+            waiting_text = (
+                "⏳ <b>MENUNGGU SMS OTP...</b>\n\n"
+                f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                f"📱 Layanan: <b>{escape(str(service_name))}</b>\n"
+                f"🌐 Negara: <b>{escape(str(country_name))}</b>\n"
+                f"📞 Nomor: <code>{escape(str(phone))}</code>\n"
+                f"🕐 Transaksi: <b>{escape(format_datetime_wib(current.get('created_at')))}</b>\n"
+                f"⏰ Expired: <b>{escape(format_datetime_wib(expired_at))}</b>\n\n"
+                "⏳ <b>Menunggu SMS OTP...</b>\n"
+                "Kode OTP baru akan ditampilkan otomatis saat benar-benar diterima."
             )
+            message_id = current.get("telegram_message_id") or runtime.get("telegram_message_id") or getattr(query.message, "message_id", None)
+            if message_id:
+                await query.edit_message_text(
+                    waiting_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")
+                    ]]),
+                )
+            else:
+                await query.edit_message_text(
+                    waiting_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")
+                    ]]),
+                )
             return
 
         # Server 1 (5SIM): there is no official resend operation for an
@@ -5073,7 +5119,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         if status_upper == "PENDING":
             kb.append([InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")])
         elif status_upper == "SUCCESS":
-            kb.append([InlineKeyboardButton("🔄 Cek OTP", callback_data=f"otp_check:{order_id}")])
             kb.append([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")])
             kb.append([InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")])
         elif status_upper == "COMPLETED":

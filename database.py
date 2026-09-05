@@ -155,6 +155,7 @@ def init_database():
         # This prevents the auto-poller from treating the old OTP as the
         # newly resent OTP.
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS previous_otp_code TEXT")
+        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT")
 
         # Older Railway databases may already have expired_at as BIGINT.
         # The provider APIs return this field as text (often an ISO timestamp),
@@ -976,6 +977,21 @@ def get_order(
             """,
             (order_id,)
         ).fetchone()
+
+
+def save_order_message_id(order_id, message_id):
+    """Remember the Telegram message that represents the active order.
+
+    The automatic OTP worker edits this same message when the OTP arrives,
+    instead of sending a second message below the original order.
+    """
+    if message_id is None:
+        return
+    with get_db() as db:
+        db.execute(
+            "UPDATE orders SET telegram_message_id = %s WHERE order_id = %s",
+            (int(message_id), order_id),
+        )
 
 
 def save_otp_result(order_id, otp_code=None, sms_text=None):
