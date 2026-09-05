@@ -143,18 +143,6 @@ def init_database():
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS phone TEXT")
         db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS expired_at TEXT")
 
-        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TEXT")
-        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_attempts INTEGER NOT NULL DEFAULT 0")
-        db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_last_error TEXT")
-
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS app_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-
 
 # =========================================================
 # TIME
@@ -969,55 +957,6 @@ def mark_order_success(
 
 
 # =========================================================
-# PROVIDER CANCEL QUEUE
-# =========================================================
-
-def request_order_cancel(order_id, error=None):
-    """Persist a provider cancellation request for automatic retry."""
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE orders
-            SET cancel_requested_at = COALESCE(cancel_requested_at, %s),
-                cancel_attempts = COALESCE(cancel_attempts, 0) + 1,
-                cancel_last_error = %s
-            WHERE order_id = %s
-              AND status = 'PENDING'
-              AND refund_status = 'NONE'
-            """,
-            (now(), str(error)[:1000] if error else None, order_id)
-        )
-
-def clear_order_cancel_request(order_id):
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE orders
-            SET cancel_requested_at = NULL,
-                cancel_last_error = NULL
-            WHERE order_id = %s
-            """,
-            (order_id,)
-        )
-
-def get_cancel_queue(limit=20):
-    with get_db() as db:
-        return db.execute(
-            """
-            SELECT * FROM orders
-            WHERE status = 'PENDING'
-              AND refund_status = 'NONE'
-              AND provider = 'rumahotp'
-              AND provider_order_id IS NOT NULL
-              AND cancel_requested_at IS NOT NULL
-            ORDER BY cancel_requested_at ASC
-            LIMIT %s
-            """,
-            (int(limit),)
-        ).fetchall()
-
-
-# =========================================================
 # REFUND ORDER
 # =========================================================
 
@@ -1321,34 +1260,3 @@ def claim_checkin(telegram_id, reward):
             "total_deposit": int(total or 0),
             "last_checkin_at": now_iso,
         }
-
-
-# =========================================================
-# APP SETTINGS / MAINTENANCE
-# =========================================================
-
-def get_app_setting(key, default=None):
-    with get_db() as db:
-        row = db.execute("SELECT value FROM app_settings WHERE key = %s", (str(key),)).fetchone()
-    return row["value"] if row else default
-
-def set_app_setting(key, value):
-    with get_db() as db:
-        db.execute(
-            """INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, %s)
-               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at""",
-            (str(key), str(value), now())
-        )
-
-def is_maintenance_mode():
-    return str(get_app_setting("maintenance_mode", "OFF")).upper() == "ON"
-
-def set_maintenance_mode(enabled):
-    set_app_setting("maintenance_mode", "ON" if enabled else "OFF")
-
-def get_active_order_for_user(telegram_id):
-    with get_db() as db:
-        return db.execute(
-            "SELECT * FROM orders WHERE telegram_id = %s AND status = 'PENDING' ORDER BY created_at DESC LIMIT 1",
-            (telegram_id,)
-        ).fetchone()

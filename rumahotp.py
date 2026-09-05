@@ -8,8 +8,7 @@ import logging
 import requests
 import time
 import re
-import threading
-from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import RUMAHOTP_API_KEY, KURS_DOLAR
 
@@ -19,48 +18,19 @@ TIMEOUT = 15
 _CACHE_TTL = 300.0
 _cache = {}
 
-# RumahOTP documents a hard limit of 5 API requests / 10 seconds.
-# Use a sliding-window limiter instead of a fixed 2.1s delay. This lets the
-# first few navigation requests (service -> country -> operator) respond
-# immediately while still preventing more than 5 requests in any 10s window.
-_API_RATE_LOCK = threading.Lock()
-_API_REQUEST_TIMES = deque()
-_API_RATE_WINDOW = 10.0
-_API_RATE_MAX = 5
-_CANCEL_LOCKS = {}
-_CANCEL_LOCKS_GUARD = threading.Lock()
-
 
 def _headers():
     return {"x-apikey": RUMAHOTP_API_KEY, "Accept": "application/json"}
 
 
-def _acquire_request_slot():
-    """Reserve one RumahOTP API slot without holding the lock during sleep/HTTP."""
-    while True:
-        with _API_RATE_LOCK:
-            now = time.monotonic()
-            while _API_REQUEST_TIMES and now - _API_REQUEST_TIMES[0] >= _API_RATE_WINDOW:
-                _API_REQUEST_TIMES.popleft()
-            if len(_API_REQUEST_TIMES) < _API_RATE_MAX:
-                _API_REQUEST_TIMES.append(now)
-                return
-            wait = max(0.05, _API_RATE_WINDOW - (now - _API_REQUEST_TIMES[0]))
-        # IMPORTANT: release the provider-wide lock while waiting. The old
-        # code slept while holding this lock and also held it during HTTP,
-        # causing unrelated Telegram callbacks to pile up and look stuck.
-        time.sleep(wait)
-
-
 def _get(path, params=None):
-    """GET RumahOTP with rate limiting that never blocks other callbacks."""
+    """GET RumahOTP with a small 429 retry; never turn an API error into cached empty stock."""
     if not RUMAHOTP_API_KEY:
         return {"success": False, "error": {"message": "RUMAHOTP_API_KEY belum diatur."}}
 
     last_error = None
     for attempt in range(2):
         try:
-            _acquire_request_slot()
             r = requests.get(
                 f"{BASE_URL}{path}",
                 headers=_headers(),
@@ -71,7 +41,7 @@ def _get(path, params=None):
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
                 try:
-                    delay = max(1.0, min(float(retry_after), 10.0))
+                    delay = max(1.0, min(float(retry_after), 5.0))
                 except (TypeError, ValueError):
                     delay = 2.0
                 time.sleep(delay)
@@ -85,8 +55,8 @@ def _get(path, params=None):
 
         except Exception as exc:
             last_error = exc
-            if attempt < 1:
-                time.sleep(0.5)
+            if attempt < 2:
+                time.sleep(0.25)
 
     logger.warning("[RUMAHOTP] request %s failed: %s", path, last_error)
     return {"success": False, "error": {"message": str(last_error or "Request gagal.")}}
@@ -311,10 +281,6 @@ def get_operator_quotes(country, service):
     if not found:
         return []
     sid = found.get("id")
-    cache_key = f"operator_quotes:{str(country).strip().lower()}:{sid}"
-    cached_quotes = _cached(cache_key)
-    if cached_quotes is not None:
-        return cached_quotes
     item = find_country(country, sid)
     if not item:
         return []
@@ -343,15 +309,21 @@ def get_operator_quotes(country, service):
             _put_cache(cache_key, operators)
         return row, provider_id, price, stock, operators
 
-    # Do NOT fan these requests out with ThreadPoolExecutor. RumahOTP has a
-    # global 5-requests/10-seconds limit, so concurrent operator lookups can
-    # starve an order cancel/status request and trigger Cloudflare 429s.
     resolved = []
-    for row_info in rows:
-        try:
-            resolved.append(resolve(row_info))
-        except Exception:
-            logger.exception("[RUMAHOTP] operator lookup failed")
+    if len(rows) > 1:
+        with ThreadPoolExecutor(max_workers=min(6, len(rows))) as executor:
+            futures = [executor.submit(resolve, row_info) for row_info in rows]
+            for future in as_completed(futures):
+                try:
+                    resolved.append(future.result())
+                except Exception:
+                    logger.exception("[RUMAHOTP] operator lookup failed")
+    else:
+        for row_info in rows:
+            try:
+                resolved.append(resolve(row_info))
+            except Exception:
+                logger.exception("[RUMAHOTP] operator lookup failed")
 
     out = []
     for row, provider_id, price, stock, operators in resolved:
@@ -383,7 +355,7 @@ def get_operator_quotes(country, service):
                 "cost_idr": price,
                 "stock": stock,
             })
-    return _put_cache(cache_key, out)
+    return out
 
 
 def _metadata(pool):
@@ -436,76 +408,126 @@ def resend_otp(order_id):
     return {"response": "OK", "status": str(payload.get("status") or "resend"), "expired_at": payload.get("expired_at"), "raw": data}
 
 
-def cancel_number(order_id, expected_cost=None):
-    """Request and verify cancellation at RumahOTP.
+def cancel_number(order_id):
+    """Cancel a RumahOTP order and verify the cancellation at provider side.
 
-    IMPORTANT: the provider's /v1/orders/set_status response is only the
-    acknowledgement of the command. The order is considered cancelled only
-    after /v1/orders/get_status reports ``canceled``. We intentionally do NOT
-    use the account balance as the cancellation signal: balance is an account
-    aggregate and may be updated asynchronously or be changed by another
-    order at the same time.
+    V6 deliberately uses a two-phase flow:
+      1. ask RumahOTP to set the order status to ``cancel``;
+      2. re-read the order status and only report success when the provider
+         actually exposes a terminal cancelled state.
 
-    If the provider needs more time, this function returns ERROR and the bot's
-    persistent cancel worker retries automatically. The user must never be
-    refunded locally until provider cancellation is confirmed.
+    This prevents the bot from saying "refund sukses" while RumahOTP still
+    shows WAITING.  The caller must only perform the local user refund when
+    this function returns ``response=OK``.
     """
     order_id = str(order_id or '').strip()
     if not order_id:
-        return {'response':'ERROR','error':'Provider order ID kosong.'}
+        return {"response": "ERROR", "error": "Provider order ID kosong."}
 
-    with _CANCEL_LOCKS_GUARD:
-        lock = _CANCEL_LOCKS.setdefault(order_id, threading.Lock())
+    # First check the current provider state. If the order was already
+    # cancelled by another process/admin, it is safe to continue to the
+    # local refund. Never treat a successful HTTP response alone as proof.
+    before = _get("/v1/orders/get_status", {"order_id": order_id})
+    if before.get("success"):
+        before_payload = before.get("data") or {}
+        before_status = str(before_payload.get("status") or "").strip().lower()
+        if before_status in {"cancel", "canceled", "cancelled"}:
+            logger.info("[RUMAHOTP] order already cancelled order_id=%s status=%s", order_id, before_status)
+            return {
+                "response": "OK",
+                "provider_status": before_status,
+                "already_cancelled": True,
+                "raw": before,
+            }
+        if before_status in {"completed", "received", "done"}:
+            return {
+                "response": "ERROR",
+                "error": f"Order RumahOTP sudah berstatus {before_status} dan tidak boleh dibatalkan.",
+                "provider_status": before_status,
+                "raw": before,
+            }
 
-    with lock:
-        logger.info('[RUMAHOTP] CANCEL_START order_id=%s', order_id)
+    # Request cancellation. RumahOTP documents this endpoint as the official
+    # status-change method with status=cancel.
+    data = _get(
+        "/v1/orders/set_status",
+        {"order_id": order_id, "status": "cancel"},
+    )
 
-        data = _get('/v1/orders/set_status', {'order_id': order_id, 'status': 'cancel'})
-        if not data.get('success'):
-            err = (data.get('error') or {}).get('message', 'Cancel RumahOTP gagal.')
-            logger.warning('[RUMAHOTP] CANCEL_COMMAND_FAILED order_id=%s error=%s raw=%s', order_id, err, data)
-            # Even when the command endpoint errors, status may already be
-            # canceled from a previous attempt. Verify once before failing.
-            verify = _get('/v1/orders/get_status', {'order_id': order_id})
-            if verify.get('success'):
-                st = str((verify.get('data') or {}).get('status') or '').strip().lower()
-                logger.info('[RUMAHOTP] CANCEL_VERIFY_FALLBACK order_id=%s status=%s', order_id, st)
-                if st in {'cancel','canceled','cancelled'}:
-                    return {'response':'OK','provider_status':st,'raw':verify,'already_cancelled':True}
-            return {'response':'ERROR','error':err,'provider_status':st if verify.get('success') else 'unknown','raw':data}
-
-        cmd = data.get('data') or {}
-        cmd_status = str(cmd.get('status') or '').strip().lower()
-        logger.info('[RUMAHOTP] CANCEL_COMMAND_ACK order_id=%s status=%s raw=%s', order_id, cmd_status, data)
-
-        # The documented example returns status=cancel here, but this is NOT
-        # enough: the dashboard can still show the number as waiting.
-        last_status = cmd_status or 'unknown'
-        for attempt in range(1, 4):
-            time.sleep(2.5)
-            verify = _get('/v1/orders/get_status', {'order_id': order_id})
-            if not verify.get('success'):
-                logger.warning('[RUMAHOTP] CANCEL_VERIFY_ERROR order_id=%s attempt=%s error=%s', order_id, attempt, verify.get('error'))
-                continue
-            payload = verify.get('data') or {}
-            last_status = str(payload.get('status') or '').strip().lower()
-            logger.info('[RUMAHOTP] CANCEL_VERIFY order_id=%s attempt=%s status=%s', order_id, attempt, last_status)
-            if last_status in {'cancel','canceled','cancelled'}:
-                logger.info('[RUMAHOTP] CANCEL_CONFIRMED order_id=%s status=%s', order_id, last_status)
-                return {'response':'OK','provider_status':last_status,'raw':verify,'already_cancelled':False}
-            if last_status in {'completed','done'}:
-                return {'response':'ERROR','error':f'Order RumahOTP sudah {last_status}; tidak boleh refund.','provider_status':last_status,'raw':verify}
-
+    if not data.get("success"):
         return {
-            'response':'ERROR',
-            'error':(
-                'RumahOTP belum mengonfirmasi pembatalan. '
-                f'Status terakhir: {last_status}. Pembatalan akan dicoba otomatis lagi.'
+            "response": "ERROR",
+            "error": (data.get("error") or {}).get(
+                "message", "Cancel RumahOTP gagal."
             ),
-            'provider_status':last_status,
-            'retryable': last_status not in {'completed','done'},
-            'raw': data,
+            "raw": data,
         }
+
+    payload = data.get("data") or {}
+    command_status = str(payload.get("status") or "").strip().lower()
+
+    # The command endpoint normally returns status=cancel. Still verify using
+    # the status endpoint because propagation can lag for a short time.
+    if command_status in {"completed", "received", "done"}:
+        return {
+            "response": "ERROR",
+            "error": f"RumahOTP menolak pembatalan; status provider={command_status}.",
+            "provider_status": command_status,
+            "raw": data,
+        }
+
+    verify_status = command_status or "unknown"
+    verify_raw = data
+    for attempt, delay in enumerate((0.35, 0.75, 1.25), start=1):
+        if delay:
+            time.sleep(delay)
+
+        verify = _get("/v1/orders/get_status", {"order_id": order_id})
+        verify_raw = verify
+        if not verify.get("success"):
+            logger.warning(
+                "[RUMAHOTP] cancel verify failed order_id=%s attempt=%s error=%s",
+                order_id, attempt, verify.get("error"),
+            )
+            continue
+
+        verify_payload = verify.get("data") or {}
+        verify_status = str(verify_payload.get("status") or "").strip().lower()
+        logger.info(
+            "[RUMAHOTP] cancel verify order_id=%s attempt=%s status=%s",
+            order_id, attempt, verify_status,
+        )
+
+        if verify_status in {"cancel", "canceled", "cancelled"}:
+            logger.info(
+                "[RUMAHOTP] cancel confirmed order_id=%s status=%s",
+                order_id, verify_status,
+            )
+            return {
+                "response": "OK",
+                "provider_status": verify_status,
+                "already_cancelled": False,
+                "raw": verify_raw,
+            }
+
+        if verify_status in {"completed", "received", "done"}:
+            return {
+                "response": "ERROR",
+                "error": f"Order RumahOTP sudah berstatus {verify_status}; refund lokal dibatalkan.",
+                "provider_status": verify_status,
+                "raw": verify_raw,
+            }
+
+    return {
+        "response": "ERROR",
+        "error": (
+            "RumahOTP belum mengonfirmasi pembatalan. "
+            f"Status terakhir: {verify_status}. Saldo user belum dikembalikan."
+        ),
+        "provider_status": verify_status,
+        "raw": verify_raw,
+    }
+
 
 def get_cheapest_quote(country, service):
     """Return the cheapest live (in-stock) RumahOTP quote for a country/service."""
