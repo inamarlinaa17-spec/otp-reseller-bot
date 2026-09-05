@@ -4988,6 +4988,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # RESEND OTP (SERVER 1 + SERVER 2)
     # =====================================================
     if data.startswith("otp_resend:"):
+        # Acknowledge the Telegram callback immediately so the button never
+        # appears frozen while the provider API is being contacted.
+        try:
+            await query.answer("⏳ Memproses Resend OTP...")
+        except Exception:
+            pass
         order_id = data.split(":", 1)[1]
         order = get_order(order_id)
         if not order or int(order["telegram_id"]) != int(user_id):
@@ -5011,24 +5017,49 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         # Server 2 (RumahOTP): true provider-side resend.
         if provider == "rumahotp":
-            result = await asyncio.to_thread(
-                resend_rumahotp_otp,
-                provider_order_id
-            )
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(resend_rumahotp_otp, provider_order_id),
+                    timeout=12.0,
+                )
+            except asyncio.TimeoutError:
+                await query.edit_message_text(
+                    "⚠️ <b>Resend OTP belum mendapat respons.</b>\n\n"
+                    "Silakan tekan <b>Resend OTP</b> lagi beberapa saat kemudian.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                    ]),
+                )
+                return
 
             if not result or result.get("response") != "OK":
-                await query.answer(
-                    str(
-                        (result or {}).get("error")
-                        or "Resend OTP gagal."
-                    ),
-                    show_alert=True
+                await query.edit_message_text(
+                    "⚠️ <b>Resend OTP gagal.</b>\n\n"
+                    "Silakan coba lagi beberapa saat kemudian.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                    ]),
                 )
                 return
 
             # Keep the original expiration captured at first purchase.
             # After resend, the worker waits for the new OTP automatically.
-            await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
+            changed = await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
+            if not changed:
+                await query.edit_message_text(
+                    "⚠️ <b>Resend belum dapat diproses.</b>\n\n"
+                    "Silakan coba lagi beberapa saat kemudian.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                    ]),
+                )
+                return
             current = get_order(order_id) or order
             runtime = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
             service_name = current.get("service_name") or current.get("service") or "-"
@@ -5130,6 +5161,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # PESANAN SELESAI
     # =====================================================
     if data.startswith("otp_finish:"):
+        # Acknowledge immediately so Telegram does not leave the button in a
+        # loading state while the provider completion request is running.
+        try:
+            await query.answer("⏳ Menyelesaikan pesanan...")
+        except Exception:
+            pass
         order_id = data.split(":", 1)[1]
         order = get_order(order_id)
         if not order or int(order["telegram_id"]) != int(user_id):
@@ -5145,16 +5182,59 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             runtime = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
             provider_order_id = str(runtime.get("provider_order_id") or "").strip()
 
-        finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
-        result = await asyncio.to_thread(finisher, provider_order_id)
-        if not result or result.get("response") != "OK":
-            await query.answer(
-                "Pesanan belum dapat ditandai selesai. Coba lagi beberapa saat.",
-                show_alert=True,
+        if not provider_order_id:
+            await query.edit_message_text(
+                "⚠️ <b>Pesanan belum dapat diselesaikan.</b>\n\n"
+                "Data order belum lengkap. Silakan coba lagi beberapa saat.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                    [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                ]),
             )
             return
 
-        await asyncio.to_thread(mark_order_completed, order_id)
+        finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(finisher, provider_order_id),
+                timeout=12.0,
+            )
+        except asyncio.TimeoutError:
+            await query.edit_message_text(
+                "⚠️ <b>Pesanan belum mendapat respons.</b>\n\n"
+                "Silakan tekan <b>Pesanan Selesai</b> lagi beberapa saat kemudian.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                    [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                ]),
+            )
+            return
+
+        if not result or result.get("response") != "OK":
+            await query.edit_message_text(
+                "⚠️ <b>Pesanan belum dapat ditandai selesai.</b>\n\n"
+                "Silakan tekan <b>Pesanan Selesai</b> lagi beberapa saat kemudian.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                    [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                ]),
+            )
+            return
+
+        changed = await asyncio.to_thread(mark_order_completed, order_id)
+        if not changed:
+            await query.edit_message_text(
+                "⚠️ <b>Pesanan belum dapat ditutup.</b>\n\n"
+                "Silakan tekan <b>Pesanan Selesai</b> lagi beberapa saat kemudian.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                ]),
+            )
+            return
         await query.edit_message_text(
             "✅ <b>PESANAN SELESAI</b>\n\n"
             f"🧾 Order: <code>{escape(order_id)}</code>\n"
@@ -5200,6 +5280,16 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 show_alert=True
             )
 
+            return
+
+        # Once the first OTP has actually arrived, RumahOTP no longer allows
+        # the activation to be refunded. Never expose/process Batal / Refund
+        # for an order that already has a real OTP.
+        if str(order.get("otp_code") or "").strip() and _is_real_otp_code(order.get("otp_code")):
+            await query.answer(
+                "OTP sudah diterima. Refund tidak tersedia. Gunakan Resend OTP atau Pesanan Selesai.",
+                show_alert=True
+            )
             return
 
         if order["status"] != "PENDING":
