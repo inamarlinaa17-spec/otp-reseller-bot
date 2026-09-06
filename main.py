@@ -1282,6 +1282,17 @@ async def start(
 
     )
 
+    # Saat maintenance aktif, /start user biasa langsung diblokir.
+    # Admin tetap dapat mengakses seluruh fitur seperti biasa.
+    if is_maintenance_enabled() and not is_admin(user.id):
+        await update.message.reply_text(
+            "🚧 <b>SERVER SEDANG DALAM MAINTENANCE</b>\n\n"
+            "Mohon maaf, layanan sedang dalam perbaikan.\n"
+            "Silakan coba kembali beberapa saat lagi 🙏",
+            parse_mode="HTML"
+        )
+        return
+
     if is_admin(
         user.id
     ):
@@ -1313,14 +1324,14 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
-                OTP_SERVERS["5sim"],
+                "Server 1",
                 callback_data="otp_server:5sim"
             )
         ],
 
         [
             InlineKeyboardButton(
-                OTP_SERVERS["rumahotp"],
+                "Server 2",
                 callback_data="otp_server:rumahotp"
             )
         ],
@@ -1335,13 +1346,13 @@ async def show_server_page(
     ]
 
     await query.edit_message_text(
-        "🌟 <b>PILIH SERVER OTP</b>\n"
+        "💻 <b>PILIH SERVER OTP</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚡ <b>SERVER 1 — JOS🔥</b>\n"
+        "⚡ <b>SERVER 1 — HIGH STOCK</b>\n"
         "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
-        "⚡ <b>SERVER 2 — ELIT HIGH STOCK</b>\n"
-        "Server ELIT dengan beragam stok layanan dan negara.\n\n"
-        "Silakan pilih server melalui tombol di bawah ini:",
+        "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
+        "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
+        "Silakan pilih server melalui tombol di bawah ini :",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
