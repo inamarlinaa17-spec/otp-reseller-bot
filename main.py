@@ -3114,7 +3114,7 @@ async def _send_manual_qris_invoice(update, context, user, amount):
     await _send_manual_qris_invoice_to_chat(context, update.effective_chat.id, user, amount)
 
 
-async def _create_auto_deposit_invoice(context, chat_id, user, amount):
+async def _create_auto_deposit_invoice(context, chat_id, user, amount, message_id=None):
     deposit_id = "DEP-" + uuid.uuid4().hex[:12].upper()
     with get_db() as db:
         db.execute(
@@ -3139,20 +3139,42 @@ async def _create_auto_deposit_invoice(context, chat_id, user, amount):
         keyboard = [
             [InlineKeyboardButton("💳 Bayar Sekarang", url=snap_url)],
             [InlineKeyboardButton("✅ Cek Pembayaran", callback_data="cek_deposit")],
-            [InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")]
+            [InlineKeyboardButton("❌ Batal", callback_data=f"cancel_auto:{deposit_id}")]
         ]
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "💳 <b>Invoice Deposit Dibuat</b>\n\n"
-                f"🧾 ID: <code>{deposit_id}</code>\n"
-                f"💰 Nominal: <b>{format_rupiah(amount)}</b>\n"
-                "📌 Status: <b>PENDING</b>\n\n"
-                "Pilih metode pembayaran di tombol di bawah."
-            ),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        invoice_text = (
+            "💳 <b>Invoice Deposit Dibuat</b>\n\n"
+            f"🧾 ID: <code>{deposit_id}</code>\n"
+            f"💰 Nominal: <b>{format_rupiah(amount)}</b>\n"
+            "📌 Status: <b>PENDING</b>\n\n"
+            "Klik <b>Bayar Sekarang</b> untuk melakukan pembayaran otomatis.\n"
+            "Setelah membayar, tekan <b>Cek Pembayaran</b>."
         )
+
+        # Metode otomatis memakai pesan pilihan metode yang sama, lalu
+        # menggantinya dengan invoice. Jadi tidak menambah pesan bot baru.
+        edited = False
+        if message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(message_id),
+                    text=invoice_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                edited = True
+                context.chat_data["deposit_flow_message_id"] = int(message_id)
+            except Exception:
+                logger.exception("Gagal mengedit pesan pilihan metode menjadi invoice otomatis %s", deposit_id)
+
+        if not edited:
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=invoice_text,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.chat_data["deposit_flow_message_id"] = sent.message_id
     except Exception:
         logger.exception("Gagal membuat invoice pembayaran otomatis.")
         with get_db() as db:
@@ -5823,7 +5845,13 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             await _send_manual_qris_invoice_to_chat(context, user.id, user, amount)
             return
 
-        await _create_auto_deposit_invoice(context, user.id, user, amount)
+        # Untuk pembayaran otomatis, pesan PILIH METODE PEMBAYARAN
+        # langsung diubah menjadi invoice (berbeda dengan QRIS manual yang
+        # harus mengirim foto QRIS baru).
+        flow_message_id = context.chat_data.get("deposit_flow_message_id")
+        await _create_auto_deposit_invoice(
+            context, user.id, user, amount, message_id=flow_message_id
+        )
         return
 
     if data.startswith("manual_paid:"):
@@ -5885,6 +5913,40 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             text=confirmation_text,
             parse_mode="HTML",
             reply_markup=user_markup,
+        )
+        return
+
+    if data.startswith("cancel_auto:"):
+        deposit_id = data.split(":", 1)[1].strip()
+        with get_db() as db:
+            deposit = db.execute(
+                "SELECT deposit_id,status,telegram_id,payment_method FROM deposits WHERE deposit_id=%s AND telegram_id=%s",
+                (deposit_id, user_id),
+            ).fetchone()
+            if not deposit or deposit["payment_method"] not in (None, "AUTO") or deposit["status"] != "PENDING":
+                await query.answer("Invoice pembayaran otomatis sudah tidak aktif.", show_alert=True)
+                return
+            db.execute(
+                "UPDATE deposits SET status='FAILED', confirmed_at=%s WHERE deposit_id=%s AND telegram_id=%s AND status='PENDING'",
+                (now(), deposit_id, user_id),
+            )
+
+        context.chat_data["waiting_deposit"] = False
+        context.chat_data.pop("pending_deposit_amount", None)
+        context.chat_data.pop("deposit_method", None)
+        context.chat_data.pop("deposit_flow_message_id", None)
+
+        # Batal pada pembayaran otomatis mengikuti pola QRIS manual:
+        # invoice dihapus dan user langsung kembali ke Menu Utama.
+        try:
+            await query.message.delete()
+        except Exception:
+            logger.exception("Gagal menghapus invoice otomatis %s saat dibatalkan", deposit_id)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🏠 <b>MENU UTAMA</b>\n\nSilakan pilih menu yang ingin digunakan.",
+            parse_mode="HTML",
+            reply_markup=user_menu(),
         )
         return
 
