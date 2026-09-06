@@ -5866,8 +5866,13 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     if data in {"deposit_method:auto", "deposit_method:manual"}:
         selected_method = "AUTO" if data.endswith(":auto") else "MANUAL"
         if not _is_payment_method_enabled(selected_method):
+            # This callback was intentionally not pre-answered by button_handler,
+            # so Telegram can display the maintenance message as a popup alert.
             await query.answer(_payment_method_maintenance_text(selected_method), show_alert=True)
             return
+
+        # Clear the Telegram callback loading state for enabled methods.
+        await query.answer()
 
         amount = context.chat_data.pop("pending_deposit_amount", None)
         if amount is None:
@@ -7481,13 +7486,14 @@ async def button_handler(
 
         return
 
-    try:
-
-        await query.answer()
-
-    except Exception:
-
-        pass
+    # Deposit method callbacks need to display a maintenance alert when a
+    # payment method is disabled. Do not pre-answer those callbacks here,
+    # otherwise Telegram will reject the later show_alert=True answer.
+    if query.data not in {"deposit_method:auto", "deposit_method:manual"}:
+        try:
+            await query.answer()
+        except Exception:
+            pass
 
     user_id = query.from_user.id
 
