@@ -5847,31 +5847,35 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         admin_url = _manual_admin_url(
             deposit_id, int(deposit["amount"]), int(deposit["payment_amount"])
         )
+        # Setelah user menyatakan sudah membayar, invoice QRIS lama
+        # dihapus agar QRIS tidak tetap tampil. Pada tahap ini user
+        # hanya boleh melihat tombol untuk menghubungi admin.
         user_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("💬 Buka Chat Admin", url=admin_url)],
-            [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
         ])
-        ok = await _safe_edit_manual_invoice(
-            query,
+        confirmation_text = (
             "📨 <b>KONFIRMASI TERKIRIM</b>\n\n"
             f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
             f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n"
             f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n"
             f"🔢 Kode unik: <b>{int(deposit['unique_code'] or 0):03d}</b>\n\n"
-            "Konfirmasi sudah dikirim ke admin. Admin akan mengecek mutasi QRIS sebelum saldo ditambahkan.",
-            user_markup,
+            "Konfirmasi sudah dikirim ke admin. Admin akan mengecek mutasi QRIS sebelum saldo ditambahkan.\n\n"
+            "Menu utama akan muncul setelah deposit disetujui atau ditolak oleh admin."
         )
-        if not ok:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "📨 <b>Konfirmasi terkirim ke admin.</b>\n\n"
-                    f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
-                    "Admin akan mengecek mutasi QRIS sebelum saldo ditambahkan."
-                ),
-                parse_mode="HTML",
-                reply_markup=user_markup,
-            )
+        try:
+            if getattr(query.message, "photo", None):
+                await query.message.delete()
+            else:
+                await query.edit_message_text(confirmation_text, parse_mode="HTML", reply_markup=user_markup)
+                return
+        except Exception:
+            logger.exception("Gagal menghapus invoice QRIS manual %s setelah konfirmasi", deposit_id)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=confirmation_text,
+            parse_mode="HTML",
+            reply_markup=user_markup,
+        )
         return
 
     if data.startswith("cancel_manual:"):
@@ -5882,24 +5886,22 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 (now(), deposit_id, user_id)
             )
         context.chat_data["waiting_deposit"] = False
-        markup = user_menu()
-        ok = await _safe_edit_manual_invoice(
-            query,
-            "❌ <b>DEPOSIT QRIS MANUAL DIBATALKAN</b>\n\n"
-            f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n\n"
-            "Transaksi ini tidak akan diproses lagi.",
-            markup,
+        context.chat_data.pop("pending_deposit_amount", None)
+        context.chat_data.pop("deposit_method", None)
+
+        # Saat Batal ditekan, hapus pesan foto QRIS sepenuhnya lalu
+        # kirim Menu Utama sebagai pesan baru. Ini mencegah QRIS/caption
+        # lama tetap menempel dan membuat user terlihat stuck.
+        try:
+            await query.message.delete()
+        except Exception:
+            logger.exception("Gagal menghapus invoice QRIS manual %s saat dibatalkan", deposit_id)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🏠 <b>MENU UTAMA</b>\n\nSilakan pilih menu yang ingin digunakan.",
+            parse_mode="HTML",
+            reply_markup=user_menu(),
         )
-        if not ok:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "❌ <b>Deposit QRIS manual dibatalkan.</b>\n\n"
-                    f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>"
-                ),
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
         return
 
     # =====================================================
@@ -7011,6 +7013,7 @@ async def admin_callback(
                         f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"
                     ),
                     parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]),
                 )
             admin_text = (
                 "✅ <b>DEPOSIT MANUAL DISETUJUI</b>\n\n"
@@ -7067,6 +7070,7 @@ async def admin_callback(
                         "Silakan hubungi admin jika kamu sudah melakukan pembayaran."
                     ),
                     parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]),
                 )
             except Exception:
                 logger.exception("Gagal mengirim notifikasi reject ke user deposit %s", deposit_id)
