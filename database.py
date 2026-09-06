@@ -91,6 +91,15 @@ def init_database():
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS unique_code INTEGER")
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS confirmed_at TEXT")
 
+        # Satu kode unik tidak boleh dipakai bersamaan untuk nominal deposit
+        # yang sama. Partial index hanya berlaku selama deposit masih PENDING.
+        db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS deposits_manual_pending_amount_code_uidx
+            ON deposits (amount, unique_code)
+            WHERE status = 'PENDING' AND payment_method = 'MANUAL_QRIS'
+              AND unique_code IS NOT NULL
+        """)
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS otp_quotes (
                 quote_id TEXT PRIMARY KEY,

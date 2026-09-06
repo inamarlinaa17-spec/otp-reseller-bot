@@ -23,6 +23,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from urllib.parse import quote
 
+from psycopg.errors import UniqueViolation
+
 from flask import Flask, request, jsonify
 
 from telegram import (
@@ -517,6 +519,9 @@ def admin_menu():
         [
             InlineKeyboardButton("📷 QRIS Manual", callback_data="admin_qris_setup"),
             InlineKeyboardButton(maintenance_label, callback_data="admin_maintenance")
+        ],
+        [
+            InlineKeyboardButton("💳 Metode Pembayaran", callback_data="admin_payment_methods")
         ]
 
     ])
@@ -3053,18 +3058,26 @@ def _manual_admin_url(deposit_id, amount, payment_amount):
     return f"tg://user?id={ADMIN_ID}"
 
 
+def _manual_code_max(amount):
+    # Kode unik menyesuaikan nominal: makin kecil deposit, makin kecil
+    # rentang kode. Batas maksimum selalu 500.
+    return min(500, max(1, int(amount) // 200))
+
+
 def _generate_manual_payment_amount(amount):
+    amount = int(amount)
+    max_code = _manual_code_max(amount)
     with get_db() as db:
-        for _ in range(100):
-            code = random.randint(101, 999)
+        for _ in range(max(100, max_code * 3)):
+            code = random.randint(1, max_code)
             payment_amount = amount + code
             exists = db.execute(
-                "SELECT 1 FROM deposits WHERE status='PENDING' AND payment_method='MANUAL_QRIS' AND payment_amount=%s LIMIT 1",
-                (payment_amount,)
+                "SELECT 1 FROM deposits WHERE status='PENDING' AND payment_method='MANUAL_QRIS' AND amount=%s AND unique_code=%s LIMIT 1",
+                (amount, code)
             ).fetchone()
             if not exists:
                 return payment_amount, code
-    raise RuntimeError("Gagal membuat kode unik QRIS. Silakan coba lagi.")
+    raise RuntimeError("Semua kode unik untuk nominal deposit ini sedang terpakai. Silakan coba nominal lain beberapa saat lagi.")
 
 
 def _manual_deposit_message(deposit_id, amount, payment_amount, code):
@@ -3090,14 +3103,29 @@ async def _send_manual_qris_invoice_to_chat(context, chat_id, user, amount):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu Deposit", callback_data="user_deposit")]])
         )
         return
-    payment_amount, code = _generate_manual_payment_amount(amount)
     deposit_id = "DEP-" + uuid.uuid4().hex[:12].upper()
-    with get_db() as db:
-        db.execute(
-            """INSERT INTO deposits (deposit_id,telegram_id,amount,status,payment_reference,created_at,payment_method,payment_amount,unique_code)
-               VALUES (%s,%s,%s,'PENDING',%s,%s,'MANUAL_QRIS',%s,%s)""",
-            (deposit_id, user.id, amount, qris_file_id, now(), payment_amount, code)
-        )
+    inserted = False
+    last_unique_error = None
+    for _ in range(8):
+        payment_amount, code = _generate_manual_payment_amount(amount)
+        try:
+            with get_db() as db:
+                db.execute(
+                    """INSERT INTO deposits (deposit_id,telegram_id,amount,status,payment_reference,created_at,payment_method,payment_amount,unique_code)
+                       VALUES (%s,%s,%s,'PENDING',%s,%s,'MANUAL_QRIS',%s,%s)""",
+                    (deposit_id, user.id, amount, qris_file_id, now(), payment_amount, code)
+                )
+            inserted = True
+            break
+        except UniqueViolation as exc:
+            # Dua user bisa membuat deposit pada saat yang sama. Jika kode
+            # yang dipilih bertabrakan, ambil kode lain dan ulangi.
+            last_unique_error = exc
+            continue
+    if not inserted:
+        if last_unique_error:
+            raise RuntimeError("Kode unik sedang dipakai deposit lain. Silakan coba lagi.") from last_unique_error
+        raise RuntimeError("Gagal membuat deposit QRIS manual.")
     await context.bot.send_photo(
         chat_id=chat_id,
         photo=qris_file_id,
@@ -3215,6 +3243,25 @@ def _complete_manual_deposit(deposit_id):
             db.execute("INSERT INTO ledger (telegram_id,amount,balance_before,balance_after,transaction_type,reference,description,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (deposit["telegram_id"], bonus, before + amount, after, "DEPOSIT_BONUS", deposit_id, f"Bonus 10% deposit {deposit_id}", now()))
         db.execute("UPDATE deposits SET status='SUCCESS', payment_reference=%s, completed_at=%s, confirmed_at=%s WHERE deposit_id=%s", (f"MANUAL-{deposit_id}", now(), now(), deposit_id))
         return {"completed": True, "already_completed": False, **dict(deposit), "bonus": bonus, "credited": credited, "new_balance": after}
+
+
+def _is_payment_method_enabled(method):
+    key = "payment_auto_enabled" if method == "AUTO" else "payment_manual_enabled"
+    return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _payment_method_maintenance_text(method):
+    if method == "AUTO":
+        return (
+            "⚠️ <b>Metode Pembayaran Otomatis Sedang Dalam Maintenance</b>\n\n"
+            "Mohon maaf, pembayaran otomatis sedang diperbaiki sementara.\n"
+            "Silakan gunakan <b>QRIS Manual</b> atau coba kembali beberapa saat lagi. 🙏"
+        )
+    return (
+        "⚠️ <b>Metode QRIS Manual Sedang Dalam Maintenance</b>\n\n"
+        "Mohon maaf, pembayaran QRIS Manual sedang diperbaiki sementara.\n"
+        "Silakan gunakan <b>Pembayaran Otomatis</b> atau coba kembali beberapa saat lagi. 🙏"
+    )
 
 
 async def command_deposit(update, context):
@@ -5817,6 +5864,11 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # =====================================================
 
     if data in {"deposit_method:auto", "deposit_method:manual"}:
+        selected_method = "AUTO" if data.endswith(":auto") else "MANUAL"
+        if not _is_payment_method_enabled(selected_method):
+            await query.answer(_payment_method_maintenance_text(selected_method), show_alert=True)
+            return
+
         amount = context.chat_data.pop("pending_deposit_amount", None)
         if amount is None:
             await query.answer("Nominal deposit belum ada. Silakan masukkan nominal lagi.", show_alert=True)
@@ -7071,6 +7123,55 @@ async def admin_callback(
             return
         await _admin_user_ledger(query, telegram_id)
 
+    elif query.data == "admin_payment_methods":
+        auto_enabled = _is_payment_method_enabled("AUTO")
+        manual_enabled = _is_payment_method_enabled("MANUAL")
+        auto_label = "🟢 ON" if auto_enabled else "🔴 OFF"
+        manual_label = "🟢 ON" if manual_enabled else "🔴 OFF"
+        await query.edit_message_text(
+            "💳 <b>METODE PEMBAYARAN MAINTENANCE</b>\n\n"
+            "Atur masing-masing metode pembayaran secara terpisah.\n"
+            "Jika suatu metode dimatikan, user tetap dapat melihat pilihannya tetapi saat diklik akan mendapat pemberitahuan bahwa metode tersebut sedang maintenance.\n\n"
+            f"⚡ Pembayaran Otomatis: <b>{auto_label}</b>\n"
+            f"📷 QRIS Manual: <b>{manual_label}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"⚡ Otomatis — {auto_label}", callback_data="admin_payment_toggle:auto")],
+                [InlineKeyboardButton(f"📷 QRIS Manual — {manual_label}", callback_data="admin_payment_toggle:manual")],
+                [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
+            ])
+        )
+
+    elif query.data.startswith("admin_payment_toggle:"):
+        method = query.data.split(":", 1)[1].strip().lower()
+        if method not in {"auto", "manual"}:
+            await query.answer("Metode pembayaran tidak valid.", show_alert=True)
+            return
+        key = "payment_auto_enabled" if method == "auto" else "payment_manual_enabled"
+        current = _is_payment_method_enabled("AUTO" if method == "auto" else "MANUAL")
+        set_bot_setting(key, "0" if current else "1")
+        await query.answer(
+            ("Metode pembayaran diaktifkan." if not current else "Metode pembayaran dimatikan."),
+            show_alert=False
+        )
+        auto_enabled = _is_payment_method_enabled("AUTO")
+        manual_enabled = _is_payment_method_enabled("MANUAL")
+        auto_label = "🟢 ON" if auto_enabled else "🔴 OFF"
+        manual_label = "🟢 ON" if manual_enabled else "🔴 OFF"
+        await query.edit_message_text(
+            "💳 <b>METODE PEMBAYARAN MAINTENANCE</b>\n\n"
+            "Atur masing-masing metode pembayaran secara terpisah.\n"
+            "Jika suatu metode dimatikan, user tetap dapat melihat pilihannya tetapi saat diklik akan mendapat pemberitahuan bahwa metode tersebut sedang maintenance.\n\n"
+            f"⚡ Pembayaran Otomatis: <b>{auto_label}</b>\n"
+            f"📷 QRIS Manual: <b>{manual_label}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"⚡ Otomatis — {auto_label}", callback_data="admin_payment_toggle:auto")],
+                [InlineKeyboardButton(f"📷 QRIS Manual — {manual_label}", callback_data="admin_payment_toggle:manual")],
+                [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
+            ])
+        )
+
     elif query.data == "admin_qris_setup":
         context.user_data["waiting_qris_setup"] = True
         await query.edit_message_text("📷 <b>SET QRIS MANUAL</b>\n\nKirim <b>foto QRIS DANA BISNIS</b> ke chat bot ini sekarang.\n\nBot menyimpan file_id Telegram-nya sehingga tidak perlu Railway Variable untuk gambar.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]]))
@@ -7417,6 +7518,8 @@ async def button_handler(
         or query.data == "admin_users_search"
         or query.data == "admin_deposits_search"
         or query.data == "admin_qris_setup"
+        or query.data == "admin_payment_methods"
+        or query.data.startswith("admin_payment_toggle:")
         or query.data.startswith("admin_manual_approve:")
         or query.data.startswith("admin_manual_reject:")
     )
