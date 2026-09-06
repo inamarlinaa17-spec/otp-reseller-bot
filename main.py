@@ -522,6 +522,9 @@ def admin_menu():
         ],
         [
             InlineKeyboardButton("💳 Metode Pembayaran", callback_data="admin_payment_methods")
+        ],
+        [
+            InlineKeyboardButton("🖥 Server Maintenance", callback_data="admin_server_maintenance")
         ]
 
     ])
@@ -3219,7 +3222,7 @@ async def _create_auto_deposit_invoice(context, chat_id, user, amount, message_i
 
 def _complete_manual_deposit(deposit_id):
     with get_db() as db:
-        deposit = db.execute("SELECT deposit_id,telegram_id,amount,payment_amount,unique_code,status,payment_method FROM deposits WHERE deposit_id=%s FOR UPDATE", (deposit_id,)).fetchone()
+        deposit = db.execute("SELECT deposit_id,telegram_id,amount,payment_amount,unique_code,status,payment_method,user_message_id FROM deposits WHERE deposit_id=%s FOR UPDATE", (deposit_id,)).fetchone()
         if not deposit:
             raise ValueError("Deposit tidak ditemukan.")
         if deposit["payment_method"] != "MANUAL_QRIS":
@@ -3261,6 +3264,25 @@ def _payment_method_maintenance_text(method):
         "⚠️ <b>Metode QRIS Manual Sedang Dalam Maintenance</b>\n\n"
         "Mohon maaf, pembayaran QRIS Manual sedang diperbaiki sementara.\n"
         "Silakan gunakan <b>Pembayaran Otomatis</b> atau coba kembali beberapa saat lagi. 🙏"
+    )
+
+
+def _is_server_enabled(server):
+    key = "server1_enabled" if server == "5sim" else "server2_enabled"
+    return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _server_maintenance_text(server):
+    if server == "5sim":
+        return (
+            "⚠️ <b>Server 1 Sedang Dalam Maintenance</b>\n\n"
+            "Mohon maaf, <b>Server 1</b> sedang dalam perbaikan sementara.\n"
+            "Silakan gunakan <b>Server 2</b> atau coba kembali beberapa saat lagi. 🙏"
+        )
+    return (
+        "⚠️ <b>Server 2 Sedang Dalam Maintenance</b>\n\n"
+        "Mohon maaf, <b>Server 2</b> sedang dalam perbaikan sementara.\n"
+        "Silakan gunakan <b>Server 1</b> atau coba kembali beberapa saat lagi. 🙏"
     )
 
 
@@ -4185,6 +4207,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 show_alert=True
             )
 
+            return
+
+        if not _is_server_enabled(server) and not is_admin(user_id):
+            await query.answer(_server_maintenance_text(server), show_alert=True)
             return
 
         await show_service_page(
@@ -5957,20 +5983,30 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             "Konfirmasi sudah dikirim ke admin. Admin akan mengecek mutasi QRIS sebelum saldo ditambahkan.\n\n"
             "Menu utama akan muncul setelah deposit disetujui atau ditolak oleh admin."
         )
+        confirmation_message = None
         try:
             if getattr(query.message, "photo", None):
                 await query.message.delete()
             else:
                 await query.edit_message_text(confirmation_text, parse_mode="HTML", reply_markup=user_markup)
-                return
+                confirmation_message = query.message
         except Exception:
-            logger.exception("Gagal menghapus invoice QRIS manual %s setelah konfirmasi", deposit_id)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=confirmation_text,
-            parse_mode="HTML",
-            reply_markup=user_markup,
-        )
+            logger.exception("Gagal menghapus/memperbarui invoice QRIS manual %s setelah konfirmasi", deposit_id)
+        if confirmation_message is None:
+            confirmation_message = await context.bot.send_message(
+                chat_id=user_id,
+                text=confirmation_text,
+                parse_mode="HTML",
+                reply_markup=user_markup,
+            )
+        try:
+            with get_db() as db:
+                db.execute(
+                    "UPDATE deposits SET user_message_id=%s WHERE deposit_id=%s AND telegram_id=%s",
+                    (confirmation_message.message_id, deposit_id, user_id),
+                )
+        except Exception:
+            logger.exception("Gagal menyimpan message_id konfirmasi deposit %s", deposit_id)
         return
 
     if data.startswith("cancel_auto:"):
@@ -7128,6 +7164,55 @@ async def admin_callback(
             return
         await _admin_user_ledger(query, telegram_id)
 
+    elif query.data == "admin_server_maintenance":
+        server1_enabled = _is_server_enabled("5sim")
+        server2_enabled = _is_server_enabled("rumahotp")
+        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
+        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        await query.edit_message_text(
+            "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
+            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
+            "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
+            f"⚡ Server 1: <b>{server1_label}</b>\n"
+            f"⚡ Server 2: <b>{server2_label}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
+            ])
+        )
+
+    elif query.data.startswith("admin_server_toggle:"):
+        server = query.data.split(":", 1)[1].strip().lower()
+        if server not in {"5sim", "rumahotp"}:
+            await query.answer("Server tidak valid.", show_alert=True)
+            return
+        key = "server1_enabled" if server == "5sim" else "server2_enabled"
+        current = _is_server_enabled(server)
+        set_bot_setting(key, "0" if current else "1")
+        await query.answer(
+            ("Server diaktifkan." if not current else "Server dimatikan."),
+            show_alert=False
+        )
+        server1_enabled = _is_server_enabled("5sim")
+        server2_enabled = _is_server_enabled("rumahotp")
+        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
+        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        await query.edit_message_text(
+            "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
+            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
+            "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
+            f"⚡ Server 1: <b>{server1_label}</b>\n"
+            f"⚡ Server 2: <b>{server2_label}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
+            ])
+        )
+
     elif query.data == "admin_payment_methods":
         auto_enabled = _is_payment_method_enabled("AUTO")
         manual_enabled = _is_payment_method_enabled("MANUAL")
@@ -7186,19 +7271,36 @@ async def admin_callback(
         try:
             result = await asyncio.to_thread(_complete_manual_deposit, deposit_id)
             if result.get("completed"):
-                await context.bot.send_message(
-                    chat_id=result["telegram_id"],
-                    text=(
-                        "✅ <b>DEPOSIT QRIS MANUAL BERHASIL!</b>\n\n"
-                        f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
-                        f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
-                        + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
-                        + f"💳 Total masuk: <b>{format_rupiah(result['credited'])}</b>\n"
-                        f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"
-                    ),
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]),
+                approved_text = (
+                    "✅ <b>DEPOSIT MANUAL DISETUJUI</b>\n\n"
+                    f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
+                    f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
+                    + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
+                    + f"💳 Total masuk: <b>{format_rupiah(result['credited'])}</b>\n"
+                    f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"
                 )
+                user_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]])
+                edited_user_message = False
+                user_message_id = result.get("user_message_id")
+                if user_message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=result["telegram_id"],
+                            message_id=int(user_message_id),
+                            text=approved_text,
+                            parse_mode="HTML",
+                            reply_markup=user_markup,
+                        )
+                        edited_user_message = True
+                    except Exception:
+                        logger.exception("Gagal mengedit pesan konfirmasi user untuk deposit %s", deposit_id)
+                if not edited_user_message:
+                    await context.bot.send_message(
+                        chat_id=result["telegram_id"],
+                        text=approved_text,
+                        parse_mode="HTML",
+                        reply_markup=user_markup,
+                    )
             admin_text = (
                 "✅ <b>DEPOSIT MANUAL DISETUJUI</b>\n\n"
                 f"Deposit: <code>{escape(str(deposit_id))}</code>\n"
@@ -7489,7 +7591,7 @@ async def button_handler(
     # Deposit method callbacks need to display a maintenance alert when a
     # payment method is disabled. Do not pre-answer those callbacks here,
     # otherwise Telegram will reject the later show_alert=True answer.
-    if query.data not in {"deposit_method:auto", "deposit_method:manual"}:
+    if query.data not in {"deposit_method:auto", "deposit_method:manual"} and not query.data.startswith("otp_server:"):
         try:
             await query.answer()
         except Exception:
@@ -7525,7 +7627,9 @@ async def button_handler(
         or query.data == "admin_deposits_search"
         or query.data == "admin_qris_setup"
         or query.data == "admin_payment_methods"
+        or query.data == "admin_server_maintenance"
         or query.data.startswith("admin_payment_toggle:")
+        or query.data.startswith("admin_server_toggle:")
         or query.data.startswith("admin_manual_approve:")
         or query.data.startswith("admin_manual_reject:")
     )

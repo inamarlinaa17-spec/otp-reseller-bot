@@ -90,6 +90,7 @@ def init_database():
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS payment_amount BIGINT")
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS unique_code INTEGER")
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS confirmed_at TEXT")
+        db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS user_message_id BIGINT")
 
         # Satu kode unik tidak boleh dipakai bersamaan untuk nominal deposit
         # yang sama. Partial index hanya berlaku selama deposit masih PENDING.
