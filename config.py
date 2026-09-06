@@ -132,6 +132,31 @@ PROMO_CHANNEL = os.getenv(
 ).strip()
 
 
+# =========================================================
+# TRAFFIC OTP NOTIFICATION
+# =========================================================
+# Optional Telegram channel/chat for automatic OTP traffic notifications.
+# Example: @TRAFIC_OTP_AZHURA_ID or -1001234567890
+try:
+    from traffic_config import TRAFFIC_CHANNEL as TRAFFIC_CHANNEL_DEFAULT
+    from traffic_config import TRAFFIC_BOT_TOKEN as TRAFFIC_BOT_TOKEN_DEFAULT
+except ImportError:
+    TRAFFIC_CHANNEL_DEFAULT = "@Tracif_NokosAzhura"
+    TRAFFIC_BOT_TOKEN_DEFAULT = ""
+
+TRAFFIC_CHANNEL = os.getenv(
+    "TRAFFIC_CHANNEL",
+    TRAFFIC_CHANNEL_DEFAULT
+).strip()
+
+# Optional separate bot token for the traffic notifier.
+# If empty, the main AZHURA bot token is used.
+TRAFFIC_BOT_TOKEN = os.getenv(
+    "TRAFFIC_BOT_TOKEN",
+    TRAFFIC_BOT_TOKEN_DEFAULT
+).strip()
+
+
 
 # =========================================================
 # VALIDATION

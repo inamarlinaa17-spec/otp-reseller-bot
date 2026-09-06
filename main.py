@@ -26,6 +26,7 @@ from flask import Flask, request, jsonify
 
 from telegram import (
     Update,
+    Bot,
     InlineKeyboardButton,
     InlineKeyboardMarkup
 )
@@ -48,7 +49,9 @@ from config import (
     MIDTRANS_SNAP_URL,
     KURS_DOLAR,
     PROMO_CHANNEL,
-    PROFIT_PERCENT
+    PROFIT_PERCENT,
+    TRAFFIC_CHANNEL,
+    TRAFFIC_BOT_TOKEN
 )
 
 from database import (
@@ -60,6 +63,7 @@ from database import (
     get_db,
     now,
     get_total_users,
+    get_user,
     get_deposit_history,
     get_order_history,
     create_pending_order,
@@ -3135,6 +3139,48 @@ def _is_real_otp_code(value):
     return any(ch.isdigit() for ch in code) and 3 <= len(code) <= 32
 
 
+def _mask_traffic_value(value, keep_start=3, keep_end=3):
+    raw = str(value or "-").strip()
+    if raw in {"", "-"}:
+        return "-"
+    if len(raw) <= keep_start + keep_end:
+        return "*" * len(raw)
+    return raw[:keep_start] + "*" * (len(raw) - keep_start - keep_end) + raw[-keep_end:]
+
+
+async def _send_traffic_otp_notification(application, order, code, sms_text):
+    """Send an optional OTP traffic notification without affecting the order flow."""
+    if not TRAFFIC_CHANNEL:
+        return
+    try:
+        user = await asyncio.to_thread(get_user, int(order["telegram_id"]))
+        username = (user or {}).get("username") if user else None
+        masked_user = _mask_traffic_value(username, 3, 3) if username else "-"
+        runtime = _RUNTIME_PROVIDER_CACHE.get(order["order_id"]) or {}
+        phone = order.get("phone") or runtime.get("phone") or "-"
+        masked_phone = _mask_traffic_value(phone, 3, 3)
+        service_name = order.get("service_name") or order.get("service") or "-"
+        country_name = order.get("country_name") or order.get("country") or "-"
+        price = format_rupiah(order.get("sell_price") or 0)
+        provider_order_id = order.get("provider_order_id") or runtime.get("provider_order_id") or order.get("order_id")
+        traffic_text = (
+            "🔐 <b>CODE RECEIVED 2.0</b>\n\n"
+            f"• <b>ID:</b> <code>{escape(str(provider_order_id))}</code>\n"
+            f"• <b>Users:</b> {escape(str(masked_user))}\n"
+            f"• <b>Code:</b> <code>{escape(str(code))}</code>\n"
+            f"• <b>Number:</b> <code>{escape(str(masked_phone))}</code>\n"
+            f"• <b>Price:</b> {escape(str(price))}\n\n"
+            "<b>message_text</b>\n"
+            f"<code>{escape(str(sms_text or '-'))}</code>\n\n"
+            f"{escape(str(service_name))} - {escape(str(country_name))}"
+        )
+        token = TRAFFIC_BOT_TOKEN or BOT_TOKEN
+        async with Bot(token=token) as traffic_bot:
+            await traffic_bot.send_message(chat_id=TRAFFIC_CHANNEL, text=traffic_text, parse_mode="HTML")
+    except Exception:
+        logger.exception("[TRAFFIC] failed to send OTP notification order=%s", order.get("order_id"))
+
+
 async def _send_otp_received_message(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
@@ -3209,6 +3255,9 @@ async def _send_otp_received_message(application, order_id, data_sms):
             )
     except Exception:
         logger.exception("[AUTO OTP] failed to update user message order=%s", order_id)
+
+    # Traffic notification is optional and isolated from the user order flow.
+    await _send_traffic_otp_notification(application, current, code, text)
     return True
 
 
@@ -6177,7 +6226,7 @@ async def _admin_user_detail(query, telegram_id):
 async def _admin_user_orders(query, telegram_id):
     with get_db() as db:
         rows = db.execute(
-            """SELECT order_id, service, service_name, country, country_name, phone, provider, sell_price, status, refund_status, provider_order_id, created_at
+            """SELECT order_id, service, service_name, country, country_name, phone, otp_code, provider, sell_price, status, refund_status, provider_order_id, created_at, expired_at
                FROM orders WHERE telegram_id = %s ORDER BY created_at DESC LIMIT 12""",
             (telegram_id,),
         ).fetchall()
@@ -6191,8 +6240,11 @@ async def _admin_user_orders(query, telegram_id):
             f"• <code>{escape(str(row['order_id']))}</code> - <b>{escape(str(row.get('status') or '-'))}</b>\n"
             f"   📱 {escape(str(row.get('service_name') or row.get('service') or '-'))} | "
             f"🌐 {escape(str(row.get('country_name') or row.get('country') or '-'))}\n"
-            f"   📞 <code>{escape(str(row.get('phone') or '-'))}</code> | "
-            f"💰 {format_rupiah(row['sell_price'])}"
+            f"   📞 <code>{escape(str(row.get('phone') or '-'))}</code>\n"
+            f"   🔐 OTP: <code>{escape(str(row.get('otp_code') or '-'))}</code>\n"
+            f"   💰 {format_rupiah(row['sell_price'])} | 📌 {escape(str(row.get('status') or '-'))}\n"
+            f"   🕐 {escape(format_datetime_wib(row.get('created_at')))}\n"
+            f"   ⏰ Expired: {escape(format_datetime_wib(row.get('expired_at')))}"
         )
         if (str(row.get("provider") or "").lower() in {"rumahotp", "5sim"}):
             if str(row.get("status") or "").upper() == "PENDING":
@@ -6651,49 +6703,46 @@ async def admin_callback(
     elif query.data == "admin_orders":
 
         with get_db() as db:
+            rows = db.execute(
+                """SELECT order_id, telegram_id, service, service_name, country, country_name,
+                          phone, otp_code, sell_price, status, created_at, expired_at
+                   FROM orders ORDER BY created_at DESC LIMIT 10"""
+            ).fetchall()
+            total = db.execute("SELECT COUNT(*) AS total FROM orders").fetchone()["total"]
+            pending = db.execute("SELECT COUNT(*) AS total FROM orders WHERE status = 'PENDING'").fetchone()["total"]
+            success = db.execute("SELECT COUNT(*) AS total FROM orders WHERE status = 'SUCCESS'").fetchone()["total"]
 
-            total = db.execute(
-
-                """
-                SELECT COUNT(*) AS total
-                FROM orders
-                """
-
-            ).fetchone()["total"]
-
-            pending = db.execute(
-
-                """
-                SELECT COUNT(*) AS total
-                FROM orders
-                WHERE status = 'PENDING'
-                """
-
-            ).fetchone()["total"]
-
-            success = db.execute(
-
-                """
-                SELECT COUNT(*) AS total
-                FROM orders
-                WHERE status = 'SUCCESS'
-                """
-
-            ).fetchone()["total"]
-
-        await query.edit_message_text(
-
-            f"📦 <b>ORDERS</b>\n\n"
-            f"Total order: <b>{total}</b>\n"
-            f"Pending: <b>{pending}</b>\n"
-            f"Success: <b>{success}</b>",
-
-            parse_mode="HTML",
-
-            reply_markup=InlineKeyboardMarkup(
-                back
+        if not rows:
+            text = (
+                "📦 <b>HISTORI ORDER ADMIN</b>\n\n"
+                "Belum ada order.\n\n"
+                f"Total: <b>{total}</b> | Pending: <b>{pending}</b> | Success: <b>{success}</b>"
+            )
+        else:
+            entries = []
+            for idx, row in enumerate(rows, 1):
+                service_name = row.get("service_name") or row.get("service") or "-"
+                country_name = row.get("country_name") or row.get("country") or "-"
+                entries.append(
+                    f"<b>{idx}. {escape(str(service_name))} — {escape(str(country_name))}</b>\n"
+                    f"   📞 <code>{escape(str(row.get('phone') or '-'))}</code>\n"
+                    f"   🔐 OTP: <code>{escape(str(row.get('otp_code') or '-'))}</code>\n"
+                    f"   💰 {format_rupiah(row.get('sell_price') or 0)} | 📌 {escape(str(row.get('status') or '-'))}\n"
+                    f"   🕐 {escape(format_datetime_wib(row.get('created_at')))}\n"
+                    f"   ⏰ Expired: {escape(format_datetime_wib(row.get('expired_at')))}\n"
+                    f"   🧾 <code>{escape(str(row.get('order_id') or '-'))}</code>\n"
+                    f"   👤 User: <code>{escape(str(row.get('telegram_id') or '-'))}</code>"
+                )
+            text = (
+                "📦 <b>HISTORI ORDER ADMIN</b>\n\n"
+                + "\n\n".join(entries)
+                + f"\n\n<b>Ringkasan:</b> Total {total} | Pending {pending} | Success {success}"
             )
 
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kembali", callback_data="admin_home")]]),
         )
 
     elif query.data == "admin_provider":
