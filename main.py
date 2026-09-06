@@ -5764,6 +5764,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         context.chat_data["waiting_deposit"] = True
         context.chat_data.pop("deposit_method", None)
         context.chat_data.pop("pending_deposit_amount", None)
+        # Pesan ini dipakai ulang untuk seluruh alur deposit.
+        context.chat_data["deposit_flow_message_id"] = query.message.message_id
 
         await query.edit_message_text(
 
@@ -5810,6 +5812,14 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         create_user(user.id, user.username, user.first_name)
 
         if context.chat_data["deposit_method"] == "MANUAL":
+            # Telegram tidak bisa mengubah pesan teks menjadi pesan foto.
+            # Hapus pesan pilihan metode dulu agar invoice QRIS menggantikannya
+            # tanpa meninggalkan pesan lama di riwayat chat.
+            try:
+                await query.message.delete()
+            except Exception:
+                logger.exception("Gagal menghapus pesan pilihan metode sebelum invoice QRIS")
+            context.chat_data.pop("deposit_flow_message_id", None)
             await _send_manual_qris_invoice_to_chat(context, user.id, user, amount)
             return
 
@@ -5888,6 +5898,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         context.chat_data["waiting_deposit"] = False
         context.chat_data.pop("pending_deposit_amount", None)
         context.chat_data.pop("deposit_method", None)
+        context.chat_data.pop("deposit_flow_message_id", None)
 
         # Saat Batal ditekan, hapus pesan foto QRIS sepenuhnya lalu
         # kirim Menu Utama sebagai pesan baru. Ini mencegah QRIS/caption
@@ -5910,18 +5921,23 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
     if data == "cancel_deposit":
 
-        context.chat_data[
-            "waiting_deposit"
-        ] = False
+        context.chat_data["waiting_deposit"] = False
+        context.chat_data.pop("pending_deposit_amount", None)
+        context.chat_data.pop("deposit_method", None)
+        context.chat_data.pop("deposit_flow_message_id", None)
 
-        await query.edit_message_text(
+        # Hapus pesan bot deposit yang sedang aktif, lalu tampilkan Menu Utama
+        # sebagai pesan baru agar prompt nominal / pilihan metode tidak tertinggal.
+        try:
+            await query.message.delete()
+        except Exception:
+            logger.exception("Gagal menghapus pesan alur deposit saat dibatalkan")
 
-            "❌ <b>Deposit dibatalkan.</b>",
-
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🏠 <b>MENU UTAMA</b>\n\nSilakan pilih menu yang ingin digunakan.",
             parse_mode="HTML",
-
-            reply_markup=user_menu()
-
+            reply_markup=user_menu(),
         )
 
         return
@@ -7796,27 +7812,49 @@ async def text_handler(
 
     )
 
-    # Nominal sudah valid: tampilkan pilihan metode pembayaran.
-    # Invoice baru dibuat setelah user memilih salah satu metode.
+    # Nominal sudah valid: tampilkan pilihan metode pembayaran pada pesan
+    # prompt nominal yang sudah ada, bukan membuat pesan bot baru.
     context.chat_data["waiting_deposit"] = False
     context.chat_data["pending_deposit_amount"] = amount
     context.chat_data.pop("deposit_method", None)
 
-    await update.message.reply_text(
+    method_text = (
         "💳 <b>PILIH METODE PEMBAYARAN</b>\n\n"
         f"💰 Nominal deposit: <b>{format_rupiah(amount)}</b>\n\n"
         "⚡ <b>Pembayaran Otomatis</b>\n"
         "Pembayaran diproses otomatis melalui jalur pembayaran yang tersedia.\n\n"
         "📷 <b>QRIS Manual</b>\n"
         "Scan QRIS admin, transfer sesuai nominal + kode unik, lalu konfirmasi ke admin.\n\n"
-        "Silakan pilih metode pembayaran:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ Pembayaran Otomatis", callback_data="deposit_method:auto")],
-            [InlineKeyboardButton("📷 QRIS Manual", callback_data="deposit_method:manual")],
-            [InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]
-        ])
+        "Silakan pilih metode pembayaran:"
     )
+    method_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Pembayaran Otomatis", callback_data="deposit_method:auto")],
+        [InlineKeyboardButton("📷 QRIS Manual", callback_data="deposit_method:manual")],
+        [InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]
+    ])
+
+    prompt_message_id = context.chat_data.get("deposit_flow_message_id")
+    edited = False
+    if prompt_message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user.id,
+                message_id=prompt_message_id,
+                text=method_text,
+                parse_mode="HTML",
+                reply_markup=method_markup,
+            )
+            edited = True
+        except Exception:
+            logger.exception("Gagal mengedit pesan prompt deposit ke pilihan metode")
+
+    if not edited:
+        sent = await update.message.reply_text(
+            method_text,
+            parse_mode="HTML",
+            reply_markup=method_markup,
+        )
+        context.chat_data["deposit_flow_message_id"] = sent.message_id
     return
 
 
