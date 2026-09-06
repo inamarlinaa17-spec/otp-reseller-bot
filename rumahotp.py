@@ -405,7 +405,20 @@ def resend_otp(order_id):
     if not data.get("success"):
         return {"response": "ERROR", "error": (data.get("error") or {}).get("message", "Resend OTP gagal."), "raw": data}
     payload = data.get("data") or {}
-    return {"response": "OK", "status": str(payload.get("status") or "resend"), "expired_at": payload.get("expired_at"), "raw": data}
+    provider_status = str(payload.get("status") or "resend").strip().lower()
+    # RumahOTP documents set_status with status=resend as the actual resend
+    # command. Only a successful API response is accepted; never fabricate a
+    # resend locally when the provider rejected the request.
+    logger.info(
+        "[RUMAHOTP] resend order_id=%s success=%s provider_status=%s raw=%s",
+        order_id, data.get("success"), provider_status, data,
+    )
+    return {
+        "response": "OK",
+        "status": provider_status,
+        "expired_at": payload.get("expired_at"),
+        "raw": data,
+    }
 
 
 def complete_number(order_id):

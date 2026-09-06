@@ -3148,6 +3148,21 @@ def _mask_traffic_value(value, keep_start=3, keep_end=3):
     return raw[:keep_start] + "*" * (len(raw) - keep_start - keep_end) + raw[-keep_end:]
 
 
+def _order_has_received_otp(order):
+    """Return True once this order has ever received a real OTP.
+
+    After the first OTP, the provider-side activation is no longer refundable.
+    During resend we move the old OTP into previous_otp_code, so both fields
+    must be checked.
+    """
+    if not order:
+        return False
+    return (
+        _is_real_otp_code(order.get("otp_code"))
+        or _is_real_otp_code(order.get("previous_otp_code"))
+    )
+
+
 async def _send_traffic_otp_notification(application, order, code, sms_text):
     """Send an optional OTP traffic notification without affecting the order flow."""
     if not TRAFFIC_CHANNEL:
@@ -5086,6 +5101,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             if not result or result.get("response") != "OK":
                 await query.edit_message_text(
                     "⚠️ <b>Resend OTP gagal.</b>\n\n"
+                    "RumahOTP tidak mengonfirmasi permintaan resend. "
                     "Silakan coba lagi beberapa saat kemudian.",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
@@ -5094,6 +5110,11 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     ]),
                 )
                 return
+
+            logger.info(
+                "[RESEND] RumahOTP accepted resend order=%s provider_order=%s status=%s",
+                order_id, provider_order_id, result.get("status"),
+            )
 
             # Keep the original expiration captured at first purchase.
             # After resend, the worker waits for the new OTP automatically.
@@ -5126,23 +5147,15 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 "⏳ <b>Menunggu SMS OTP...</b>\n"
                 "Kode OTP baru akan ditampilkan otomatis saat benar-benar diterima."
             )
+            # OTP has already been received before this resend. Refund must
+            # remain unavailable while waiting for OTP #2, and the user must
+            # not be able to reach a stale cancel callback from this message.
             message_id = current.get("telegram_message_id") or runtime.get("telegram_message_id") or getattr(query.message, "message_id", None)
-            if message_id:
-                await query.edit_message_text(
-                    waiting_text,
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")
-                    ]]),
-                )
-            else:
-                await query.edit_message_text(
-                    waiting_text,
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")
-                    ]]),
-                )
+            await query.edit_message_text(
+                waiting_text,
+                parse_mode="HTML",
+                reply_markup=None,
+            )
             return
 
         # Server 1 (5SIM): there is no official resend operation for an
@@ -5197,7 +5210,11 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         kb=[]
         status_upper = str(order["status"]).upper()
         if status_upper == "PENDING":
-            kb.append([InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")])
+            # Initial PENDING orders can be cancelled/refunded. Once an OTP
+            # has arrived, including while waiting for a resend OTP, refund
+            # is permanently unavailable.
+            if not _order_has_received_otp(order):
+                kb.append([InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")])
         elif status_upper == "SUCCESS":
             kb.append([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")])
             kb.append([InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")])
@@ -5331,12 +5348,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        # Once the first OTP has actually arrived, RumahOTP no longer allows
-        # the activation to be refunded. Never expose/process Batal / Refund
-        # for an order that already has a real OTP.
-        if str(order.get("otp_code") or "").strip() and _is_real_otp_code(order.get("otp_code")):
+        # Once any real OTP has arrived, including before/after a resend,
+        # RumahOTP no longer allows this activation to be refunded. The first
+        # OTP is moved to previous_otp_code when resend starts, so check both.
+        if _order_has_received_otp(order):
             await query.answer(
-                "OTP sudah diterima. Refund tidak tersedia. Gunakan Resend OTP atau Pesanan Selesai.",
+                "OTP sudah pernah diterima. Refund tidak tersedia. Gunakan Resend OTP atau Pesanan Selesai.",
                 show_alert=True
             )
             return
