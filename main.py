@@ -3080,11 +3080,12 @@ def _manual_deposit_message(deposit_id, amount, payment_amount, code):
     )
 
 
-async def _send_manual_qris_invoice(update, context, user, amount):
+async def _send_manual_qris_invoice_to_chat(context, chat_id, user, amount):
     qris_file_id = get_bot_setting("qris_manual_file_id", "")
     if not qris_file_id:
-        await update.message.reply_text(
-            "❌ <b>QRIS Manual belum tersedia.</b>\n\nAdmin belum mengunggah QRIS.",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ <b>QRIS Manual belum tersedia.</b>\n\nAdmin belum mengunggah QRIS.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu Deposit", callback_data="user_deposit")]])
         )
@@ -3097,7 +3098,8 @@ async def _send_manual_qris_invoice(update, context, user, amount):
                VALUES (%s,%s,%s,'PENDING',%s,%s,'MANUAL_QRIS',%s,%s)""",
             (deposit_id, user.id, amount, qris_file_id, now(), payment_amount, code)
         )
-    await update.message.reply_photo(
+    await context.bot.send_photo(
+        chat_id=chat_id,
         photo=qris_file_id,
         caption=_manual_deposit_message(deposit_id, amount, payment_amount, code),
         parse_mode="HTML",
@@ -3106,6 +3108,63 @@ async def _send_manual_qris_invoice(update, context, user, amount):
             [InlineKeyboardButton("❌ Batal", callback_data=f"cancel_manual:{deposit_id}")]
         ])
     )
+
+
+async def _send_manual_qris_invoice(update, context, user, amount):
+    await _send_manual_qris_invoice_to_chat(context, update.effective_chat.id, user, amount)
+
+
+async def _create_auto_deposit_invoice(context, chat_id, user, amount):
+    deposit_id = "DEP-" + uuid.uuid4().hex[:12].upper()
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO deposits (deposit_id,telegram_id,amount,status,created_at)
+               VALUES (%s,%s,%s,%s,%s)""",
+            (deposit_id, user.id, amount, "PENDING", now())
+        )
+
+    try:
+        snap_data = await asyncio.to_thread(create_midtrans_snap, amount, deposit_id)
+        snap_url = snap_data.get("redirect_url")
+        snap_token = snap_data.get("token")
+        if not snap_url or not snap_token:
+            raise RuntimeError("Respons pembayaran otomatis tidak lengkap.")
+
+        with get_db() as db:
+            db.execute(
+                "UPDATE deposits SET payment_reference = %s WHERE deposit_id = %s",
+                (snap_token, deposit_id)
+            )
+
+        keyboard = [
+            [InlineKeyboardButton("💳 Bayar Sekarang", url=snap_url)],
+            [InlineKeyboardButton("✅ Cek Pembayaran", callback_data="cek_deposit")],
+            [InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")]
+        ]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "💳 <b>Invoice Deposit Dibuat</b>\n\n"
+                f"🧾 ID: <code>{deposit_id}</code>\n"
+                f"💰 Nominal: <b>{format_rupiah(amount)}</b>\n"
+                "📌 Status: <b>PENDING</b>\n\n"
+                "Pilih metode pembayaran di tombol di bawah."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception:
+        logger.exception("Gagal membuat invoice pembayaran otomatis.")
+        with get_db() as db:
+            db.execute(
+                "UPDATE deposits SET status = 'FAILED' WHERE deposit_id = %s AND status = 'PENDING'",
+                (deposit_id,)
+            )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ <b>Gagal membuat invoice pembayaran.</b>\n\nSilakan coba lagi.",
+            parse_mode="HTML"
+        )
 
 
 def _complete_manual_deposit(deposit_id):
@@ -5675,38 +5734,29 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
     if data == "user_deposit":
 
-        context.chat_data[
-            "waiting_deposit"
-        ] = True
+        # Tahap pertama tetap meminta nominal. Setelah nominal valid,
+        # user baru memilih metode pembayaran (otomatis / QRIS manual).
+        context.chat_data["waiting_deposit"] = True
+        context.chat_data.pop("deposit_method", None)
+        context.chat_data.pop("pending_deposit_amount", None)
 
         await query.edit_message_text(
 
             "💳 <b>Deposit Saldo</b>\n\n"
-
             "Masukkan nominal deposit.\n\n"
-
             "Minimum: <b>Rp1.000</b>\n"
             "Kelipatan: <b>Rp1.000</b>\n\n"
-
             "Contoh:\n"
             "1000\n"
             "5000\n"
             "10000\n"
             "25000\n\n"
-
             "Ketik nominal sekarang.",
 
             parse_mode="HTML",
 
             reply_markup=InlineKeyboardMarkup([
-
-                [
-                    InlineKeyboardButton(
-                        "❌ Batal",
-                        callback_data="cancel_deposit"
-                    )
-                ]
-
+                [InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]
             ])
 
         )
@@ -5717,16 +5767,28 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # DEPOSIT METHOD / MANUAL CONFIRMATION
     # =====================================================
 
-    if data == "deposit_method:auto":
-        context.chat_data["waiting_deposit"] = True
-        context.chat_data["deposit_method"] = "AUTO"
-        await query.edit_message_text("💳 <b>PEMBAYARAN OTOMATIS</b>\n\nMasukkan nominal deposit.\n\nMinimum: <b>Rp1.000</b>\nKelipatan: <b>Rp1.000</b>\n\nContoh: <code>10000</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]]))
-        return
+    if data in {"deposit_method:auto", "deposit_method:manual"}:
+        amount = context.chat_data.pop("pending_deposit_amount", None)
+        if amount is None:
+            await query.answer("Nominal deposit belum ada. Silakan masukkan nominal lagi.", show_alert=True)
+            context.chat_data["waiting_deposit"] = True
+            await query.edit_message_text(
+                "💳 <b>Deposit Saldo</b>\n\nMasukkan nominal deposit terlebih dahulu.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]])
+            )
+            return
 
-    if data == "deposit_method:manual":
-        context.chat_data["waiting_deposit"] = True
-        context.chat_data["deposit_method"] = "MANUAL_QRIS"
-        await query.edit_message_text("📷 <b>QRIS MANUAL</b>\n\nMasukkan nominal saldo yang ingin diisi.\n\nMinimum: <b>Rp1.000</b>\nKelipatan: <b>Rp1.000</b>\n\nBot akan menambahkan <b>kode unik</b> pada nominal transfer agar admin mudah mencocokkan pembayaran.\n\nContoh: <code>10000</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]]))
+        context.chat_data["waiting_deposit"] = False
+        context.chat_data["deposit_method"] = data.split(":", 1)[1].upper()
+        user = query.from_user
+        create_user(user.id, user.username, user.first_name)
+
+        if context.chat_data["deposit_method"] == "MANUAL":
+            await _send_manual_qris_invoice_to_chat(context, user.id, user, amount)
+            return
+
+        await _create_auto_deposit_invoice(context, user.id, user, amount)
         return
 
     if data.startswith("manual_paid:"):
@@ -5987,24 +6049,21 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
     if data == "cs":
 
+        username = str(ADMIN_USERNAME or "").strip().lstrip("@")
+        if username:
+            contact_text = f"Hubungi: <a href=\"https://t.me/{escape(username)}\">@{escape(username)}</a>"
+            buttons = [
+                [InlineKeyboardButton("💬 Chat Admin", url=f"https://t.me/{username}")],
+                [InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]
+            ]
+        else:
+            contact_text = "Kontak admin belum dikonfigurasi."
+            buttons = [[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]
+
         await query.edit_message_text(
-
-            "💬 <b>Contact CS</b>\n\n"
-            "Hubungi: @AdminLu",
-
+            "💬 <b>Contact CS</b>\n\n" + contact_text,
             parse_mode="HTML",
-
-            reply_markup=InlineKeyboardMarkup([
-
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Kembali",
-                        callback_data="user_home"
-                    )
-                ]
-
-            ])
-
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
 
         return
@@ -7584,180 +7643,29 @@ async def text_handler(
 
     )
 
-    deposit_method = context.chat_data.pop("deposit_method", "AUTO")
-    if deposit_method == "MANUAL_QRIS":
-        context.chat_data["waiting_deposit"] = False
-        await _send_manual_qris_invoice(update, context, user, amount)
-        return
+    # Nominal sudah valid: tampilkan pilihan metode pembayaran.
+    # Invoice baru dibuat setelah user memilih salah satu metode.
+    context.chat_data["waiting_deposit"] = False
+    context.chat_data["pending_deposit_amount"] = amount
+    context.chat_data.pop("deposit_method", None)
 
-    deposit_id = (
-
-        "DEP-"
-        +
-        uuid.uuid4()
-        .hex[:12]
-        .upper()
-
+    await update.message.reply_text(
+        "💳 <b>PILIH METODE PEMBAYARAN</b>\n\n"
+        f"💰 Nominal deposit: <b>{format_rupiah(amount)}</b>\n\n"
+        "⚡ <b>Pembayaran Otomatis</b>\n"
+        "Pembayaran diproses otomatis melalui jalur pembayaran yang tersedia.\n\n"
+        "📷 <b>QRIS Manual</b>\n"
+        "Scan QRIS admin, transfer sesuai nominal + kode unik, lalu konfirmasi ke admin.\n\n"
+        "Silakan pilih metode pembayaran:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚡ Pembayaran Otomatis", callback_data="deposit_method:auto")],
+            [InlineKeyboardButton("📷 QRIS Manual", callback_data="deposit_method:manual")],
+            [InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]
+        ])
     )
+    return
 
-    with get_db() as db:
-
-        db.execute(
-
-            """
-            INSERT INTO deposits
-            (
-                deposit_id,
-                telegram_id,
-                amount,
-                status,
-                created_at
-            )
-            VALUES (%s,%s,%s,%s,%s)
-            """,
-
-            (
-                deposit_id,
-                user.id,
-                amount,
-                "PENDING",
-                now()
-            )
-
-        )
-
-    try:
-
-        snap_data = await asyncio.to_thread(
-
-            create_midtrans_snap,
-
-            amount,
-
-            deposit_id
-
-        )
-
-        snap_url = snap_data.get(
-            "redirect_url"
-        )
-
-        snap_token = snap_data.get(
-            "token"
-        )
-
-        if not snap_url or not snap_token:
-
-            raise RuntimeError(
-                "Respons pembayaran otomatis tidak lengkap."
-            )
-
-        with get_db() as db:
-
-            db.execute(
-
-                """
-                UPDATE deposits
-                SET payment_reference = %s
-                WHERE deposit_id = %s
-                """,
-
-                (
-                    snap_token,
-                    deposit_id
-                )
-
-            )
-
-        keyboard = [
-
-            [
-                InlineKeyboardButton(
-
-                    "💳 Bayar Sekarang",
-
-                    url=snap_url
-
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-
-                    "✅ Cek Pembayaran",
-
-                    callback_data="cek_deposit"
-
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-
-                    "⬅️ Menu Utama",
-
-                    callback_data="user_home"
-
-                )
-            ]
-
-        ]
-
-        await update.message.reply_text(
-
-            f"💳 <b>Invoice Deposit Dibuat</b>\n\n"
-
-            f"🧾 ID: "
-            f"<code>{deposit_id}</code>\n"
-
-            f"💰 Nominal: "
-            f"<b>{format_rupiah(amount)}</b>\n"
-
-            f"📌 Status: <b>PENDING</b>\n\n"
-
-            "Klik tombol di bawah "
-            "untuk melakukan pembayaran.",
-
-            parse_mode="HTML",
-
-            reply_markup=InlineKeyboardMarkup(
-                keyboard
-            )
-
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Gagal membuat invoice pembayaran otomatis."
-        )
-
-        with get_db() as db:
-
-            db.execute(
-
-                """
-                UPDATE deposits
-                SET status = 'FAILED'
-                WHERE deposit_id = %s
-                AND status = 'PENDING'
-                """,
-
-                (
-                    deposit_id,
-                )
-
-            )
-
-        await update.message.reply_text(
-
-            "❌ <b>Gagal membuat invoice "
-            "pembayaran.</b>\n\n"
-            "Silakan coba lagi.",
-
-            parse_mode="HTML"
-
-        )
 
 
 # =========================================================
