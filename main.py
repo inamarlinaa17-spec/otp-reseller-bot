@@ -3991,6 +3991,31 @@ def _save_order_labels(order_id, service_name, country_name):
         )
 
 
+async def _safe_edit_manual_invoice(query, caption, reply_markup=None):
+    """Edit a manual QRIS invoice regardless of whether the source message is a photo.
+
+    Telegram does not allow edit_message_text() on photo messages; manual QRIS
+    invoices are sent as photos, so their caption must be edited instead.
+    """
+    try:
+        if getattr(query.message, "photo", None):
+            await query.edit_message_caption(
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        else:
+            await query.edit_message_text(
+                caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        return True
+    except Exception:
+        logger.exception("Gagal memperbarui invoice QRIS manual %s", getattr(query, "data", ""))
+        return False
+
+
 async def user_callback(
     query,
     user_id,
@@ -5797,10 +5822,56 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             deposit = db.execute("SELECT deposit_id,telegram_id,amount,payment_amount,unique_code,status,payment_method FROM deposits WHERE deposit_id=%s AND telegram_id=%s", (deposit_id,user_id)).fetchone()
         if not deposit or deposit["payment_method"] != "MANUAL_QRIS" or deposit["status"] != "PENDING":
             await query.answer("Deposit manual tidak ditemukan atau sudah diproses.", show_alert=True); return
-        admin_text = ("🔔 <b>KONFIRMASI PEMBAYARAN QRIS MANUAL</b>\n\n" f"👤 User ID: <code>{user_id}</code>\n" f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n" f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n" f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n" f"🔢 Kode unik: <b>{int(deposit['unique_code'] or 0):03d}</b>\n\nUser menyatakan pembayaran sudah dilakukan. Cek mutasi QRIS sebelum menyetujui.")
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Terima & Tambah Saldo", callback_data=f"admin_manual_approve:{deposit_id}")],[InlineKeyboardButton("❌ Tolak", callback_data=f"admin_manual_reject:{deposit_id}")]]))
-        admin_url = _manual_admin_url(deposit_id, int(deposit["amount"]), int(deposit["payment_amount"]))
-        await query.edit_message_text("📨 <b>Konfirmasi dikirim ke admin.</b>\n\nAdmin akan mengecek pembayaran QRIS dan memasukkan saldo setelah pembayaran benar-benar diterima.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Buka Chat Admin", url=admin_url)],[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]))
+        username = str(query.from_user.username or "").strip().lstrip("@")
+        admin_text = (
+            "🔔 <b>KONFIRMASI PEMBAYARAN QRIS MANUAL</b>\n\n"
+            f"👤 User ID: <code>{user_id}</code>\n"
+            + (f"👤 Username: <b>@{escape(username)}</b>\n" if username else "")
+            + f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
+            + f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n"
+            + f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n"
+            + f"🔢 Kode unik: <b>{int(deposit['unique_code'] or 0):03d}</b>\n\n"
+            "User menyatakan pembayaran sudah dilakukan. Cek mutasi QRIS sebelum menyetujui.\n\n"
+            "⚠️ <b>Pastikan nominal transfer dan kode unik sama persis dengan mutasi.</b>"
+        )
+        admin_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Terima & Tambah Saldo", callback_data=f"admin_manual_approve:{deposit_id}")],
+            [InlineKeyboardButton("❌ Tolak", callback_data=f"admin_manual_reject:{deposit_id}")],
+        ])
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=admin_text,
+            parse_mode="HTML",
+            reply_markup=admin_markup,
+        )
+        admin_url = _manual_admin_url(
+            deposit_id, int(deposit["amount"]), int(deposit["payment_amount"])
+        )
+        user_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Buka Chat Admin", url=admin_url)],
+            [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
+        ])
+        ok = await _safe_edit_manual_invoice(
+            query,
+            "📨 <b>KONFIRMASI TERKIRIM</b>\n\n"
+            f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
+            f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n"
+            f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n"
+            f"🔢 Kode unik: <b>{int(deposit['unique_code'] or 0):03d}</b>\n\n"
+            "Konfirmasi sudah dikirim ke admin. Admin akan mengecek mutasi QRIS sebelum saldo ditambahkan.",
+            user_markup,
+        )
+        if not ok:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "📨 <b>Konfirmasi terkirim ke admin.</b>\n\n"
+                    f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
+                    "Admin akan mengecek mutasi QRIS sebelum saldo ditambahkan."
+                ),
+                parse_mode="HTML",
+                reply_markup=user_markup,
+            )
         return
 
     if data.startswith("cancel_manual:"):
@@ -5811,11 +5882,24 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 (now(), deposit_id, user_id)
             )
         context.chat_data["waiting_deposit"] = False
-        await query.edit_message_text(
-            "❌ <b>Deposit QRIS manual dibatalkan.</b>",
-            parse_mode="HTML",
-            reply_markup=user_menu()
+        markup = user_menu()
+        ok = await _safe_edit_manual_invoice(
+            query,
+            "❌ <b>DEPOSIT QRIS MANUAL DIBATALKAN</b>\n\n"
+            f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n\n"
+            "Transaksi ini tidak akan diproses lagi.",
+            markup,
         )
+        if not ok:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "❌ <b>Deposit QRIS manual dibatalkan.</b>\n\n"
+                    f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>"
+                ),
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
         return
 
     # =====================================================
@@ -6912,27 +6996,92 @@ async def admin_callback(
         await query.edit_message_text("📷 <b>SET QRIS MANUAL</b>\n\nKirim <b>foto QRIS DANA BISNIS</b> ke chat bot ini sekarang.\n\nBot menyimpan file_id Telegram-nya sehingga tidak perlu Railway Variable untuk gambar.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]]))
 
     elif query.data.startswith("admin_manual_approve:"):
-        deposit_id = query.data.split(":",1)[1]
+        deposit_id = query.data.split(":", 1)[1].strip()
         try:
-            result = _complete_manual_deposit(deposit_id)
+            result = await asyncio.to_thread(_complete_manual_deposit, deposit_id)
             if result.get("completed"):
-                await context.bot.send_message(chat_id=result["telegram_id"], text=("✅ <b>Deposit QRIS Manual Berhasil!</b>\n\n" f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n" + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get('bonus') else "") + f"💳 Total masuk: <b>{format_rupiah(result['credited'])}</b>\n" f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"), parse_mode="HTML")
-            await query.edit_message_text("✅ <b>DEPOSIT MANUAL DISETUJUI</b>\n\n" f"Deposit: <code>{escape(str(deposit_id))}</code>\n" f"Saldo masuk: <b>{format_rupiah(result.get('amount',0))}</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Deposit", callback_data="admin_deposits")]]))
+                await context.bot.send_message(
+                    chat_id=result["telegram_id"],
+                    text=(
+                        "✅ <b>DEPOSIT QRIS MANUAL BERHASIL!</b>\n\n"
+                        f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
+                        f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
+                        + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
+                        + f"💳 Total masuk: <b>{format_rupiah(result['credited'])}</b>\n"
+                        f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"
+                    ),
+                    parse_mode="HTML",
+                )
+            admin_text = (
+                "✅ <b>DEPOSIT MANUAL DISETUJUI</b>\n\n"
+                f"Deposit: <code>{escape(str(deposit_id))}</code>\n"
+                f"Saldo masuk: <b>{format_rupiah(result.get('amount', 0))}</b>\n"
+                + (f"Bonus: <b>{format_rupiah(result.get('bonus', 0))}</b>\n" if result.get("bonus") else "")
+                + f"Saldo user sekarang: <b>{format_rupiah(result.get('new_balance', 0))}</b>"
+            )
+            try:
+                await query.edit_message_text(
+                    admin_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Deposit", callback_data="admin_deposits")]]),
+                )
+            except Exception:
+                logger.exception("Gagal edit pesan admin approve deposit %s", deposit_id)
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=admin_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Deposit", callback_data="admin_deposits")]]),
+                )
         except Exception as error:
             logger.exception("Gagal approve deposit manual %s", deposit_id)
-            await query.answer(f"Gagal: {str(error)[:150]}", show_alert=True)
+            try:
+                await query.answer(f"Gagal: {str(error)[:150]}", show_alert=True)
+            except Exception:
+                pass
 
     elif query.data.startswith("admin_manual_reject:"):
-        deposit_id = query.data.split(":",1)[1]
-        with get_db() as db:
-            deposit = db.execute("SELECT telegram_id,status FROM deposits WHERE deposit_id=%s", (deposit_id,)).fetchone()
-            if not deposit or deposit["status"] != "PENDING":
-                await query.answer("Deposit sudah tidak pending.", show_alert=True); return
-            db.execute("UPDATE deposits SET status='FAILED', confirmed_at=%s WHERE deposit_id=%s AND status='PENDING'", (now(),deposit_id))
+        deposit_id = query.data.split(":", 1)[1].strip()
         try:
-            await context.bot.send_message(chat_id=deposit["telegram_id"], text="❌ <b>Konfirmasi deposit QRIS manual ditolak.</b>\n\nSilakan hubungi admin jika kamu sudah melakukan pembayaran.", parse_mode="HTML")
-        except Exception: pass
-        await query.edit_message_text("❌ <b>DEPOSIT MANUAL DITOLAK</b>\n\n" f"Deposit: <code>{escape(str(deposit_id))}</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Deposit", callback_data="admin_deposits")]]))
+            with get_db() as db:
+                deposit = db.execute(
+                    "SELECT telegram_id,status,amount,payment_amount,unique_code FROM deposits WHERE deposit_id=%s",
+                    (deposit_id,),
+                ).fetchone()
+                if not deposit or deposit["status"] != "PENDING":
+                    await query.answer("Deposit sudah tidak pending.", show_alert=True)
+                    return
+                db.execute(
+                    "UPDATE deposits SET status='FAILED', confirmed_at=%s WHERE deposit_id=%s AND status='PENDING'",
+                    (now(), deposit_id),
+                )
+            try:
+                await context.bot.send_message(
+                    chat_id=deposit["telegram_id"],
+                    text=(
+                        "❌ <b>KONFIRMASI DEPOSIT QRIS MANUAL DITOLAK</b>\n\n"
+                        f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
+                        f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n"
+                        f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n"
+                        f"🔢 Kode unik: <b>{int(deposit['unique_code'] or 0):03d}</b>\n\n"
+                        "Silakan hubungi admin jika kamu sudah melakukan pembayaran."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception("Gagal mengirim notifikasi reject ke user deposit %s", deposit_id)
+            await query.edit_message_text(
+                "❌ <b>DEPOSIT MANUAL DITOLAK</b>\n\n"
+                f"Deposit: <code>{escape(str(deposit_id))}</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Deposit", callback_data="admin_deposits")]]),
+            )
+        except Exception as error:
+            logger.exception("Gagal reject deposit manual %s", deposit_id)
+            try:
+                await query.answer(f"Gagal: {str(error)[:150]}", show_alert=True)
+            except Exception:
+                pass
 
     elif query.data == "admin_deposits":
         await _admin_deposits_page(query, "ALL", 0)
