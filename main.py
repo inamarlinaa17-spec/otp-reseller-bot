@@ -6804,7 +6804,8 @@ async def admin_callback(
             "💰 <b>PROVIDER STATUS</b>\n\n"
             f"⚡ <b>Server 1 — {ADMIN_PROVIDER_NAMES['5sim']}</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
             f"⚡ <b>Server 2 — {ADMIN_PROVIDER_NAMES['rumahotp']}</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
-            f"💱 Kurs: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
+            f"💱 Kurs otomatis: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
+            f"💵 Kurs jual + margin: <b>Rp{KURS_DOLAR * (1 + PROFIT_PERCENT / 100):,.2f} / USD</b>\n"
             f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(back)

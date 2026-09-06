@@ -89,13 +89,41 @@ FIVESIM_API_KEY = os.getenv(
 ).strip()
 
 
-# Kurs internal USD -> IDR
-KURS_DOLAR = float(
-    os.getenv(
-        "KURS_DOLAR",
-        "17649.80"
-    )
-)
+# =========================================================
+# KURS USD -> IDR OTOMATIS
+# =========================================================
+# Tidak membutuhkan KURS_DOLAR di Railway Variables.
+# Bot mengambil kurs referensi USD/IDR terbaru saat startup.
+# Jika API kurs sedang gagal, digunakan emergency fallback yang sengaja
+# dibuat sedikit lebih tinggi agar perhitungan harga tidak terlalu rendah.
+KURS_DOLAR_EMERGENCY = 18000.0
+
+
+def _get_live_usd_idr():
+    try:
+        import requests
+
+        response = requests.get(
+            "https://api.frankfurter.dev/v2/rate/USD/IDR",
+            timeout=8
+        )
+        response.raise_for_status()
+        data = response.json()
+        rate = float(data.get("rate") or 0)
+
+        if rate > 0:
+            print(f"[KURS] USD/IDR otomatis: Rp{rate:,.2f}")
+            return rate
+    except Exception as exc:
+        print(f"[KURS] gagal mengambil kurs USD/IDR terbaru: {exc}")
+
+    print(f"[KURS] memakai emergency fallback: Rp{KURS_DOLAR_EMERGENCY:,.2f}")
+    return KURS_DOLAR_EMERGENCY
+
+
+# Nilai ini adalah kurs dasar USD -> IDR.
+# Margin reseller tetap dihitung terpisah oleh hitung_harga_jual().
+KURS_DOLAR = _get_live_usd_idr()
 
 
 # Margin reseller
