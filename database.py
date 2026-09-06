@@ -85,6 +85,12 @@ def init_database():
             )
         """)
 
+        # Deposit methods / QRIS manual support. Safe migrations for existing DBs.
+        db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'AUTO'")
+        db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS payment_amount BIGINT")
+        db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS unique_code INTEGER")
+        db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS confirmed_at TEXT")
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS otp_quotes (
                 quote_id TEXT PRIMARY KEY,

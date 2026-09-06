@@ -24,6 +24,11 @@ ADMIN_ID = os.getenv(
     ""
 ).strip()
 
+ADMIN_USERNAME = os.getenv(
+    "ADMIN_USERNAME",
+    ""
+).strip().lstrip("@")
+
 
 # =========================================================
 # DATABASE
