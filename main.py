@@ -3254,16 +3254,18 @@ def _is_payment_method_enabled(method):
 
 
 def _payment_method_maintenance_text(method):
+    # answerCallbackQuery alerts do not use message parse_mode, so keep this
+    # text plain to avoid exposing literal <b> tags in the popup.
     if method == "AUTO":
         return (
-            "⚠️ <b>Metode Pembayaran Otomatis Sedang Dalam Maintenance</b>\n\n"
+            "⚠️ Metode Pembayaran Otomatis Sedang Dalam Maintenance\n\n"
             "Mohon maaf, pembayaran otomatis sedang diperbaiki sementara.\n"
-            "Silakan gunakan <b>QRIS Manual</b> atau coba kembali beberapa saat lagi. 🙏"
+            "Silakan gunakan QRIS Manual atau coba kembali beberapa saat lagi. 🙏"
         )
     return (
-        "⚠️ <b>Metode QRIS Manual Sedang Dalam Maintenance</b>\n\n"
+        "⚠️ Metode QRIS Manual Sedang Dalam Maintenance\n\n"
         "Mohon maaf, pembayaran QRIS Manual sedang diperbaiki sementara.\n"
-        "Silakan gunakan <b>Pembayaran Otomatis</b> atau coba kembali beberapa saat lagi. 🙏"
+        "Silakan gunakan Pembayaran Otomatis atau coba kembali beberapa saat lagi. 🙏"
     )
 
 
@@ -3275,14 +3277,14 @@ def _is_server_enabled(server):
 def _server_maintenance_text(server):
     if server == "5sim":
         return (
-            "⚠️ <b>Server 1 Sedang Dalam Maintenance</b>\n\n"
-            "Mohon maaf, <b>Server 1</b> sedang dalam perbaikan sementara.\n"
-            "Silakan gunakan <b>Server 2</b> atau coba kembali beberapa saat lagi. 🙏"
+            "⚠️ Server 1 Sedang Dalam Maintenance\n\n"
+            "Mohon maaf, Server 1 sedang dalam perbaikan sementara.\n"
+            "Silakan gunakan Server 2 atau coba kembali beberapa saat lagi. 🙏"
         )
     return (
-        "⚠️ <b>Server 2 Sedang Dalam Maintenance</b>\n\n"
-        "Mohon maaf, <b>Server 2</b> sedang dalam perbaikan sementara.\n"
-        "Silakan gunakan <b>Server 1</b> atau coba kembali beberapa saat lagi. 🙏"
+        "⚠️ Server 2 Sedang Dalam Maintenance\n\n"
+        "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
+        "Silakan gunakan Server 1 atau coba kembali beberapa saat lagi. 🙏"
     )
 
 
@@ -5361,14 +5363,34 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             await query.answer("Resend baru tersedia setelah OTP diterima.", show_alert=True)
             return
 
-        provider_order_id = order.get("provider_order_id")
+        # The provider order ID can temporarily live only in the runtime cache
+        # when the asynchronous DB save is still pending or failed. Recover it
+        # here so Resend OTP can still reach RumahOTP.
+        provider_order_id = str(order.get("provider_order_id") or "").strip()
         if not provider_order_id:
-            await query.answer("Order belum siap untuk resend.", show_alert=True)
+            runtime_provider = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
+            provider_order_id = str(runtime_provider.get("provider_order_id") or "").strip()
+            if provider_order_id:
+                logger.info(
+                    "[RESEND] provider_order_id recovered from runtime cache "
+                    "order=%s provider=%s provider_order=%s",
+                    order_id, provider, provider_order_id,
+                )
+
+        if not provider_order_id:
+            try:
+                await query.answer("Order belum siap untuk resend.", show_alert=True)
+            except Exception:
+                pass
             return
 
         # Server 2 (RumahOTP): true provider-side resend.
         if provider == "rumahotp":
             try:
+                logger.info(
+                    "[RESEND] sending RumahOTP resend request order=%s provider_order=%s",
+                    order_id, provider_order_id,
+                )
                 result = await asyncio.wait_for(
                     asyncio.to_thread(resend_rumahotp_otp, provider_order_id),
                     timeout=12.0,
@@ -7588,16 +7610,36 @@ async def button_handler(
 
         return
 
-    # Deposit method callbacks need to display a maintenance alert when a
-    # payment method is disabled. Do not pre-answer those callbacks here,
-    # otherwise Telegram will reject the later show_alert=True answer.
-    if query.data not in {"deposit_method:auto", "deposit_method:manual"} and not query.data.startswith("otp_server:"):
+    # These callbacks must be handled by user_callback without a pre-answer:
+    # - payment methods need a show_alert=True maintenance response;
+    # - server maintenance needs the same;
+    # - Resend OTP needs to own the callback while it contacts the provider.
+    # Answering here first would consume the callback query and prevent the
+    # later alert/status response from being displayed.
+    deferred_callbacks = (
+        query.data in {"deposit_method:auto", "deposit_method:manual"}
+        or query.data.startswith("otp_server:")
+        or query.data.startswith("otp_resend:")
+    )
+    if not deferred_callbacks:
         try:
             await query.answer()
         except Exception:
             pass
 
     user_id = query.from_user.id
+
+    # Handle disabled payment methods here before any generic callback answer.
+    # This guarantees the maintenance popup is shown for QRIS Manual as well
+    # as automatic payment. Enabled methods continue into user_callback.
+    if query.data in {"deposit_method:auto", "deposit_method:manual"}:
+        selected_method = "AUTO" if query.data.endswith(":auto") else "MANUAL"
+        if not _is_payment_method_enabled(selected_method):
+            try:
+                await query.answer(_payment_method_maintenance_text(selected_method), show_alert=True)
+            except Exception:
+                logger.exception("Gagal menampilkan payment maintenance alert method=%s", selected_method)
+            return
 
     admin_callbacks = {
 
