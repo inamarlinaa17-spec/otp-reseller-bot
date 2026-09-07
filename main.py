@@ -55,7 +55,8 @@ from config import (
     PROMO_CHANNEL,
     PROFIT_PERCENT,
     TRAFFIC_CHANNEL,
-    TRAFFIC_BOT_TOKEN
+    TRAFFIC_BOT_TOKEN,
+    NUSAOTP_WEBHOOK_URL
 )
 
 from database import (
@@ -128,6 +129,23 @@ from rumahotp import (
 )
 
 
+from nusaotp import (
+    check_api as check_nusaotp_api,
+    get_balance as get_nusaotp_balance,
+    get_services as get_nusaotp_services,
+    find_service as find_nusaotp_service,
+    get_countries as get_nusaotp_countries,
+    find_country as find_nusaotp_country,
+    get_products as get_nusaotp_products,
+    get_quotes_for_country as get_nusaotp_quotes_for_country,
+    buy_number as buy_nusaotp_number,
+    complete_number as complete_nusaotp_number,
+    cancel_number as cancel_nusaotp_number,
+    resend_otp as resend_nusaotp_otp,
+    register_webhook as register_nusaotp_webhook,
+)
+
+
 # =========================================================
 # KONFIGURASI
 # =========================================================
@@ -159,7 +177,9 @@ logger = logging.getLogger(__name__)
 # This does not change order logic; it only prevents the Telegram callback from
 # remaining stuck when the provider has already issued the number.
 _RUNTIME_PROVIDER_CACHE = {}
-_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0}
+_TELEGRAM_APPLICATION = None
+_TELEGRAM_LOOP = None
+_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "nusaotp": 0.0}
 _AUTO_POLL_CURSOR = 0
 
 
@@ -199,6 +219,7 @@ COUNTRY_QUOTES_PER_PAGE = 8
 OTP_SERVERS = {
     "5sim": "⚡ Server 1 — JOS🔥",
     "rumahotp": "⚡ Server 2 — ELIT HIGH STOCK",
+    "nusaotp": "⚡ Server 3 — NUSAOTP",
 }
 
 
@@ -377,6 +398,13 @@ def country_flag(name_or_code):
 
 def rumah_service_label(service):
     found = find_rumahotp_service(service)
+    if found:
+        return str(found.get("name") or service).strip()
+    return str(service).strip()
+
+
+def nusa_service_label(service):
+    found = find_nusaotp_service(service)
     if found:
         return str(found.get("name") or service).strip()
     return str(service).strip()
@@ -1123,6 +1151,99 @@ def midtrans_webhook():
 
 
 # =========================================================
+# NUSAOTP WEBHOOK
+# =========================================================
+
+@app.route(
+    "/nusaotp/webhook",
+    methods=["POST"]
+)
+def nusaotp_webhook():
+    """Receive NusaOTP realtime order/OTP events and hand them to Telegram."""
+    global _TELEGRAM_APPLICATION
+    try:
+        payload = request.get_json(silent=True) or {}
+        event = str(payload.get("event") or "").strip().lower()
+        data = payload.get("data") or {}
+        provider_order_id = str(data.get("order_id") or "").strip()
+        if not event or not provider_order_id:
+            return jsonify({"status": "error", "message": "Missing event/order_id"}), 400
+
+        logger.info(
+            "[NUSAOTP WEBHOOK] event=%s provider_order=%s status=%s",
+            event, provider_order_id, data.get("status"),
+        )
+
+        # Find the local order using the provider order ID. During the short
+        # period where the DB write is still pending, recover from runtime cache.
+        local_order_id = None
+        with get_db() as db:
+            row = db.execute(
+                "SELECT order_id FROM orders WHERE provider=%s AND provider_order_id=%s LIMIT 1",
+                ("nusaotp", provider_order_id),
+            ).fetchone()
+            if row:
+                local_order_id = str(row["order_id"])
+
+        if not local_order_id:
+            for order_id, runtime in list(_RUNTIME_PROVIDER_CACHE.items()):
+                if str(runtime.get("provider_order_id") or "") == provider_order_id:
+                    local_order_id = str(order_id)
+                    break
+
+        if not local_order_id:
+            logger.warning("[NUSAOTP WEBHOOK] local order not found provider_order=%s", provider_order_id)
+            return jsonify({"status": "ignored"}), 200
+
+        if event == "otp.received":
+            code = data.get("otp_code")
+            if _is_real_otp_code(code):
+                sms_text = data.get("sms_text") or data.get("text") or data.get("message") or ""
+                awaitable = _send_otp_received_message
+                application = _TELEGRAM_APPLICATION
+                loop = _TELEGRAM_LOOP
+                if application is not None and loop is not None:
+                    future = asyncio.run_coroutine_threadsafe(
+                        awaitable(
+                            application,
+                            local_order_id,
+                            {
+                                "sms": [{"code": str(code), "text": str(sms_text)}],
+                                "status": data.get("status"),
+                                "expired_at": data.get("expires_at") or data.get("expired_at"),
+                            },
+                        ),
+                        loop,
+                    )
+                    # Do not block Flask waiting for Telegram; the webhook only
+                    # needs to acknowledge NusaOTP quickly.
+                    future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+                else:
+                    logger.warning("[NUSAOTP WEBHOOK] Telegram application not ready order=%s", local_order_id)
+            return jsonify({"status": "ok"}), 200
+
+        if event in {"order.canceled", "order.failed"}:
+            order = get_order(local_order_id)
+            if order and str(order.get("status") or "").upper() == "PENDING" and not _order_has_received_otp(order):
+                try:
+                    refund = refund_order(
+                        local_order_id,
+                        f"NusaOTP provider event {event}: {data.get('reason') or data.get('status') or 'order berakhir'}."
+                    )
+                    application = _TELEGRAM_APPLICATION
+                    if application is not None:
+                        application.bot_data.setdefault("nusaotp_webhook_refunds", {})[local_order_id] = refund
+                except Exception:
+                    logger.exception("[NUSAOTP WEBHOOK] local refund failed order=%s", local_order_id)
+            return jsonify({"status": "ok"}), 200
+
+        return jsonify({"status": "ok"}), 200
+    except Exception as exc:
+        logger.exception("[NUSAOTP WEBHOOK] handler failed")
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+# =========================================================
 # HEALTH CHECK
 # =========================================================
 
@@ -1346,6 +1467,13 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
+                "Server 3",
+                callback_data="otp_server:nusaotp"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
                 "🏠 Menu Utama",
                 callback_data="user_home"
             )
@@ -1360,6 +1488,8 @@ async def show_server_page(
         "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
         "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
         "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
+        "⚡ <b>SERVER 3 — NUSAOTP</b>\n"
+        "Server tambahan dengan katalog layanan dan produk dari NusaOTP.\n\n"
         "Silakan pilih server melalui tombol di bawah ini :",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1464,6 +1594,20 @@ def get_service_catalog(server):
             return list(OTP_SERVICES)
 
         return catalog
+
+    if server == "nusaotp":
+        catalog = []
+        seen = set()
+        for item in get_nusaotp_services() or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("id") or item.get("service_id") or "").strip()
+            label = str(item.get("name") or item.get("service_name") or code).strip()
+            if not code or code.lower() in seen:
+                continue
+            catalog.append((code, label))
+            seen.add(code.lower())
+        return catalog or list(OTP_SERVICES)
 
     return list(OTP_SERVICES)
 
@@ -1687,6 +1831,21 @@ def get_service_countries(server, service):
         return _country_items_5sim(service)
     if server == "rumahotp":
         return _country_items_rumahotp(service)
+    if server == "nusaotp":
+        service_item = find_nusaotp_service(service)
+        if not service_item:
+            return []
+        result = []
+        for item in get_nusaotp_countries() or []:
+            result.append({
+                "country": str(item.get("id") or ""),
+                "name": str(item.get("name") or item.get("id") or ""),
+                "iso_code": str(item.get("iso_code") or "").lower(),
+                "stock": 1,
+            })
+        # NusaOTP's country endpoint is a catalog; live stock is checked on
+        # the next product step. Keep all catalog countries visible here.
+        return [x for x in result if x["country"] and x["name"]]
     return []
 
 
@@ -1900,12 +2059,16 @@ async def _get_otp_operator_names(server, country, service):
             names.setdefault(key, display)
         return sorted(names.values(), key=str.lower)
 
+    if server == "nusaotp":
+        # NusaOTP's supplied v2 documentation has no operator endpoint.
+        return []
+
     return []
 
 
 async def show_otp_operator_page(query, server, service, country, page=0):
     """Operator selection shown after country, matching the reference UI."""
-    service_label = rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, str(service).title())
+    service_label = nusa_service_label(service) if server == "nusaotp" else (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, str(service).title()))
     display_country = str(country)
     names = await _get_otp_operator_names(server, country, service)
 
@@ -1958,7 +2121,7 @@ async def show_otp_operator_page(query, server, service, country, page=0):
 
 async def show_otp_price_page(query, user_id, server, service, country, operator="any", page=0):
     """Show price/stock tiers, 2 columns, always cheapest first."""
-    service_label = rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, str(service).title())
+    service_label = nusa_service_label(service) if server == "nusaotp" else (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, str(service).title()))
     display_country = str(country)
     operator = str(operator or "any")
     rows = []
@@ -2064,6 +2227,47 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
                     cost_usd=cost_idr / float(KURS_DOLAR), stock=stock,
                 )
                 rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
+
+    elif server == "nusaotp":
+        try:
+            live = await asyncio.wait_for(
+                asyncio.to_thread(get_nusaotp_quotes_for_country, country, service),
+                timeout=20,
+            )
+        except Exception:
+            logger.exception("NusaOTP price lookup failed")
+            live = []
+
+        filtered = []
+        for q in live or []:
+            try:
+                stock = int(q.get("stock") or 0)
+                cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
+            except Exception:
+                continue
+            if stock <= 0 or cost_idr <= 0:
+                continue
+            filtered.append(q)
+        filtered.sort(key=lambda q: float(q.get("cost_idr") or 0))
+        rows = []
+        for q in filtered:
+            cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
+            stock = int(q.get("stock") or 0)
+            sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+            quote_id = "3Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id,
+                telegram_id=user_id,
+                provider="nusaotp",
+                country=str(q.get("country") or country),
+                country_name=str(q.get("country_name") or display_country),
+                service=str(q.get("service") or service),
+                operator="any",
+                pool=json.dumps(q.get("pool") or {}, separators=(",", ":")),
+                cost_usd=cost_idr / float(KURS_DOLAR),
+                stock=stock,
+            )
+            rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
 
     if not rows:
         await query.edit_message_text(
@@ -2240,6 +2444,38 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
             label = (
                 f"💰 {format_rupiah(sell_price)} • 📦 {stock}{operator_label}\n"
                 "⚡ Server 2"
+            )
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
+            available += 1
+
+    elif source_server == "nusaotp":
+        try:
+            quotes = await asyncio.to_thread(get_nusaotp_quotes_for_country, country, service)
+        except Exception:
+            logger.exception("NusaOTP offer lookup failed")
+            quotes = []
+        for q in sorted(quotes or [], key=lambda item: float(item.get("cost_idr") or 0)):
+            stock = int(q.get("stock") or 0)
+            if stock <= 0:
+                continue
+            cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
+            sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+            quote_id = "3Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id,
+                telegram_id=user_id,
+                provider="nusaotp",
+                country=str(q.get("country") or country),
+                country_name=str(q.get("country_name") or display_country),
+                service=str(q.get("service") or service),
+                operator="any",
+                pool=json.dumps(q.get("pool") or {}, separators=(",", ":")),
+                cost_usd=cost_idr / float(KURS_DOLAR),
+                stock=stock,
+            )
+            label = (
+                f"💰 {format_rupiah(sell_price)} • 📦 {stock}\n"
+                "⚡ Server 3"
             )
             keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
             available += 1
@@ -3025,11 +3261,14 @@ def _service_keyboard_sync(services, server, page=0):
 async def command_server(update, context, server):
     user = update.effective_user
     create_user(user.id, user.username, user.first_name)
-    if is_maintenance_enabled() and not is_admin(user.id):
-        await update.message.reply_text(
+    if (is_maintenance_enabled() or not _is_server_enabled(server)) and not is_admin(user.id):
+        text = _server_maintenance_text(server) if not _is_server_enabled(server) else (
             "🛠 <b>MAINTENANCE AKTIF</b>\n\n"
             "Pemesanan OTP sedang ditutup sementara karena ada perbaikan.\n"
-            "Silakan coba kembali setelah maintenance selesai.",
+            "Silakan coba kembali setelah maintenance selesai."
+        )
+        await update.message.reply_text(
+            text,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]),
         )
@@ -3270,7 +3509,12 @@ def _payment_method_maintenance_text(method):
 
 
 def _is_server_enabled(server):
-    key = "server1_enabled" if server == "5sim" else "server2_enabled"
+    keys = {
+        "5sim": "server1_enabled",
+        "rumahotp": "server2_enabled",
+        "nusaotp": "server3_enabled",
+    }
+    key = keys.get(server, "server1_enabled")
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
 
 
@@ -3279,14 +3523,19 @@ def _server_maintenance_text(server):
         return (
             "⚠️ Server 1 Sedang Dalam Maintenance\n\n"
             "Mohon maaf, Server 1 sedang dalam perbaikan sementara.\n"
-            "Silakan gunakan Server 2 atau coba kembali beberapa saat lagi. 🙏"
+            "Silakan gunakan Server 2 atau Server 3 atau coba kembali beberapa saat lagi. 🙏"
+        )
+    if server == "rumahotp":
+        return (
+            "⚠️ Server 2 Sedang Dalam Maintenance\n\n"
+            "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
+            "Silakan gunakan Server 1 atau Server 3 atau coba kembali beberapa saat lagi. 🙏"
         )
     return (
-        "⚠️ Server 2 Sedang Dalam Maintenance\n\n"
-        "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
-        "Silakan gunakan Server 1 atau coba kembali beberapa saat lagi. 🙏"
+        "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
+        "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
+        "Silakan gunakan Server 1 atau Server 2 atau coba kembali beberapa saat lagi. 🙏"
     )
-
 
 async def command_deposit(update, context):
     context.chat_data["waiting_deposit"] = False
@@ -3544,7 +3793,12 @@ async def _auto_expire_order(application, order, provider_order_id):
         logger.warning("[AUTO EXPIRE] provider order id missing order=%s; refund blocked", order_id)
         return
 
-    canceler = cancel_rumahotp_number if provider == "rumahotp" else cancel_number
+    if provider == "rumahotp":
+        canceler = cancel_rumahotp_number
+    elif provider == "nusaotp":
+        canceler = cancel_nusaotp_number
+    else:
+        canceler = cancel_number
     result = await asyncio.to_thread(canceler, provider_order_id)
     if not result or result.get("response") != "OK":
         logger.warning(
@@ -3639,7 +3893,11 @@ async def auto_process_pending_orders(application):
                         provider = str(selected.get("provider") or "5sim").strip().lower()
                         runtime = _RUNTIME_PROVIDER_CACHE.get(selected["order_id"]) or {}
                         provider_order_id = str(selected.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
-                        if provider_order_id:
+                        if provider == "nusaotp":
+                            # NusaOTP v2 delivers OTP through its webhook; there is
+                            # no documented order-status/OTP polling endpoint.
+                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + 5.0
+                        elif provider_order_id:
                             checker = get_rumahotp_sms if provider == "rumahotp" else get_sms
                             try:
                                 data_sms = await asyncio.to_thread(checker, provider_order_id)
@@ -3723,6 +3981,8 @@ async def reconcile_refunded_rumahotp_orders():
 
 
 async def post_init(application):
+    global _TELEGRAM_LOOP
+    _TELEGRAM_LOOP = asyncio.get_running_loop()
     await application.bot.set_my_commands([
         __import__('telegram').BotCommand(command, description)
         for command, description in BOT_COMMANDS
@@ -3731,6 +3991,11 @@ async def post_init(application):
     # inconsistencies. It does not touch user balances.
     application.create_task(reconcile_refunded_rumahotp_orders())
     application.create_task(auto_process_pending_orders(application))
+    if NUSAOTP_WEBHOOK_URL:
+        try:
+            await asyncio.to_thread(register_nusaotp_webhook)
+        except Exception:
+            logger.exception("[NUSAOTP] webhook registration failed during startup")
 
 
 # =========================================================
@@ -3749,7 +4014,17 @@ async def process_otp_order(
 ):
     """Order OTP dari provider terpilih dengan margin sesuai PROFIT_PERCENT (default 7%)."""
 
-    service_label = (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, service))
+    if not _is_server_enabled(server) and not is_admin(user_id):
+        await query.answer(_server_maintenance_text(server), show_alert=True)
+        return
+
+    if server == "rumahotp":
+        service_label = rumah_service_label(service)
+    elif server == "nusaotp":
+        found_nusa_service = find_nusaotp_service(service)
+        service_label = str((found_nusa_service or {}).get("name") or service)
+    else:
+        service_label = dict(OTP_SERVICES).get(service, service)
     display_country = country
 
     # -----------------------------------------------------
@@ -3946,6 +4221,25 @@ async def process_otp_order(
             not result or result.get("response") == "ERROR"
         )
         error_reason = "Pembelian nomor Server 2 gagal."
+    elif server == "nusaotp":
+        metadata = {}
+        if quote and quote.get("pool"):
+            try:
+                metadata = json.loads(quote.get("pool") or "{}")
+            except Exception:
+                metadata = {}
+        result = await asyncio.to_thread(
+            buy_nusaotp_number,
+            country,
+            service,
+            operator,
+            metadata,
+        )
+        provider_order_id = (result.get("order_id") or result.get("id")) if result else None
+        phone = (result.get("phone") or result.get("number")) if result else None
+        provider_expired_at = (result.get("expired_at") or result.get("expires_at")) if result else None
+        provider_error = not result or result.get("response") == "ERROR"
+        error_reason = "Pembelian nomor Server 3 gagal."
     else:
         provider_expired_at = None
         provider_error = True
@@ -4129,11 +4423,12 @@ async def user_callback(
 Isi saldo terlebih dahulu melalui menu <b>Deposit</b>.
 
 2️⃣ <b>Order OTP</b>
-Pilih salah satu dari 2 server OTP yang tersedia.
+Pilih salah satu dari 3 server OTP yang tersedia.
 
 3️⃣ <b>Pilih Server</b>
 ├ Server 1
-└ Server 2
+├ Server 2
+└ Server 3
 
 4️⃣ <b>Pilih layanan</b>
 Bot menampilkan layanan OTP seperti WhatsApp, Telegram, Shopee, TikTok, Facebook, Instagram, Google, Vercel, UangMe, Grab, DANA, Gojek, OVO, Any Other, dan lainnya.
@@ -5239,6 +5534,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         if provider == "rumahotp":
             sms_checker = get_rumahotp_sms
+        elif provider == "nusaotp":
+            await query.answer("OTP Server 3 dikirim otomatis melalui webhook NusaOTP.", show_alert=True)
+            return
         else:
             sms_checker = get_sms
 
@@ -5467,6 +5765,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
+        # NusaOTP: the supplied v2 documentation has no resend endpoint.
+        if provider == "nusaotp":
+            result = await asyncio.to_thread(resend_nusaotp_otp, provider_order_id)
+            await query.answer(str((result or {}).get("error") or "Resend OTP NusaOTP belum tersedia di API v2."), show_alert=True)
+            return
+
         # Server 1 (5SIM): there is no official resend operation for an
         # existing activation. Do NOT call /reuse here: /reuse creates a
         # new activation and may charge the provider again; it is not a
@@ -5566,6 +5870,21 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
                     [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
                 ]),
+            )
+            return
+
+        if provider == "nusaotp":
+            changed = await asyncio.to_thread(mark_order_completed, order_id)
+            if not changed:
+                await query.answer("Pesanan belum dapat ditutup.", show_alert=True)
+                return
+            await query.edit_message_text(
+                "✅ <b>PESANAN SELESAI</b>\n\n"
+                f"🧾 Order: <code>{escape(order_id)}</code>\n"
+                "Pesanan Server 3 sudah ditutup di AZHURA.\n\n"
+                "Terima kasih sudah menggunakan AZHURA [BOT NOKOS].",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]]),
             )
             return
 
@@ -5737,6 +6056,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         if provider == "rumahotp":
             canceler = cancel_rumahotp_number
+        elif provider == "nusaotp":
+            canceler = cancel_nusaotp_number
         else:
             canceler = cancel_number
 
@@ -7187,50 +7508,59 @@ async def admin_callback(
         await _admin_user_ledger(query, telegram_id)
 
     elif query.data == "admin_server_maintenance":
-        server1_enabled = _is_server_enabled("5sim")
-        server2_enabled = _is_server_enabled("rumahotp")
-        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
-        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        states = {
+            "5sim": _is_server_enabled("5sim"),
+            "rumahotp": _is_server_enabled("rumahotp"),
+            "nusaotp": _is_server_enabled("nusaotp"),
+        }
+        labels = {k: ("🟢 ON" if v else "🔴 OFF") for k, v in states.items()}
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
+            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{server1_label}</b>\n"
-            f"⚡ Server 2: <b>{server2_label}</b>",
+            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
+            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
+            f"⚡ Server 3: <b>{labels['nusaotp']}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nusaotp']}", callback_data="admin_server_toggle:nusaotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
 
     elif query.data.startswith("admin_server_toggle:"):
         server = query.data.split(":", 1)[1].strip().lower()
-        if server not in {"5sim", "rumahotp"}:
+        if server not in {"5sim", "rumahotp", "nusaotp"}:
             await query.answer("Server tidak valid.", show_alert=True)
             return
-        key = "server1_enabled" if server == "5sim" else "server2_enabled"
+        key = {
+            "5sim": "server1_enabled",
+            "rumahotp": "server2_enabled",
+            "nusaotp": "server3_enabled",
+        }[server]
         current = _is_server_enabled(server)
         set_bot_setting(key, "0" if current else "1")
-        await query.answer(
-            ("Server diaktifkan." if not current else "Server dimatikan."),
-            show_alert=False
-        )
-        server1_enabled = _is_server_enabled("5sim")
-        server2_enabled = _is_server_enabled("rumahotp")
-        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
-        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        await query.answer(("Server diaktifkan." if not current else "Server dimatikan."), show_alert=False)
+        states = {
+            "5sim": _is_server_enabled("5sim"),
+            "rumahotp": _is_server_enabled("rumahotp"),
+            "nusaotp": _is_server_enabled("nusaotp"),
+        }
+        labels = {k: ("🟢 ON" if v else "🔴 OFF") for k, v in states.items()}
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
+            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{server1_label}</b>\n"
-            f"⚡ Server 2: <b>{server2_label}</b>",
+            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
+            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
+            f"⚡ Server 3: <b>{labels['nusaotp']}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nusaotp']}", callback_data="admin_server_toggle:nusaotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
@@ -8353,6 +8683,7 @@ def run_flask():
 
 def run():
 
+    global _TELEGRAM_APPLICATION
     init_database()
 
     application = (
@@ -8364,6 +8695,7 @@ def run():
         .build()
 
     )
+    _TELEGRAM_APPLICATION = application
 
     # -----------------------------------------------------
     # START
@@ -8393,6 +8725,7 @@ def run():
 
     application.add_handler(CommandHandler("server1", lambda u, c: command_server(u, c, "5sim")))
     application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "rumahotp")))
+    application.add_handler(CommandHandler("server3", lambda u, c: command_server(u, c, "nusaotp")))
     application.add_handler(CommandHandler("deposit", command_deposit))
     application.add_handler(CommandHandler("checkin", perform_checkin))
 
