@@ -150,30 +150,6 @@ RUMAHOTP_API_KEY = os.getenv(
 ).strip()
 
 
-# =========================================================
-# NUSAOTP CONFIGURATION (SERVER 3)
-# =========================================================
-
-NUSAOTP_API_KEY = os.getenv(
-    "NUSAOTP_API_KEY",
-    ""
-).strip()
-
-# Public Railway URL for the NusaOTP realtime OTP webhook.
-# Prefer an explicit NUSAOTP_WEBHOOK_URL; otherwise derive it from
-# Railway's public domain when available.
-NUSAOTP_WEBHOOK_URL = os.getenv(
-    "NUSAOTP_WEBHOOK_URL",
-    ""
-).strip()
-if not NUSAOTP_WEBHOOK_URL:
-    _railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-    if _railway_domain:
-        if not _railway_domain.startswith("http://") and not _railway_domain.startswith("https://"):
-            _railway_domain = "https://" + _railway_domain
-        NUSAOTP_WEBHOOK_URL = _railway_domain.rstrip("/") + "/nusaotp/webhook"
-
-
 
 
 # =========================================================
