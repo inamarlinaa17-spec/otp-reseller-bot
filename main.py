@@ -1596,18 +1596,21 @@ def get_service_catalog(server):
         return catalog
 
     if server == "nusaotp":
+        # Server 3 must use ONLY the live NusaOTP service catalog.  Falling
+        # back to OTP_SERVICES is dangerous because those buttons are not
+        # guaranteed to exist in NusaOTP and lead to empty product lookups.
         catalog = []
         seen = set()
         for item in get_nusaotp_services() or []:
             if not isinstance(item, dict):
                 continue
-            code = str(item.get("id") or item.get("service_id") or "").strip()
-            label = str(item.get("name") or item.get("service_name") or code).strip()
+            code = str(item.get("id") or item.get("service_id") or item.get("service_code") or "").strip()
+            label = str(item.get("name") or item.get("service_name") or item.get("title") or code).strip()
             if not code or code.lower() in seen:
                 continue
             catalog.append((code, label))
             seen.add(code.lower())
-        return catalog or list(OTP_SERVICES)
+        return catalog
 
     return list(OTP_SERVICES)
 
@@ -1631,6 +1634,19 @@ async def show_service_page(
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"otp_server:{server}"),
+                InlineKeyboardButton("⬅️ Kembali", callback_data="order"),
+            ]])
+        )
+        return
+
+    if server == "nusaotp" and not services:
+        await query.edit_message_text(
+            "⚠️ <b>Katalog NusaOTP belum tersedia.</b>\n\n"
+            "API NusaOTP tidak mengembalikan daftar layanan.\n"
+            "Periksa <code>NUSAOTP_API_KEY</code> di Railway, lalu tekan Refresh.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"otp_server:{server}"),
                 InlineKeyboardButton("⬅️ Kembali", callback_data="order"),
             ]])
         )
@@ -1856,10 +1872,13 @@ async def show_service_country_page(
     page=0
 ):
     """Show countries for the selected service; Server 2 keeps price tiers for the next step."""
-    service_label = (
-        rumah_service_label(service) if server == "rumahotp"
-        else dict(OTP_SERVICES).get(service, service.title())
-    )
+    if server == "rumahotp":
+        service_label = rumah_service_label(service)
+    elif server == "nusaotp":
+        nusa_service = find_nusaotp_service(service) or {}
+        service_label = str(nusa_service.get("name") or service).strip()
+    else:
+        service_label = dict(OTP_SERVICES).get(service, service.title())
 
     try:
         items = await asyncio.wait_for(
@@ -2325,11 +2344,13 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
     if source_server not in OTP_SERVERS:
         source_server = "5sim"
 
-    service_label = (
-        rumah_service_label(service)
-        if source_server == "rumahotp"
-        else dict(OTP_SERVICES).get(service, str(service).title())
-    )
+    if source_server == "rumahotp":
+        service_label = rumah_service_label(service)
+    elif source_server == "nusaotp":
+        nusa_service = find_nusaotp_service(service) or {}
+        service_label = str(nusa_service.get("name") or service).strip()
+    else:
+        service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
 
     keyboard = []

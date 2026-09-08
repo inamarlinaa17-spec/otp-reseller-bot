@@ -62,6 +62,12 @@ def _request(method, path, params=None, json_data=None):
         if not isinstance(data, dict):
             data = {"success": False, "error": {"message": "Response NusaOTP tidak valid."}}
 
+        logger.info(
+            "[NUSAOTP] %s %s -> HTTP %s success=%s data_type=%s",
+            method, path, response.status_code, data.get("success"),
+            type(data.get("data")).__name__,
+        )
+
         if response.status_code >= 400 and data.get("success") is not True:
             error = data.get("error")
             if isinstance(error, dict):
@@ -89,16 +95,54 @@ def _put_cache(key, value):
     return value
 
 
-def _data_list(payload):
+def _data_list(payload, kind=None):
+    """Normalize NusaOTP collection responses.
+
+    The documented examples use ``data: [...]``, but production responses can
+    also arrive as a keyed object (for example ``{"1": {...}}``) or wrapped
+    one level deeper.  Preserve the provider IDs from object keys so the bot
+    never falls back to fake/static services or countries.
+    """
     value = payload.get("data") if isinstance(payload, dict) else None
-    if isinstance(value, list):
-        return value
+
+    def normalize(value):
+        if isinstance(value, list):
+            return value
+        if not isinstance(value, dict):
+            return []
+
+        # A single provider object.
+        if any(k in value for k in ("id", "service_id", "country_id", "product_id", "name", "service_name", "country_name", "product_name")):
+            return [value]
+
+        out = []
+        for key, item in value.items():
+            if isinstance(item, dict):
+                item = dict(item)
+                if kind == "service" and not any(item.get(k) is not None for k in ("id", "service_id")):
+                    item["id"] = key
+                elif kind == "country" and not any(item.get(k) is not None for k in ("id", "country_id")):
+                    item["id"] = key
+                elif kind == "product" and not any(item.get(k) is not None for k in ("id", "product_id")):
+                    item["id"] = key
+                out.append(item)
+            elif isinstance(item, (str, int, float)):
+                if kind == "service":
+                    out.append({"id": key, "name": str(item)})
+                elif kind == "country":
+                    out.append({"id": key, "name": str(item)})
+        return out
+
+    items = normalize(value)
+    if items:
+        return items
+
     if isinstance(value, dict):
-        # Be defensive if NusaOTP wraps the list under a common key.
-        for key in ("items", "countries", "services", "products", "data"):
+        for key in ("items", "countries", "services", "products", "data", "results"):
             nested = value.get(key)
-            if isinstance(nested, list):
-                return nested
+            items = normalize(nested)
+            if items:
+                return items
     return []
 
 
@@ -131,11 +175,17 @@ def get_countries():
         logger.warning("[NUSAOTP] countries unavailable: %s", data.get("error"))
         return []
     result = []
-    for item in _data_list(data):
+    for item in _data_list(data, kind="country"):
         if not isinstance(item, dict):
             continue
-        cid = item.get("id") or item.get("country_id") or item.get("code")
-        name = item.get("name") or item.get("country_name") or item.get("title") or cid
+        cid = (
+            item.get("id") or item.get("country_id") or item.get("countryId")
+            or item.get("code") or item.get("country_code")
+        )
+        name = (
+            item.get("name") or item.get("country_name") or item.get("countryName")
+            or item.get("title") or item.get("label") or cid
+        )
         if cid is None or not str(name).strip():
             continue
         result.append({
@@ -156,11 +206,17 @@ def get_services():
         logger.warning("[NUSAOTP] services unavailable: %s", data.get("error"))
         return []
     result = []
-    for item in _data_list(data):
+    for item in _data_list(data, kind="service"):
         if not isinstance(item, dict):
             continue
-        sid = item.get("id") or item.get("service_id") or item.get("code")
-        name = item.get("name") or item.get("service_name") or item.get("title") or sid
+        sid = (
+            item.get("id") or item.get("service_id") or item.get("serviceId")
+            or item.get("code") or item.get("service_code")
+        )
+        name = (
+            item.get("name") or item.get("service_name") or item.get("serviceName")
+            or item.get("title") or item.get("label") or sid
+        )
         if sid is None or not str(name).strip():
             continue
         result.append({
@@ -215,24 +271,37 @@ def get_products(country_id, service_id):
         return []
 
     result = []
-    for item in _data_list(data):
+    for item in _data_list(data, kind="product"):
         if not isinstance(item, dict):
             continue
-        pid = item.get("id") or item.get("product_id")
-        name = item.get("name") or item.get("product_name") or f"Product {pid}"
-        price = item.get("price") or item.get("cost") or item.get("price_idr")
+        pid = item.get("id") or item.get("product_id") or item.get("productId")
+        name = (
+            item.get("name") or item.get("product_name") or item.get("productName")
+            or item.get("title") or f"Product {pid}"
+        )
+        price = (
+            item.get("price") or item.get("cost") or item.get("price_idr")
+            or item.get("priceIdr") or item.get("selling_price")
+        )
         try:
             price = float(price)
         except Exception:
             continue
         if pid is None or price <= 0:
             continue
-        raw_stock = item.get("stock")
+        raw_stock = (
+            item.get("stock") if item.get("stock") is not None else
+            item.get("quantity") if item.get("quantity") is not None else
+            item.get("count") if item.get("count") is not None else
+            item.get("stock_count")
+        )
         try:
             stock = int(float(raw_stock)) if raw_stock is not None else 1
         except Exception:
             stock = 1
         available = item.get("available")
+        if available is None:
+            available = item.get("is_available")
         if available is False:
             stock = 0
         result.append({
@@ -250,15 +319,18 @@ def get_products(country_id, service_id):
 def get_quotes_for_country(country, service):
     country_item = find_country(country)
     service_item = find_service(service)
-    if not country_item or not service_item:
+
+    # If the UI already carries a provider numeric ID, do not reject it just
+    # because the catalog endpoint did not return the same object shape.
+    country_id = str(country_item.get("id")) if country_item else str(country or "").strip()
+    service_id = str(service_item.get("id")) if service_item else str(service or "").strip()
+    if not country_id or not service_id:
         return []
 
-    country_id = str(country_item["id"])
-    service_id = str(service_item["id"])
     products = get_products(country_id, service_id)
-    country_name = str(country_item.get("name") or country)
-    iso_code = str(country_item.get("iso_code") or "").lower()
-    service_name = str(service_item.get("name") or service)
+    country_name = str((country_item or {}).get("name") or country)
+    iso_code = str((country_item or {}).get("iso_code") or "").lower()
+    service_name = str((service_item or {}).get("name") or service)
 
     result = []
     for product in products:
