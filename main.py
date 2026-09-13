@@ -178,6 +178,9 @@ logger = logging.getLogger(__name__)
 # remaining stuck when the provider has already issued the number.
 _RUNTIME_PROVIDER_CACHE = {}
 _AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0}
+# Runtime reference used by the PremOTP Flask webhook to notify Telegram immediately.
+_WEBHOOK_APPLICATION = None
+_WEBHOOK_LOOP = None
 _AUTO_POLL_CURSOR = 0
 
 
@@ -1044,11 +1047,117 @@ def premotp_webhook():
             return jsonify({"received": True}), 200
 
         if event == "nokos.otp_received":
-            # The regular worker polls the order as a fallback, so webhook delivery
-            # can safely be acknowledged without duplicating Telegram notifications.
+            # Process OTP immediately from PremOTP webhook. Polling remains a
+            # fallback, but the webhook is the primary/fast path.
+            ref_id = _premotp_webhook_find(
+                payload, ["ref_id", "reference_id", "merchant_ref", "external_id"]
+            )
+            provider_order_id = _premotp_webhook_find(
+                payload, ["id", "order_id", "transaction_id"]
+            )
+            otp_code = _premotp_webhook_find(
+                payload, ["otp_code", "otp", "code"]
+            )
+            sms_text = _premotp_webhook_find(
+                payload, ["sms_text", "message", "text"]
+            ) or ""
+            phone_number = _premotp_webhook_find(
+                payload, ["phone_number", "phone", "number"]
+            )
+            expired_at = _premotp_webhook_find(
+                payload, ["expired_at", "expires_at", "expires"]
+            )
+
+            # Deduplicate by PremOTP delivery ID, but only record the event
+            # after Telegram/local processing succeeds. This allows PremOTP to
+            # retry automatically if our processing temporarily fails.
             with get_db() as db:
-                db.execute("INSERT INTO premotp_webhook_events (delivery_id,event_name,created_at) VALUES (%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING", (delivery_id, event, now()))
-            return jsonify({"received": True}), 200
+                existing_event = db.execute(
+                    "SELECT 1 FROM premotp_webhook_events WHERE delivery_id=%s LIMIT 1",
+                    (delivery_id,),
+                ).fetchone()
+                if existing_event:
+                    return jsonify({"received": True, "duplicate": True}), 200
+
+                order = None
+                if ref_id:
+                    order = db.execute(
+                        "SELECT * FROM orders WHERE order_id=%s LIMIT 1",
+                        (str(ref_id),),
+                    ).fetchone()
+                if not order and provider_order_id:
+                    order = db.execute(
+                        "SELECT * FROM orders WHERE provider_order_id=%s LIMIT 1",
+                        (str(provider_order_id),),
+                    ).fetchone()
+
+            if not order:
+                logger.warning(
+                    "[PREMOTP WEBHOOK] OTP order tidak ditemukan ref=%s provider=%s",
+                    ref_id, provider_order_id,
+                )
+                # Let PremOTP retry because the local order may still be
+                # finishing its database write.
+                return jsonify({"received": False}), 500
+
+            if str(order.get("status") or "").upper() == "SUCCESS":
+                return jsonify({"received": True, "already_processed": True}), 200
+
+            data_sms = {
+                "response": "OK",
+                "phone": phone_number,
+                "otp": otp_code,
+                "expired_at": expired_at,
+                "sms": (
+                    [{"code": str(otp_code), "text": str(sms_text)}]
+                    if otp_code not in (None, "") else []
+                ),
+            }
+
+            if not otp_code or not _is_real_otp_code(otp_code):
+                logger.warning(
+                    "[PREMOTP WEBHOOK] OTP code tidak valid order=%s payload=%s",
+                    order.get("order_id"), payload,
+                )
+                return jsonify({"received": True, "ignored": True}), 200
+
+            if _WEBHOOK_APPLICATION is None or _WEBHOOK_LOOP is None:
+                logger.error("[PREMOTP WEBHOOK] Telegram application belum siap")
+                return jsonify({"received": False}), 500
+
+            future = asyncio.run_coroutine_threadsafe(
+                _send_otp_received_message(
+                    _WEBHOOK_APPLICATION,
+                    str(order["order_id"]),
+                    data_sms,
+                ),
+                _WEBHOOK_LOOP,
+            )
+            try:
+                processed = future.result(timeout=10)
+            except Exception:
+                logger.exception(
+                    "[PREMOTP WEBHOOK] gagal memproses OTP order=%s",
+                    order.get("order_id"),
+                )
+                return jsonify({"received": False}), 500
+            if not processed:
+                logger.warning(
+                    "[PREMOTP WEBHOOK] OTP belum diproses order=%s",
+                    order.get("order_id"),
+                )
+                return jsonify({"received": False}), 500
+
+            with get_db() as db:
+                db.execute(
+                    """INSERT INTO premotp_webhook_events
+                       (delivery_id,event_name,created_at)
+                       VALUES (%s,%s,%s)
+                       ON CONFLICT (delivery_id) DO NOTHING""",
+                    (delivery_id, event, now()),
+                )
+
+            return jsonify({"received": True, "processed": True}), 200
 
         with get_db() as db:
             db.execute("INSERT INTO premotp_webhook_events (delivery_id,event_name,created_at) VALUES (%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING", (delivery_id, event, now()))
@@ -4099,85 +4208,67 @@ async def auto_process_pending_orders(application):
                             selected = candidate
                             _AUTO_POLL_CURSOR = (idx + 1) % total
                             break
-                    if selected:
-                        provider = str(selected.get("provider") or "5sim").strip().lower()
-                        runtime = _RUNTIME_PROVIDER_CACHE.get(selected["order_id"]) or {}
-                        provider_order_id = str(selected.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
-                        if provider_order_id:
-                            if provider == "rumahotp":
-                                checker = get_rumahotp_sms
-                            elif provider == "premotp":
-                                checker = get_premotp_order
-                            else:
-                                checker = get_sms
-                            try:
-                                data_sms = await asyncio.to_thread(checker, provider_order_id)
-                                if provider == "premotp":
-                                    # PremOTP returns the received OTP as a top-level
-                                    # field (otp_code/otp/code), while the common
-                                    # AZHURA OTP worker expects the RumahOTP/5SIM
-                                    # shape: sms=[{"code": ..., "text": ...}].
-                                    # Normalize the provider response here so the
-                                    # existing user/order flow remains unchanged.
-                                    premotp_data = data_sms or {}
-                                    if isinstance(premotp_data, dict) and isinstance(premotp_data.get("data"), dict):
-                                        # Be tolerant if a client/proxy returns the
-                                        # full PremOTP envelope instead of data directly.
-                                        premotp_data = premotp_data.get("data") or premotp_data
-                                    premotp_code = (
-                                        premotp_data.get("otp_code")
-                                        or premotp_data.get("otp")
-                                        or premotp_data.get("code")
-                                        or (premotp_data.get("sms") or [{}])[0].get("code")
-                                        if isinstance(premotp_data.get("sms"), list) and premotp_data.get("sms")
-                                        else (
-                                            premotp_data.get("otp_code")
-                                            or premotp_data.get("otp")
-                                            or premotp_data.get("code")
-                                        )
-                                    )
-                                    premotp_text = (
-                                        premotp_data.get("sms_text")
-                                        or premotp_data.get("message")
-                                        or premotp_data.get("text")
-                                        or (premotp_data.get("sms") or [{}])[0].get("text")
-                                        if isinstance(premotp_data.get("sms"), list) and premotp_data.get("sms")
-                                        else (
-                                            premotp_data.get("sms_text")
-                                            or premotp_data.get("message")
-                                            or premotp_data.get("text")
-                                            or ""
-                                        )
-                                    )
-                                    data_sms = {
-                                        "response": "OK",
-                                        "phone": (
-                                            premotp_data.get("phone_number")
-                                            or premotp_data.get("phone")
-                                            or premotp_data.get("number")
-                                        ),
-                                        "otp": premotp_code,
-                                        "expired_at": (
-                                            premotp_data.get("expired_at")
-                                            or premotp_data.get("expires_at")
-                                            or premotp_data.get("expires")
-                                        ),
-                                        "sms": (
-                                            [{"code": premotp_code, "text": premotp_text}]
-                                            if premotp_code
-                                            else []
-                                        ),
-                                    }
-                                if data_sms and data_sms.get("response") != "ERROR":
-                                    await _send_otp_received_message(application, selected["order_id"], data_sms)
-                            except Exception:
-                                logger.exception("[AUTO OTP] polling failed order=%s", selected["order_id"])
-                            # PremOTP is prioritized above the old pending-order backlog.
-                            # Keep a short interval so a received OTP is reflected quickly.
-                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + (1.5 if provider == "premotp" else 2.2)
+
+                # IMPORTANT: this block is outside the selection condition so a
+                # PremOTP order preselected above is actually polled.
+                if selected:
+                    provider = str(selected.get("provider") or "5sim").strip().lower()
+                    runtime = _RUNTIME_PROVIDER_CACHE.get(selected["order_id"]) or {}
+                    provider_order_id = str(selected.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
+                    if provider_order_id:
+                        if provider == "rumahotp":
+                            checker = get_rumahotp_sms
+                        elif provider == "premotp":
+                            checker = get_premotp_order
                         else:
-                            # Provider order data may still be finishing its DB save.
-                            _AUTO_POLL_NEXT[provider] = now_mono + 1.0
+                            checker = get_sms
+                        try:
+                            data_sms = await asyncio.to_thread(checker, provider_order_id)
+                            if provider == "premotp":
+                                # PremOTP may return an API envelope or direct data.
+                                premotp_data = data_sms or {}
+                                if isinstance(premotp_data, dict) and isinstance(premotp_data.get("data"), dict):
+                                    premotp_data = premotp_data.get("data") or premotp_data
+                                premotp_sms = premotp_data.get("sms") if isinstance(premotp_data, dict) else None
+                                first_sms = premotp_sms[0] if isinstance(premotp_sms, list) and premotp_sms else {}
+                                premotp_code = (
+                                    premotp_data.get("otp_code")
+                                    or premotp_data.get("otp")
+                                    or premotp_data.get("code")
+                                    or first_sms.get("code")
+                                ) if isinstance(premotp_data, dict) else None
+                                premotp_text = (
+                                    premotp_data.get("sms_text")
+                                    or premotp_data.get("message")
+                                    or premotp_data.get("text")
+                                    or first_sms.get("text")
+                                ) if isinstance(premotp_data, dict) else ""
+                                data_sms = {
+                                    "response": "OK",
+                                    "phone": (
+                                        premotp_data.get("phone_number")
+                                        or premotp_data.get("phone")
+                                        or premotp_data.get("number")
+                                    ) if isinstance(premotp_data, dict) else None,
+                                    "otp": premotp_code,
+                                    "expired_at": (
+                                        premotp_data.get("expired_at")
+                                        or premotp_data.get("expires_at")
+                                        or premotp_data.get("expires")
+                                    ) if isinstance(premotp_data, dict) else None,
+                                    "sms": (
+                                        [{"code": premotp_code, "text": premotp_text or ""}]
+                                        if premotp_code else []
+                                    ),
+                                }
+                            if data_sms and data_sms.get("response") != "ERROR":
+                                await _send_otp_received_message(application, selected["order_id"], data_sms)
+                        except Exception:
+                            logger.exception("[AUTO OTP] polling failed order=%s", selected["order_id"])
+                        # PremOTP is prioritized above the old pending-order backlog.
+                        _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + (1.5 if provider == "premotp" else 2.2)
+                    else:
+                        _AUTO_POLL_NEXT[provider] = now_mono + 1.0
         except Exception:
             logger.exception("[AUTO OTP] worker loop failed")
 
@@ -4340,6 +4431,9 @@ async def reconcile_refunded_rumahotp_orders():
 
 
 async def post_init(application):
+    global _WEBHOOK_APPLICATION, _WEBHOOK_LOOP
+    _WEBHOOK_APPLICATION = application
+    _WEBHOOK_LOOP = asyncio.get_running_loop()
     await application.bot.set_my_commands([
         __import__('telegram').BotCommand(command, description)
         for command, description in BOT_COMMANDS
