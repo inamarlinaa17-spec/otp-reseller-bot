@@ -691,7 +691,8 @@ def cek_status_midtrans(
 
 def send_telegram_message(
     chat_id,
-    text
+    text,
+    reply_markup=None
 ):
 
     url = (
@@ -708,6 +709,9 @@ def send_telegram_message(
         "parse_mode": "HTML"
 
     }
+
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
 
     telegram_request = Request(
 
@@ -745,6 +749,56 @@ def send_telegram_message(
         )
 
 
+def delete_telegram_message(chat_id, message_id):
+    """Delete a Telegram message synchronously via Bot API.
+
+    Used by the PremOTP payment completion path so the QRIS invoice
+    disappears immediately after payment is confirmed.
+    """
+    if not chat_id or not message_id:
+        return False
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
+    payload = {"chat_id": chat_id, "message_id": int(message_id)}
+    req = Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=15) as response:
+            response.read()
+        return True
+    except Exception as error:
+        logger.warning("Gagal menghapus pesan QRIS chat=%s message=%s: %s", chat_id, message_id, error)
+        return False
+
+
+def send_premotp_deposit_success(result):
+    """Replace the PremOTP QRIS invoice with a success message + order button."""
+    chat_id = result.get("telegram_id")
+    old_message_id = result.get("user_message_id")
+
+    # Remove the QRIS photo/caption and its Batal button first.
+    delete_telegram_message(chat_id, old_message_id)
+
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🚀 ORDER OTP SEKARANG", "callback_data": "order"}]
+        ]
+    }
+
+    text = (
+        "✅ <b>DEPOSIT BERHASIL</b>\n\n"
+        f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
+        + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
+        + f"💳 Status: <b>PAID</b>\n"
+        f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"
+    )
+
+    send_telegram_message(chat_id, text, reply_markup=keyboard)
+
+
 # =========================================================
 # COMPLETE DEPOSIT
 # =========================================================
@@ -763,7 +817,8 @@ def complete_deposit_payment(
                 deposit_id,
                 telegram_id,
                 amount,
-                status
+                status,
+                user_message_id
             FROM deposits
             WHERE deposit_id = %s
             FOR UPDATE
@@ -889,6 +944,9 @@ def complete_deposit_payment(
             "telegram_id":
                 deposit["telegram_id"],
 
+            "user_message_id":
+                deposit.get("user_message_id"),
+
             "amount":
                 deposit["amount"],
 
@@ -977,14 +1035,7 @@ def premotp_webhook():
                 int(deposit["amount"]),
             )
             if result.get("completed"):
-                send_telegram_message(
-                    result["telegram_id"],
-                    f"✅ <b>DEPOSIT BERHASIL</b>\n\n"
-                    f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
-                    + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
-                    + f"💳 Status: <b>PAID</b>\n"
-                    f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>",
-                )
+                send_premotp_deposit_success(result)
             with get_db() as db:
                 db.execute(
                     """INSERT INTO premotp_webhook_events (delivery_id,event_name,created_at) VALUES (%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING""",
@@ -4086,14 +4137,7 @@ async def reconcile_pending_premotp_qris(application):
                             int(row["amount"]),
                         )
                         if result.get("completed"):
-                            send_telegram_message(
-                                result["telegram_id"],
-                                f"✅ <b>DEPOSIT BERHASIL</b>\n\n"
-                                f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
-                                + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
-                                + f"💳 Status: <b>PAID</b>\n"
-                                f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>",
-                            )
+                            send_premotp_deposit_success(result)
                             logger.info(
                                 "[PREMOTP QRIS] deposit paid via status polling deposit=%s qris=%s",
                                 row["deposit_id"], lookup_id,
