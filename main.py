@@ -4055,27 +4055,40 @@ async def auto_process_pending_orders(application):
                 ).fetchall()
 
             if rows:
-                # First handle one expired order at a time so cancellation and
-                # refund verification cannot race with other provider calls.
-                expired_done = False
-                for row in rows:
-                    runtime = _RUNTIME_PROVIDER_CACHE.get(row["order_id"]) or {}
-                    provider_order_id = str(row.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
-                    if _order_expired(row, runtime):
-                        if provider_order_id:
-                            await _auto_expire_order(application, row, provider_order_id)
-                        expired_done = True
-                        break
-                if expired_done:
-                    await asyncio.sleep(0.5)
-                    continue
+                # PremOTP orders must not wait behind a large backlog of old
+                # Server 2/other-provider PENDING rows. Prioritize a live
+                # PremOTP order first so its OTP reaches the user immediately.
+                selected = None
+                now_mono = asyncio.get_running_loop().time()
+                premotp_candidates = []
+                for candidate in rows:
+                    if str(candidate.get("provider") or "").strip().lower() == "premotp":
+                        runtime = _RUNTIME_PROVIDER_CACHE.get(candidate["order_id"]) or {}
+                        if not _order_expired(candidate, runtime):
+                            premotp_candidates.append(candidate)
+                if premotp_candidates and now_mono >= _AUTO_POLL_NEXT["premotp"]:
+                    selected = premotp_candidates[0]
 
-                # Round-robin pending orders so one old order does not starve
-                # newer ones. Keep each provider below the documented rate.
+                # If no PremOTP order is due, first handle one expired order at
+                # a time so cancellation/refund verification remains safe.
+                if selected is None:
+                    expired_done = False
+                    for row in rows:
+                        runtime = _RUNTIME_PROVIDER_CACHE.get(row["order_id"]) or {}
+                        provider_order_id = str(row.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
+                        if _order_expired(row, runtime):
+                            if provider_order_id:
+                                await _auto_expire_order(application, row, provider_order_id)
+                            expired_done = True
+                            break
+                    if expired_done:
+                        await asyncio.sleep(0.5)
+                        continue
+
+                # Otherwise use the existing round-robin worker for Server 1/2
+                # and any remaining orders.
                 total = len(rows)
-                if total:
-                    selected = None
-                    now_mono = asyncio.get_running_loop().time()
+                if total and selected is None:
                     for offset in range(total):
                         idx = (_AUTO_POLL_CURSOR + offset) % total
                         candidate = rows[idx]
@@ -4107,16 +4120,34 @@ async def auto_process_pending_orders(application):
                                     # Normalize the provider response here so the
                                     # existing user/order flow remains unchanged.
                                     premotp_data = data_sms or {}
+                                    if isinstance(premotp_data, dict) and isinstance(premotp_data.get("data"), dict):
+                                        # Be tolerant if a client/proxy returns the
+                                        # full PremOTP envelope instead of data directly.
+                                        premotp_data = premotp_data.get("data") or premotp_data
                                     premotp_code = (
                                         premotp_data.get("otp_code")
                                         or premotp_data.get("otp")
                                         or premotp_data.get("code")
+                                        or (premotp_data.get("sms") or [{}])[0].get("code")
+                                        if isinstance(premotp_data.get("sms"), list) and premotp_data.get("sms")
+                                        else (
+                                            premotp_data.get("otp_code")
+                                            or premotp_data.get("otp")
+                                            or premotp_data.get("code")
+                                        )
                                     )
                                     premotp_text = (
                                         premotp_data.get("sms_text")
                                         or premotp_data.get("message")
                                         or premotp_data.get("text")
-                                        or ""
+                                        or (premotp_data.get("sms") or [{}])[0].get("text")
+                                        if isinstance(premotp_data.get("sms"), list) and premotp_data.get("sms")
+                                        else (
+                                            premotp_data.get("sms_text")
+                                            or premotp_data.get("message")
+                                            or premotp_data.get("text")
+                                            or ""
+                                        )
                                     )
                                     data_sms = {
                                         "response": "OK",
@@ -4141,8 +4172,9 @@ async def auto_process_pending_orders(application):
                                     await _send_otp_received_message(application, selected["order_id"], data_sms)
                             except Exception:
                                 logger.exception("[AUTO OTP] polling failed order=%s", selected["order_id"])
-                            # 2.2 seconds => at most 4-5 requests in a rolling 10s window.
-                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + 2.2
+                            # PremOTP is prioritized above the old pending-order backlog.
+                            # Keep a short interval so a received OTP is reflected quickly.
+                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + (1.5 if provider == "premotp" else 2.2)
                         else:
                             # Provider order data may still be finishing its DB save.
                             _AUTO_POLL_NEXT[provider] = now_mono + 1.0
@@ -4688,19 +4720,6 @@ async def process_otp_order(
         except Exception:
             logger.exception("[ORDER FLOW] failed to save Telegram message id order=%s", order_id)
 
-    # Server 3 only: announce the successful order in the live traffic channel.
-    # Keep Server 1/2 behavior untouched.
-    if server == "premotp":
-        current_order = get_order(order_id) or {
-            "order_id": order_id,
-            "telegram_id": user_id,
-            "provider_order_id": provider_order_id,
-            "phone": phone,
-            "sell_price": sell_price,
-            "service_name": service_label,
-            "country_name": display_country,
-        }
-        await _send_traffic_order_notification(context.application, current_order)
 
 
 def _save_order_labels(order_id, service_name, country_name):
