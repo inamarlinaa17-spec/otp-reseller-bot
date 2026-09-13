@@ -16,12 +16,14 @@ BASE_URL = "https://nokosnesia.com/api/v1"
 _SERVICE_CACHE_TTL = 120.0
 _COUNTRY_CACHE_TTL = 600.0
 _PRICE_CACHE_TTL = 10.0
+_SERVICE_COUNTRY_CACHE_TTL = 60.0
 _cache_lock = threading.Lock()
 _service_cache = None
 _service_cache_at = 0.0
 _country_cache = None
 _country_cache_at = 0.0
 _price_cache = {}
+_service_country_cache = {}
 
 
 def _api_key():
@@ -69,7 +71,7 @@ def _data_list(result):
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("items", "products", "services", "countries", "operators", "data"):
+        for key in ("items", "products", "services", "countries", "operators", "platforms", "data"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
@@ -195,7 +197,7 @@ def get_countries():
 
 
 def _get_products(*, country_id=None, platform_id=None, operator_id=None, page=1, limit=100):
-    params = {"page": int(page), "limit": int(limit)}
+    params = {"page": int(page), "limit": int(limit), "sort": "price_asc"}
     if country_id not in (None, ""):
         params["country_id"] = country_id
     if platform_id not in (None, ""):
@@ -208,13 +210,13 @@ def _get_products(*, country_id=None, platform_id=None, operator_id=None, page=1
         cached = _price_cache.get(key)
         if cached and now - cached[0] < _PRICE_CACHE_TTL:
             return cached[1]
-    result = _request("GET", "catalog/products", params=params, timeout=20)
+    result = _request("GET", "catalog/products", params=params, timeout=8)
     with _cache_lock:
         _price_cache[key] = (time.monotonic(), result)
     return result
 
 
-def _product_rows(*, country_id=None, platform_id=None, operator_id=None, max_pages=20):
+def _product_rows(*, country_id=None, platform_id=None, operator_id=None, max_pages=2):
     rows = []
     for page in range(1, max_pages + 1):
         result = _get_products(
@@ -269,6 +271,12 @@ def get_service_countries(service):
     platform_id = _service_id(service)
     if platform_id is None:
         return []
+    cache_key = str(platform_id)
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _service_country_cache.get(cache_key)
+        if cached and now - cached[0] < _SERVICE_COUNTRY_CACHE_TTL:
+            return [dict(x) for x in cached[1]]
     countries = {str(x.get("country")): x for x in get_countries() or []}
     grouped = {}
     for item in _product_rows(platform_id=platform_id):
@@ -292,15 +300,41 @@ def get_service_countries(service):
         if product["cost_idr"] < row["cost_idr"]:
             row["cost_idr"] = product["cost_idr"]
             row["cost"] = product["cost"]
-    return sorted(grouped.values(), key=lambda x: str(x.get("name") or "").lower())
+    result = sorted(grouped.values(), key=lambda x: str(x.get("name") or "").lower())
+    with _cache_lock:
+        _service_country_cache[cache_key] = (time.monotonic(), [dict(x) for x in result])
+    return result
 
 
-def get_price_options(country, service):
+def get_operators(country, service):
+    """Return live Nokosnesia operators for a country/service."""
+    platform_id = _service_id(service)
+    if platform_id is None:
+        return []
+    result = _request(
+        "GET",
+        "catalog/operators",
+        params={"country_id": country, "platform_id": platform_id},
+        timeout=8,
+    )
+    rows = []
+    for item in _data_list(result):
+        if not isinstance(item, dict):
+            continue
+        oid = item.get("id") or item.get("operator_id")
+        name = str(item.get("name") or item.get("operator_name") or item.get("title") or "").strip()
+        if oid is None or not name:
+            continue
+        rows.append({"id": oid, "name": name})
+    return rows
+
+
+def get_price_options(country, service, operator_id=None):
     platform_id = _service_id(service)
     if platform_id is None:
         return []
     rows = []
-    for item in _product_rows(country_id=country, platform_id=platform_id):
+    for item in _product_rows(country_id=country, platform_id=platform_id, operator_id=operator_id):
         product = _normalize_product(item)
         if not product or product["stock"] <= 0:
             continue
