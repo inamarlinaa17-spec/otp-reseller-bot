@@ -1474,7 +1474,10 @@ def get_service_catalog(server):
             if code and code.lower() not in seen:
                 catalog.append((code, label))
                 seen.add(code.lower())
-        return catalog or list(OTP_SERVICES)
+        # Server 3 must NEVER fall back to the static Server 1-style catalog.
+        # If Nokosnesia is unavailable, keep the result empty so the UI can
+        # show that its own live catalog could not be loaded.
+        return catalog
 
     if server == "rumahotp":
         # Server 2 must follow the live RumahOTP catalog. The old static
@@ -1536,6 +1539,19 @@ async def show_service_page(
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"otp_server:{server}"),
                 InlineKeyboardButton("⬅️ Kembali", callback_data="order"),
+            ]])
+        )
+        return
+
+    if server == "nokos" and not services:
+        await query.edit_message_text(
+            "⚠️ <b>Katalog Server 3 tidak dapat dimuat.</b>\n\n"
+            "Data layanan sedang tidak tersedia dari Nokosnesia.\n"
+            "Silakan tekan Refresh untuk mengambil katalog Nokosnesia kembali.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data="otp_server:nokos"),
+                InlineKeyboardButton("⬅️ Pilih Server", callback_data="order"),
             ]])
         )
         return
@@ -3187,7 +3203,18 @@ async def command_server(update, context, server):
             asyncio.to_thread(get_service_catalog, server), timeout=15
         )
     except Exception:
-        services = list(OTP_SERVICES)
+        services = [] if server == "nokos" else list(OTP_SERVICES)
+    if server == "nokos" and not services:
+        await update.message.reply_text(
+            "⚠️ <b>Katalog Server 3 tidak dapat dimuat.</b>\n\n"
+            "Data layanan sedang tidak tersedia dari Nokosnesia. Silakan coba lagi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Coba Lagi", callback_data="otp_server:nokos"),
+                InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
+            ]]),
+        )
+        return
     await update.message.reply_text(
         "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
         f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"

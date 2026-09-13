@@ -71,7 +71,7 @@ def _data_list(result):
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("items", "products", "services", "countries", "operators", "data"):
+        for key in ("items", "products", "services", "countries", "operators", "platforms", "data"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
