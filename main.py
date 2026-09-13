@@ -127,18 +127,22 @@ from rumahotp import (
     resend_otp as resend_rumahotp_otp
 )
 
-from nokos import (
-    check_api as check_nokos_api,
-    get_balance as get_nokos_balance,
-    get_services as get_nokos_services,
-    get_service_countries as get_nokos_service_countries,
-    get_price_options as get_nokos_price_options,
-    get_operators as get_nokos_operators,
-    buy_number as buy_nokos_number,
-    get_sms as get_nokos_sms,
-    complete_number as complete_nokos_number,
-    cancel_number as cancel_nokos_number,
-    resend_otp as resend_nokos_otp,
+
+from premotp import (
+    get_services as get_premotp_services,
+    get_countries as get_premotp_countries,
+    get_offers as get_premotp_offers,
+    create_order as create_premotp_order,
+    get_order as get_premotp_order,
+    resend_order as resend_premotp_order,
+    cancel_order as cancel_premotp_order,
+    create_qris as create_premotp_qris,
+    get_qris as get_premotp_qris,
+    qris_id as premotp_qris_id,
+    qris_ref_id as premotp_qris_ref_id,
+    qris_amount as premotp_qris_amount,
+    qris_total_payment as premotp_qris_total_payment,
+    qr_image_bytes as premotp_qr_image_bytes,
 )
 
 
@@ -173,7 +177,7 @@ logger = logging.getLogger(__name__)
 # This does not change order logic; it only prevents the Telegram callback from
 # remaining stuck when the provider has already issued the number.
 _RUNTIME_PROVIDER_CACHE = {}
-_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "nokos": 0.0}
+_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0}
 _AUTO_POLL_CURSOR = 0
 
 
@@ -211,9 +215,9 @@ COUNTRY_QUOTES_PER_PAGE = 8
 # =========================================================
 
 OTP_SERVERS = {
-    "5sim": "⚡ Server 1 — JOS🔥",
-    "rumahotp": "⚡ Server 2 — ELIT HIGH STOCK",
-    "nokos": "⚡ Server 3 — HIGH STOCK",
+    "5sim": "⚡ SERVER 1 — HIGH STOCK",
+    "rumahotp": "⚡ SERVER 2 — FULL TEXT",
+    "premotp": "⚡ SERVER 3 — SERVER ALTERNATIF",
 }
 
 
@@ -394,17 +398,6 @@ def rumah_service_label(service):
     found = find_rumahotp_service(service)
     if found:
         return str(found.get("name") or service).strip()
-    return str(service).strip()
-
-
-def nokos_service_label(service):
-    try:
-        target = str(service or "").strip().lower()
-        for item in get_nokos_services() or []:
-            if str(item.get("service_code") or "").strip().lower() == target:
-                return str(item.get("service_name") or service).strip()
-    except Exception:
-        pass
     return str(service).strip()
 
 
@@ -848,7 +841,7 @@ def complete_deposit_payment(
             (
                 deposit["telegram_id"], deposit_amount, before, after_deposit,
                 "DEPOSIT", payment_reference or deposit_id,
-                f"Deposit Midtrans {deposit_id}", now()
+                f"Deposit {str(deposit.get('payment_method') or 'AUTO')} {deposit_id}", now()
             )
         )
 
@@ -909,6 +902,105 @@ def complete_deposit_payment(
                 after
 
         }
+
+
+# =========================================================
+# PREMOTP WEBHOOK
+# =========================================================
+
+def _premotp_webhook_find(payload, keys):
+    if isinstance(payload, dict):
+        for key in keys:
+            if payload.get(key) not in (None, ""):
+                return payload.get(key)
+        for value in payload.values():
+            found = _premotp_webhook_find(value, keys)
+            if found not in (None, ""):
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _premotp_webhook_find(value, keys)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+@app.route("/webhooks/premotp", methods=["POST"])
+def premotp_webhook():
+    try:
+        secret = os.getenv("PREMOTP_WEBHOOK_SECRET", "").strip()
+        if not secret:
+            return jsonify({"received": False, "message": "Webhook secret belum diatur"}), 503
+        raw_body = request.get_data(cache=False, as_text=True)
+        event = str(request.headers.get("X-PremOTP-Event") or "")
+        delivery_id = str(request.headers.get("X-PremOTP-Delivery") or "")
+        timestamp = str(request.headers.get("X-PremOTP-Timestamp") or "")
+        signature = str(request.headers.get("X-PremOTP-Signature") or "")
+        if not timestamp or not signature or not delivery_id:
+            return jsonify({"received": False}), 401
+        try:
+            age = abs(datetime.now(timezone.utc).timestamp() - float(timestamp))
+        except Exception:
+            age = 999999
+        if age > 300:
+            return jsonify({"received": False}), 401
+        expected = "sha256=" + hmac.new(secret.encode(), (timestamp + "." + raw_body).encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            return jsonify({"received": False}), 401
+        payload = json.loads(raw_body or "{}")
+        if event == "qris.paid":
+            ref_id = _premotp_webhook_find(payload, ["ref_id", "reference_id", "merchant_ref", "external_id"])
+            qris_id = _premotp_webhook_find(payload, ["id", "qris_id", "transaction_id", "payment_id", "invoice_id"])
+            status = str(_premotp_webhook_find(payload, ["status", "payment_status"]) or "paid").lower()
+            if status not in {"paid", "success", "settlement", "settled", "completed"}:
+                return jsonify({"received": True, "ignored": True}), 200
+            with get_db() as db:
+                deposit = None
+                if ref_id:
+                    deposit = db.execute(
+                        "SELECT * FROM deposits WHERE deposit_id=%s OR external_id=%s LIMIT 1",
+                        (str(ref_id), str(ref_id)),
+                    ).fetchone()
+                if not deposit and qris_id:
+                    deposit = db.execute(
+                        "SELECT * FROM deposits WHERE payment_reference=%s LIMIT 1",
+                        (str(qris_id),),
+                    ).fetchone()
+            if not deposit or deposit.get("payment_method") != "PREMOTP_QRIS":
+                logger.warning("PremOTP QRIS webhook deposit tidak ditemukan ref=%s qris=%s", ref_id, qris_id)
+                return jsonify({"received": True, "ignored": True}), 200
+            if deposit.get("status") == "SUCCESS":
+                return jsonify({"received": True, "already_paid": True}), 200
+            result = complete_deposit_payment(deposit["deposit_id"], str(qris_id or ref_id or deposit["deposit_id"]), int(deposit["amount"]))
+            if result.get("completed"):
+                send_telegram_message(
+                    result["telegram_id"],
+                    f"✅ <b>DEPOSIT BERHASIL</b>\n\n"
+                    f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
+                    + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
+                    + f"💳 Status: <b>PAID</b>\n"
+                    f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>",
+                )
+            with get_db() as db:
+                db.execute(
+                    """INSERT INTO premotp_webhook_events (delivery_id,event_name,created_at) VALUES (%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING""",
+                    (delivery_id, event, now()),
+                )
+            return jsonify({"received": True}), 200
+
+        if event == "nokos.otp_received":
+            # The regular worker polls the order as a fallback, so webhook delivery
+            # can safely be acknowledged without duplicating Telegram notifications.
+            with get_db() as db:
+                db.execute("INSERT INTO premotp_webhook_events (delivery_id,event_name,created_at) VALUES (%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING", (delivery_id, event, now()))
+            return jsonify({"received": True}), 200
+
+        with get_db() as db:
+            db.execute("INSERT INTO premotp_webhook_events (delivery_id,event_name,created_at) VALUES (%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING", (delivery_id, event, now()))
+        return jsonify({"received": True}), 200
+    except Exception:
+        logger.exception("PremOTP webhook error")
+        return jsonify({"received": False}), 500
 
 
 # =========================================================
@@ -1373,7 +1465,7 @@ async def show_server_page(
         [
             InlineKeyboardButton(
                 "Server 3",
-                callback_data="otp_server:nokos"
+                callback_data="otp_server:premotp"
             )
         ],
 
@@ -1394,7 +1486,7 @@ async def show_server_page(
         "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
         "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
         "⚡ <b>SERVER 3 — SERVER ALTERNATIF</b>\n"
-        "Server alternatif dengan dua jalur stok untuk membantu mendapatkan nomor yang tersedia.\n\n"
+        "Pilihan alternatif dengan katalog layanan dan stok yang diperbarui langsung dari sistem untuk menambah opsi nomor OTP.\n\n"
         "Silakan pilih server melalui tombol di bawah ini :",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1463,22 +1555,6 @@ def get_service_catalog(server):
 
         return catalog
 
-    if server == "nokos":
-        catalog = []
-        seen = set()
-        for item in get_nokos_services() or []:
-            if not isinstance(item, dict):
-                continue
-            code = str(item.get("service_code") or item.get("code") or "").strip()
-            label = str(item.get("service_name") or item.get("name") or code).strip()
-            if code and code.lower() not in seen:
-                catalog.append((code, label))
-                seen.add(code.lower())
-        # Server 3 must NEVER fall back to the static Server 1-style catalog.
-        # If Nokosnesia is unavailable, keep the result empty so the UI can
-        # show that its own live catalog could not be loaded.
-        return catalog
-
     if server == "rumahotp":
         # Server 2 must follow the live RumahOTP catalog. The old static
         # OTP_SERVICES list caused services to be missing/duplicated and could
@@ -1516,6 +1592,23 @@ def get_service_catalog(server):
 
         return catalog
 
+    if server == "premotp":
+        catalog = []
+        seen = set()
+        data = get_premotp_services("regular") or []
+        iterable = data.items() if isinstance(data, dict) else enumerate(data)
+        for key, item in iterable:
+            if isinstance(item, dict):
+                code = str(item.get("service_key") or item.get("key") or item.get("id") or key).strip()
+                label = str(item.get("service_name") or item.get("name") or item.get("label") or code).strip()
+            else:
+                code = str(item or key).strip()
+                label = code
+            if code and code.lower() not in seen:
+                catalog.append((code, label))
+                seen.add(code.lower())
+        return catalog
+
     return list(OTP_SERVICES)
 
 
@@ -1539,19 +1632,6 @@ async def show_service_page(
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"otp_server:{server}"),
                 InlineKeyboardButton("⬅️ Kembali", callback_data="order"),
-            ]])
-        )
-        return
-
-    if server == "nokos" and not services:
-        await query.edit_message_text(
-            "⚠️ <b>Katalog Server 3 tidak dapat dimuat.</b>\n\n"
-            "Data layanan sedang tidak tersedia dari Nokosnesia.\n"
-            "Silakan tekan Refresh untuk mengambil katalog Nokosnesia kembali.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Refresh", callback_data="otp_server:nokos"),
-                InlineKeyboardButton("⬅️ Pilih Server", callback_data="order"),
             ]])
         )
         return
@@ -1746,13 +1826,33 @@ def _country_items_rumahotp(service):
                 grouped[key]["iso_code"] = iso
     return list(grouped.values())
 
+def _country_items_premotp(service):
+    data = get_premotp_countries(service, "regular") or []
+    items = []
+    iterable = data.items() if isinstance(data, dict) else enumerate(data)
+    for key, item in iterable:
+        if isinstance(item, dict):
+            country = str(item.get("country_key") or item.get("country") or item.get("key") or item.get("iso_code") or key).strip()
+            name = str(item.get("country_name") or item.get("name") or item.get("label") or country).strip()
+            stock = int(item.get("stock") or item.get("available") or 0)
+            iso = str(item.get("iso_code") or item.get("country_code") or country).strip()
+        else:
+            country = str(item or key).strip()
+            name = country
+            stock = 0
+            iso = country
+        if country:
+            items.append({"country": country, "name": name, "country_name": name, "stock": stock, "iso_code": iso})
+    return items
+
+
 def get_service_countries(server, service):
     if server == "5sim":
         return _country_items_5sim(service)
     if server == "rumahotp":
         return _country_items_rumahotp(service)
-    if server == "nokos":
-        return get_nokos_service_countries(service)
+    if server == "premotp":
+        return _country_items_premotp(service)
     return []
 
 
@@ -1763,10 +1863,12 @@ async def show_service_country_page(
     page=0
 ):
     """Show countries for the selected service; Server 2 keeps price tiers for the next step."""
-    service_label = (
-        rumah_service_label(service) if server == "rumahotp"
-        else dict(OTP_SERVICES).get(service, service.title())
-    )
+    if server == "rumahotp":
+        service_label = rumah_service_label(service)
+    elif server == "premotp":
+        service_label = next((label for code, label in get_service_catalog("premotp") if str(code) == str(service)), str(service).title())
+    else:
+        service_label = dict(OTP_SERVICES).get(service, service.title())
 
     try:
         items = await asyncio.wait_for(
@@ -1928,25 +2030,6 @@ async def _get_otp_operator_names(server, country, service):
                 names.setdefault(key, display)
         return sorted(names.values(), key=str.lower)
 
-    if server == "nokos":
-        try:
-            rows = await asyncio.wait_for(
-                asyncio.to_thread(get_nokos_operators, country, service),
-                timeout=8,
-            )
-        except Exception:
-            logger.exception("Nokosnesia operator lookup failed")
-            rows = []
-        names = {}
-        for item in rows or []:
-            oid = str(item.get("id") or item.get("operator_id") or "").strip()
-            name = str(item.get("name") or item.get("operator_name") or "").strip()
-            if not oid or not name:
-                continue
-            key = name.lower().replace("_", " ").strip()
-            names[key] = f"{name}||{oid}"
-        return sorted(names.values(), key=lambda x: x.split("||", 1)[0].lower())
-
     if server == "rumahotp":
         try:
             rows = await asyncio.wait_for(
@@ -1990,12 +2073,16 @@ async def _get_otp_operator_names(server, country, service):
 
 async def show_otp_operator_page(query, server, service, country, page=0):
     """Operator selection shown after country, matching the reference UI."""
-    service_label = (
-        rumah_service_label(service) if server == "rumahotp"
-        else nokos_service_label(service) if server == "nokos"
-        else dict(OTP_SERVICES).get(service, str(service).title())
-    )
+    if server == "rumahotp":
+        service_label = rumah_service_label(service)
+    elif server == "premotp":
+        service_label = next((label for code, label in get_service_catalog("premotp") if str(code) == str(service)), str(service).title())
+    else:
+        service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
+    if server == "premotp":
+        await show_otp_price_page(query, query.from_user.id, server, service, country, "any", 0)
+        return
     names = await _get_otp_operator_names(server, country, service)
 
     # Always offer the provider's random/any route first.
@@ -2015,11 +2102,10 @@ async def show_otp_operator_page(query, server, service, country, page=0):
     for i in range(0, len(page_items), 2):
         row = []
         for op in page_items[i:i + 2]:
-            raw_op = str(op)
-            label = raw_op.split("||", 1)[0].replace("_", " ").title()
+            label = str(op).replace("_", " ").title()
             row.append(InlineKeyboardButton(
                 f"📡 {label}",
-                callback_data=f"otp_operator:{server}:{service}:{country}:{raw_op}",
+                callback_data=f"otp_operator:{server}:{service}:{country}:{op}",
             ))
         if row:
             keyboard.append(row)
@@ -2048,11 +2134,12 @@ async def show_otp_operator_page(query, server, service, country, page=0):
 
 async def show_otp_price_page(query, user_id, server, service, country, operator="any", page=0):
     """Show price/stock tiers, 2 columns, always cheapest first."""
-    service_label = (
-        rumah_service_label(service) if server == "rumahotp"
-        else nokos_service_label(service) if server == "nokos"
-        else dict(OTP_SERVICES).get(service, str(service).title())
-    )
+    if server == "rumahotp":
+        service_label = rumah_service_label(service)
+    elif server == "premotp":
+        service_label = next((label for code, label in get_service_catalog("premotp") if str(code) == str(service)), str(service).title())
+    else:
+        service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
     operator = str(operator or "any")
     rows = []
@@ -2159,40 +2246,42 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
                 )
                 rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
 
-    elif server == "nokos":
-        operator_id = None
-        if operator and operator != "any":
-            if "||" in str(operator):
-                _op_name, operator_id = str(operator).split("||", 1)
-            elif str(operator).isdigit():
-                operator_id = str(operator)
-        live = await asyncio.to_thread(get_nokos_price_options, country, service, operator_id)
-        grouped = {}
-        for item in live or []:
+    elif server == "premotp":
+        try:
+            offers_data = await asyncio.wait_for(
+                asyncio.to_thread(get_premotp_offers, service, country, "regular"),
+                timeout=20,
+            )
+        except Exception:
+            logger.exception("PremOTP offers lookup failed")
+            offers_data = []
+        iterable = offers_data.items() if isinstance(offers_data, dict) else enumerate(offers_data)
+        for key, offer in iterable:
+            if not isinstance(offer, dict):
+                continue
+            offer_id = str(offer.get("offer_id") or offer.get("id") or offer.get("key") or key).strip()
+            raw_price = offer.get("price")
+            if raw_price is None:
+                raw_price = offer.get("price_idr", offer.get("cost_idr", offer.get("amount")))
             try:
-                cost_idr = float(item.get("cost_idr") or 0)
-                stock = int(item.get("stock") or 0)
+                cost_idr = float(raw_price or 0)
+                stock = int(offer.get("stock") or offer.get("available") or 0)
             except Exception:
                 continue
-            if cost_idr <= 0 or stock <= 0:
+            if cost_idr <= 0 or not offer_id:
                 continue
+            if stock <= 0:
+                # Some PremOTP offers expose stock at country level only.
+                stock = 1
             sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
-            key = sell
-            group = grouped.setdefault(key, {"cost_idr": cost_idr, "stock": 0, "products": []})
-            group["cost_idr"] = min(float(group["cost_idr"]), cost_idr)
-            group["stock"] += stock
-            group["products"].append(item)
-        rows = []
-        for sell in sorted(grouped):
-            group = grouped[sell]
             quote_id = "3Q-" + uuid.uuid4().hex[:12].upper()
             save_otp_quote(
-                quote_id=quote_id, telegram_id=user_id, provider="nokos",
-                country=str(country), country_name=display_country, service=str(service),
-                operator=(str(operator) if operator and operator != "any" else "any"), pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
-                cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
+                quote_id=quote_id, telegram_id=user_id, provider="premotp",
+                country=country, country_name=display_country, service=service, operator="any",
+                pool=json.dumps({"offer_id": offer_id, "order_type": "regular", "cost_idr": cost_idr}, separators=(",", ":")),
+                cost_usd=cost_idr / float(KURS_DOLAR), stock=stock,
             )
-            rows.append({"_display": (format_rupiah(sell), int(group["stock"]), quote_id)})
+            rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
 
     if not rows:
         await query.edit_message_text(
@@ -2232,7 +2321,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     await query.edit_message_text(
         "💰 <b>PILIH HARGA / STOCK</b>\n\n"
         f"{country_flag(display_country)} Negara: <b>{escape(display_country)}</b>\n"
-        f"📡 Operator: <b>{escape('Semua Operator (Acak)' if operator == 'any' else (str(operator).split('||', 1)[0] if '||' in str(operator) else str(operator)))}</b>\n"
+        f"📡 Operator: <b>{escape('Semua Operator (Acak)' if operator == 'any' else operator)}</b>\n"
         f"📱 Layanan: <b>{escape(str(service_label))}</b>\n\n"
         "Harga diurutkan dari yang paling rendah.",
         parse_mode="HTML",
@@ -2371,41 +2460,6 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
                 "⚡ Server 2"
             )
             keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
-            available += 1
-
-    elif source_server == "nokos":
-        try:
-            offers = await asyncio.to_thread(get_nokos_price_options, country, service)
-        except Exception:
-            logger.exception("Nokosnesia offer lookup failed")
-            offers = []
-        grouped = {}
-        for item in offers or []:
-            try:
-                cost_idr = float(item.get("cost_idr") or 0)
-                stock = int(item.get("stock") or 0)
-            except Exception:
-                continue
-            if cost_idr <= 0 or stock <= 0:
-                continue
-            sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
-            group = grouped.setdefault(sell_price, {"cost_idr": cost_idr, "stock": 0, "products": []})
-            group["cost_idr"] = min(float(group["cost_idr"]), cost_idr)
-            group["stock"] += stock
-            group["products"].append(item)
-        for sell_price in sorted(grouped):
-            group = grouped[sell_price]
-            quote_id = "3Q-" + uuid.uuid4().hex[:12].upper()
-            save_otp_quote(
-                quote_id=quote_id, telegram_id=user_id, provider="nokos",
-                country=str(country), country_name=display_country, service=str(service),
-                operator=(str(operator) if operator and operator != "any" else "any"), pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
-                cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
-            )
-            keyboard.append([InlineKeyboardButton(
-                f"💰 {format_rupiah(sell_price)} • 📦 {int(group['stock'])}\n⚡ Server 3",
-                callback_data=f"otp_quote:{quote_id}",
-            )])
             available += 1
 
     if not available:
@@ -3203,18 +3257,7 @@ async def command_server(update, context, server):
             asyncio.to_thread(get_service_catalog, server), timeout=15
         )
     except Exception:
-        services = [] if server == "nokos" else list(OTP_SERVICES)
-    if server == "nokos" and not services:
-        await update.message.reply_text(
-            "⚠️ <b>Katalog Server 3 tidak dapat dimuat.</b>\n\n"
-            "Data layanan sedang tidak tersedia dari Nokosnesia. Silakan coba lagi.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Coba Lagi", callback_data="otp_server:nokos"),
-                InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
-            ]]),
-        )
-        return
+        services = list(OTP_SERVICES)
     await update.message.reply_text(
         "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
         f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"
@@ -3395,6 +3438,70 @@ async def _create_auto_deposit_invoice(context, chat_id, user, amount, message_i
         )
 
 
+async def _create_premotp_qris_invoice(context, chat_id, user, amount, message_id=None):
+    deposit_id = "DEP-" + uuid.uuid4().hex[:12].upper()
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO deposits (deposit_id,telegram_id,amount,status,created_at,payment_method)
+               VALUES (%s,%s,%s,'PENDING',%s,'PREMOTP_QRIS')""",
+            (deposit_id, user.id, int(amount), now()),
+        )
+    try:
+        data = await asyncio.to_thread(create_premotp_qris, deposit_id, int(amount))
+        qris_id = premotp_qris_id(data)
+        ref_id = premotp_qris_ref_id(data) or deposit_id
+        total_payment = premotp_qris_total_payment(data) or int(amount)
+        if not qris_id:
+            raise RuntimeError("Respons QRIS PremOTP tidak memiliki ID transaksi.")
+        qr_bytes = await asyncio.to_thread(premotp_qr_image_bytes, data)
+        if not qr_bytes:
+            raise RuntimeError("PremOTP tidak mengembalikan data QR yang dapat ditampilkan.")
+        with get_db() as db:
+            db.execute(
+                """UPDATE deposits SET payment_reference=%s, external_id=%s, payment_amount=%s, payment_total=%s, user_message_id=%s
+                   WHERE deposit_id=%s""",
+                (str(qris_id), str(ref_id), int(amount), int(total_payment), message_id, deposit_id),
+            )
+        caption = (
+            "💳 <b>QRIS OTOMATIS</b>\n\n"
+            f"🧾 ID: <code>{escape(deposit_id)}</code>\n"
+            f"💰 Saldo masuk: <b>{format_rupiah(int(amount))}</b>\n"
+            f"💸 Total bayar: <b>{format_rupiah(int(total_payment))}</b>\n"
+            "📌 Status: <b>MENUNGGU PEMBAYARAN</b>\n\n"
+            "Silakan scan QRIS di atas dan selesaikan pembayaran.\n"
+            "Saldo akan ditambahkan otomatis setelah pembayaran terkonfirmasi."
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data=f"cancel_premotp_qris:{deposit_id}")]])
+        if message_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=int(message_id))
+            except Exception:
+                pass
+        sent = await context.bot.send_photo(
+            chat_id=chat_id, photo=__import__('io').BytesIO(qr_bytes), caption=caption,
+            parse_mode="HTML", reply_markup=markup
+        )
+        with get_db() as db:
+            db.execute("UPDATE deposits SET user_message_id=%s WHERE deposit_id=%s", (sent.message_id, deposit_id))
+        context.chat_data["deposit_flow_message_id"] = sent.message_id
+    except Exception:
+        logger.exception("Gagal membuat QRIS PremOTP %s", deposit_id)
+        with get_db() as db:
+            db.execute("UPDATE deposits SET status='FAILED', confirmed_at=%s WHERE deposit_id=%s AND status='PENDING'", (now(), deposit_id))
+        try:
+            if message_id:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id, message_id=int(message_id),
+                    text="❌ <b>QRIS otomatis gagal dibuat.</b>\n\nSilakan pilih metode pembayaran lain.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Pilih Metode Lain", callback_data="user_deposit")]]),
+                )
+            else:
+                await context.bot.send_message(chat_id=chat_id, text="❌ <b>QRIS otomatis gagal dibuat.</b>\n\nSilakan pilih metode pembayaran lain.", parse_mode="HTML")
+        except Exception:
+            pass
+
+
 def _complete_manual_deposit(deposit_id):
     with get_db() as db:
         deposit = db.execute("SELECT deposit_id,telegram_id,amount,payment_amount,unique_code,status,payment_method,user_message_id FROM deposits WHERE deposit_id=%s FOR UPDATE", (deposit_id,)).fetchone()
@@ -3424,7 +3531,11 @@ def _complete_manual_deposit(deposit_id):
 
 
 def _is_payment_method_enabled(method):
-    key = "payment_auto_enabled" if method == "AUTO" else "payment_manual_enabled"
+    key = {
+        "AUTO": "payment_auto_enabled",
+        "MANUAL": "payment_manual_enabled",
+        "PREMOTP_QRIS": "payment_premotp_qris_enabled",
+    }.get(method, "payment_auto_enabled")
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
 
 
@@ -3437,6 +3548,12 @@ def _payment_method_maintenance_text(method):
             "Mohon maaf, pembayaran otomatis sedang diperbaiki sementara.\n"
             "Silakan gunakan QRIS Manual atau coba kembali beberapa saat lagi. 🙏"
         )
+    if method == "PREMOTP_QRIS":
+        return (
+            "⚠️ QRIS Otomatis Sedang Dalam Maintenance\n\n"
+            "Mohon maaf, QRIS otomatis sedang diperbaiki sementara.\n"
+            "Silakan gunakan Pembayaran Otomatis atau QRIS Manual. 🙏"
+        )
     return (
         "⚠️ Metode QRIS Manual Sedang Dalam Maintenance\n\n"
         "Mohon maaf, pembayaran QRIS Manual sedang diperbaiki sementara.\n"
@@ -3445,29 +3562,32 @@ def _payment_method_maintenance_text(method):
 
 
 def _is_server_enabled(server):
-    key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "nokos": "server3_enabled"}.get(server)
-    if not key:
-        return False
+    if server == "5sim":
+        key = "server1_enabled"
+    elif server == "rumahotp":
+        key = "server2_enabled"
+    else:
+        key = "server3_enabled"
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
 
 
 def _server_maintenance_text(server):
-    if server == "nokos":
-        return (
-            "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
-            "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
-            "Silakan gunakan Server 1 atau Server 2 atau coba kembali beberapa saat lagi. 🙏"
-        )
     if server == "5sim":
         return (
             "⚠️ Server 1 Sedang Dalam Maintenance\n\n"
             "Mohon maaf, Server 1 sedang dalam perbaikan sementara.\n"
             "Silakan gunakan Server 2 atau coba kembali beberapa saat lagi. 🙏"
         )
+    if server == "rumahotp":
+        return (
+            "⚠️ Server 2 Sedang Dalam Maintenance\n\n"
+            "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
+            "Silakan gunakan Server 1 atau Server 3, atau coba kembali beberapa saat lagi. 🙏"
+        )
     return (
-        "⚠️ Server 2 Sedang Dalam Maintenance\n\n"
-        "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
-        "Silakan gunakan Server 1 atau coba kembali beberapa saat lagi. 🙏"
+        "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
+        "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
+        "Silakan gunakan Server 1 atau Server 2, atau coba kembali beberapa saat lagi. 🙏"
     )
 
 
@@ -3483,6 +3603,7 @@ async def command_deposit(update, context):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⚡ Pembayaran Otomatis", callback_data="deposit_method:auto")],
             [InlineKeyboardButton("📷 QRIS Manual", callback_data="deposit_method:manual")],
+            [InlineKeyboardButton("💳 QRIS Otomatis", callback_data="deposit_method:premotp")],
             [InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")]
         ])
     )
@@ -3729,11 +3850,16 @@ async def _auto_expire_order(application, order, provider_order_id):
 
     if provider == "rumahotp":
         canceler = cancel_rumahotp_number
-    elif provider == "nokos":
-        canceler = cancel_nokos_number
+    elif provider == "premotp":
+        canceler = cancel_premotp_order
     else:
         canceler = cancel_number
-    result = await asyncio.to_thread(canceler, provider_order_id)
+    try:
+        result = await asyncio.to_thread(canceler, provider_order_id)
+        if provider == "premotp":
+            result = {"response": "OK"}
+    except Exception as exc:
+        result = {"response": "ERROR", "error": str(exc)}
     if not result or result.get("response") != "OK":
         logger.warning(
             "[AUTO EXPIRE] cancel not confirmed order=%s provider_order=%s result=%s",
@@ -3830,18 +3956,25 @@ async def auto_process_pending_orders(application):
                         if provider_order_id:
                             if provider == "rumahotp":
                                 checker = get_rumahotp_sms
-                            elif provider == "nokos":
-                                checker = get_nokos_sms
+                            elif provider == "premotp":
+                                checker = get_premotp_order
                             else:
                                 checker = get_sms
                             try:
                                 data_sms = await asyncio.to_thread(checker, provider_order_id)
+                                if provider == "premotp":
+                                    data_sms = {
+                                        "response": "OK",
+                                        "phone": (data_sms or {}).get("phone_number") or (data_sms or {}).get("phone") or (data_sms or {}).get("number"),
+                                        "otp": (data_sms or {}).get("otp_code") or (data_sms or {}).get("otp") or (data_sms or {}).get("code"),
+                                        "expired_at": (data_sms or {}).get("expired_at") or (data_sms or {}).get("expires_at") or (data_sms or {}).get("expires"),
+                                    }
                                 if data_sms and data_sms.get("response") != "ERROR":
                                     await _send_otp_received_message(application, selected["order_id"], data_sms)
                             except Exception:
                                 logger.exception("[AUTO OTP] polling failed order=%s", selected["order_id"])
-                            # Keep provider polling comfortably below documented read limits.
-                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + (3.2 if provider == "nokos" else 2.2)
+                            # 2.2 seconds => at most 4-5 requests in a rolling 10s window.
+                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + 2.2
                         else:
                             # Provider order data may still be finishing its DB save.
                             _AUTO_POLL_NEXT[provider] = now_mono + 1.0
@@ -3942,11 +4075,7 @@ async def process_otp_order(
 ):
     """Order OTP dari provider terpilih dengan margin sesuai PROFIT_PERCENT (default 7%)."""
 
-    service_label = (
-        rumah_service_label(service) if server == "rumahotp"
-        else nokos_service_label(service) if server == "nokos"
-        else dict(OTP_SERVICES).get(service, service)
-    )
+    service_label = (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, service))
     display_country = country
 
     # -----------------------------------------------------
@@ -4143,42 +4272,29 @@ async def process_otp_order(
             not result or result.get("response") == "ERROR"
         )
         error_reason = "Pembelian nomor Server 2 gagal."
-    elif server == "nokos":
-        products = []
-        if quote and quote.get("pool"):
-            try:
-                meta = json.loads(quote.get("pool") or "{}")
-                products = meta.get("products") or []
-            except Exception:
-                products = []
-        if not products:
-            try:
-                products = await asyncio.to_thread(get_nokos_price_options, country, service)
-            except Exception:
-                products = []
-        # Try the cheapest quoted product first, then other products in the
-        # same displayed price tier if the provider reports stock/availability
-        # failure. No other AZHURA provider flow is touched.
-        products = sorted(
-            [p for p in products if isinstance(p, dict)],
-            key=lambda p: (float(p.get("cost_idr") or 0), -int(p.get("stock") or 0)),
-        )
-        result = None
-        for idx, product in enumerate(products):
+    elif server == "premotp":
+        try:
+            meta = json.loads(quote.get("pool") or "{}") if quote else {}
+        except Exception:
+            meta = {}
+        offer_id = str(meta.get("offer_id") or "").strip()
+        order_type = str(meta.get("order_type") or "regular").strip().lower()
+        try:
             candidate = await asyncio.to_thread(
-                buy_nokos_number, country, service, operator or "any", product, f"{order_id}-nokos-{idx}"
+                create_premotp_order,
+                order_id,
+                service,
+                country,
+                offer_id,
+                order_type,
             )
-            result = candidate
-            if candidate and candidate.get("response") != "ERROR" and (candidate.get("id") or candidate.get("order_id")) and candidate.get("phone"):
-                break
-            error_text = str((candidate or {}).get("error") or "").lower()
-            retryable_stock = any(x in error_text for x in ("stock", "stok", "available", "availability", "tersedia", "provider"))
-            if idx + 1 >= len(products) or not retryable_stock:
-                break
-        provider_order_id = (result.get("id") or result.get("order_id")) if result else None
-        phone = result.get("phone") if result else None
-        provider_expired_at = result.get("expired_at") if result else None
-        provider_error = not result or result.get("response") == "ERROR"
+        except Exception as exc:
+            logger.exception("PremOTP order failed")
+            candidate = {"error": str(exc)}
+        provider_order_id = str((candidate or {}).get("id") or "").strip() or None
+        phone = (candidate or {}).get("phone_number") or (candidate or {}).get("phone") or (candidate or {}).get("number")
+        provider_expired_at = (candidate or {}).get("expired_at") or (candidate or {}).get("expires_at") or (candidate or {}).get("expires")
+        provider_error = not candidate or not provider_order_id or not phone
         error_reason = "Pembelian nomor Server 3 gagal."
     else:
         provider_expired_at = None
@@ -4239,9 +4355,13 @@ async def process_otp_order(
         )
         return
 
-    provider_cost_rp = int(
-        round(provider_cost_usd * KURS_DOLAR)
-    )
+    if server == "premotp":
+        try:
+            provider_cost_rp = int(round(float(json.loads(quote.get("pool") or "{}").get("cost_idr") or provider_cost_usd * KURS_DOLAR)))
+        except Exception:
+            provider_cost_rp = int(round(provider_cost_usd * KURS_DOLAR))
+    else:
+        provider_cost_rp = int(round(provider_cost_usd * KURS_DOLAR))
 
     # Provider may already have charged the order. Do not let a database write
     # block the Telegram callback after a successful provider purchase.
@@ -4662,13 +4782,16 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         context.user_data["otp_service"] = service
         context.user_data["otp_country"] = country
 
-        await show_otp_operator_page(
-            query,
-            source_server,
-            service,
-            country,
-            0,
-        )
+        if source_server == "premotp":
+            await show_otp_price_page(query, user_id, source_server, service, country, "any", 0)
+        else:
+            await show_otp_operator_page(
+                query,
+                source_server,
+                service,
+                country,
+                0,
+            )
         return
 
     # =====================================================
@@ -5618,6 +5741,37 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 pass
             return
 
+        # Server 3 (PremOTP): true provider-side resend.
+        if provider == "premotp":
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(resend_premotp_order, provider_order_id),
+                    timeout=12.0,
+                )
+            except Exception as exc:
+                await query.edit_message_text(
+                    "⚠️ <b>Resend OTP gagal.</b>\n\n" + escape(str(exc)[:300]),
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                    ]),
+                )
+                return
+            await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
+            current = get_order(order_id) or order
+            waiting_text = (
+                "⏳ <b>Menunggu SMS OTP...</b>\n\n"
+                f"🧾 Order: <code>{order_id}</code>\n"
+                f"📞 Nomor: <code>{escape(str(current.get('phone') or '-'))}</code>\n\n"
+                "Kode OTP baru akan ditampilkan otomatis saat diterima."
+            )
+            await query.edit_message_text(
+                waiting_text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")], [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")]])
+            )
+            return
+
         # Server 2 (RumahOTP): true provider-side resend.
         if provider == "rumahotp":
             try:
@@ -5699,63 +5853,6 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 parse_mode="HTML",
                 reply_markup=None,
             )
-            return
-
-        # Server 3 (Nokos): provider-side resend uses setStatus status=3.
-        if provider == "nokos":
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(resend_nokos_otp, provider_order_id), timeout=12.0
-                )
-            except asyncio.TimeoutError:
-                await query.edit_message_text(
-                    "⚠️ <b>Resend OTP belum mendapat respons.</b>\n\nSilakan tekan <b>Resend OTP</b> lagi beberapa saat kemudian.",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
-                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
-                    ]),
-                )
-                return
-            if not result or result.get("response") != "OK":
-                await query.edit_message_text(
-                    "⚠️ <b>Resend OTP gagal.</b>\n\nNokos tidak mengonfirmasi permintaan resend. Silakan coba lagi beberapa saat kemudian.",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
-                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
-                    ]),
-                )
-                return
-            changed = await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
-            if not changed:
-                await query.edit_message_text(
-                    "⚠️ <b>Resend belum dapat diproses.</b>\n\nSilakan coba lagi beberapa saat kemudian.",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
-                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
-                    ]),
-                )
-                return
-            current = get_order(order_id) or order
-            runtime = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
-            service_name = current.get("service_name") or current.get("service") or "-"
-            country_name = current.get("country_name") or current.get("country") or "-"
-            phone = current.get("phone") or runtime.get("phone") or "-"
-            expired_at = current.get("expired_at") or runtime.get("expired_at")
-            waiting_text = (
-                "⏳ <b>MENUNGGU SMS OTP...</b>\n\n"
-                f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
-                f"📱 Layanan: <b>{escape(str(service_name))}</b>\n"
-                f"🌐 Negara: <b>{escape(str(country_name))}</b>\n"
-                f"📞 Nomor: <code>{escape(str(phone))}</code>\n"
-                f"🕐 Transaksi: <b>{escape(format_datetime_wib(current.get('created_at')))}</b>\n"
-                f"⏰ Expired: <b>{escape(format_datetime_wib(expired_at))}</b>\n\n"
-                "⏳ <b>Menunggu SMS OTP...</b>\n"
-                "Kode OTP baru akan ditampilkan otomatis saat benar-benar diterima."
-            )
-            await query.edit_message_text(waiting_text, parse_mode="HTML", reply_markup=None)
             return
 
         # Server 1 (5SIM): there is no official resend operation for an
@@ -5860,14 +5957,13 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
-        if provider == "rumahotp":
-            finisher = complete_rumahotp_number
-        elif provider == "nokos":
-            finisher = complete_nokos_number
+        if provider == "premotp":
+            result = {"response": "OK"}
+            finisher = None
         else:
-            finisher = finish_number
+            finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
         try:
-            result = await asyncio.wait_for(
+            result = result if provider == "premotp" else await asyncio.wait_for(
                 asyncio.to_thread(finisher, provider_order_id),
                 timeout=12.0,
             )
@@ -6033,15 +6129,17 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         if provider == "rumahotp":
             canceler = cancel_rumahotp_number
-        elif provider == "nokos":
-            canceler = cancel_nokos_number
+        elif provider == "premotp":
+            canceler = cancel_premotp_order
         else:
             canceler = cancel_number
 
-        cancel_result = await asyncio.to_thread(
-            canceler,
-            provider_order_id
-        )
+        try:
+            cancel_result = await asyncio.to_thread(canceler, provider_order_id)
+            if provider == "premotp":
+                cancel_result = {"response": "OK"}
+        except Exception as exc:
+            cancel_result = {"response": "ERROR", "error": str(exc)}
 
         logger.info(
             "[OTP CANCEL] local=%s provider=%s provider_order=%s result=%s",
@@ -6209,8 +6307,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # DEPOSIT METHOD / MANUAL CONFIRMATION
     # =====================================================
 
-    if data in {"deposit_method:auto", "deposit_method:manual"}:
-        selected_method = "AUTO" if data.endswith(":auto") else "MANUAL"
+    if data in {"deposit_method:auto", "deposit_method:manual", "deposit_method:premotp"}:
+        selected_method = {"auto": "AUTO", "manual": "MANUAL", "premotp": "PREMOTP_QRIS"}[data.split(":", 1)[1]]
         if not _is_payment_method_enabled(selected_method):
             # This callback was intentionally not pre-answered by button_handler,
             # so Telegram can display the maintenance message as a popup alert.
@@ -6235,6 +6333,11 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         context.chat_data["deposit_method"] = data.split(":", 1)[1].upper()
         user = query.from_user
         create_user(user.id, user.username, user.first_name)
+
+        if context.chat_data["deposit_method"] == "PREMOTP":
+            flow_message_id = context.chat_data.get("deposit_flow_message_id")
+            await _create_premotp_qris_invoice(context, user.id, user, amount, message_id=flow_message_id)
+            return
 
         if context.chat_data["deposit_method"] == "MANUAL":
             # Telegram tidak bisa mengubah pesan teks menjadi pesan foto.
@@ -6355,6 +6458,36 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             await query.message.delete()
         except Exception:
             logger.exception("Gagal menghapus invoice otomatis %s saat dibatalkan", deposit_id)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🏠 <b>MENU UTAMA</b>\n\nSilakan pilih menu yang ingin digunakan.",
+            parse_mode="HTML",
+            reply_markup=user_menu(),
+        )
+        return
+
+    if data.startswith("cancel_premotp_qris:"):
+        deposit_id = data.split(":", 1)[1].strip()
+        with get_db() as db:
+            deposit = db.execute(
+                "SELECT deposit_id,status,telegram_id,payment_method FROM deposits WHERE deposit_id=%s AND telegram_id=%s",
+                (deposit_id, user_id),
+            ).fetchone()
+            if not deposit or deposit["payment_method"] != "PREMOTP_QRIS" or deposit["status"] != "PENDING":
+                await query.answer("Invoice QRIS otomatis sudah tidak aktif.", show_alert=True)
+                return
+            db.execute(
+                "UPDATE deposits SET status='FAILED', confirmed_at=%s WHERE deposit_id=%s AND telegram_id=%s AND payment_method='PREMOTP_QRIS' AND status='PENDING'",
+                (now(), deposit_id, user_id),
+            )
+        context.chat_data["waiting_deposit"] = False
+        context.chat_data.pop("pending_deposit_amount", None)
+        context.chat_data.pop("deposit_method", None)
+        context.chat_data.pop("deposit_flow_message_id", None)
+        try:
+            await query.message.delete()
+        except Exception:
+            logger.exception("Gagal menghapus invoice QRIS otomatis %s saat dibatalkan", deposit_id)
         await context.bot.send_message(
             chat_id=user_id,
             text="🏠 <b>MENU UTAMA</b>\n\nSilakan pilih menu yang ingin digunakan.",
@@ -6922,7 +7055,6 @@ ADMIN_PAGE_SIZE = 8
 ADMIN_PROVIDER_NAMES = {
     "5sim": "5SIM",
     "rumahotp": "RUMAHOTP",
-    "nokos": "NOKOS",
 }
 ADMIN_SEARCH_USERS = set()
 ADMIN_SEARCH_DEPOSITS = set()
@@ -7112,8 +7244,6 @@ async def _admin_cancel_order(query, context, order_id):
     try:
         if provider == "rumahotp":
             cancel_result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
-        elif provider == "nokos":
-            cancel_result = await asyncio.to_thread(cancel_nokos_number, provider_order_id)
         elif provider == "5sim":
             cancel_result = await asyncio.to_thread(cancel_number, provider_order_id)
         else:
@@ -7488,47 +7618,58 @@ async def admin_callback(
         await _admin_user_ledger(query, telegram_id)
 
     elif query.data == "admin_server_maintenance":
-        states = {s: _is_server_enabled(s) for s in ("5sim", "rumahotp", "nokos")}
-        labels = {s: ("🟢 ON" if states[s] else "🔴 OFF") for s in states}
+        server1_enabled = _is_server_enabled("5sim")
+        server2_enabled = _is_server_enabled("rumahotp")
+        server3_enabled = _is_server_enabled("premotp")
+        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
+        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        server3_label = "🟢 ON" if server3_enabled else "🔴 OFF"
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
             "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
-            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
-            f"⚡ Server 3: <b>{labels['nokos']}</b>",
+            f"⚡ Server 1: <b>{server1_label}</b>\n"
+            f"⚡ Server 2: <b>{server2_label}</b>\n"
+            f"⚡ Server 3: <b>{server3_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
-                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nokos']}", callback_data="admin_server_toggle:nokos")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 3 — {server3_label}", callback_data="admin_server_toggle:premotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
 
     elif query.data.startswith("admin_server_toggle:"):
         server = query.data.split(":", 1)[1].strip().lower()
-        if server not in {"5sim", "rumahotp", "nokos"}:
+        if server not in {"5sim", "rumahotp", "premotp"}:
             await query.answer("Server tidak valid.", show_alert=True)
             return
-        key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "nokos": "server3_enabled"}[server]
+        key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "premotp": "server3_enabled"}[server]
         current = _is_server_enabled(server)
         set_bot_setting(key, "0" if current else "1")
-        await query.answer(("Server diaktifkan." if not current else "Server dimatikan."), show_alert=False)
-        states = {s: _is_server_enabled(s) for s in ("5sim", "rumahotp", "nokos")}
-        labels = {s: ("🟢 ON" if states[s] else "🔴 OFF") for s in states}
+        await query.answer(
+            ("Server diaktifkan." if not current else "Server dimatikan."),
+            show_alert=False
+        )
+        server1_enabled = _is_server_enabled("5sim")
+        server2_enabled = _is_server_enabled("rumahotp")
+        server3_enabled = _is_server_enabled("premotp")
+        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
+        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        server3_label = "🟢 ON" if server3_enabled else "🔴 OFF"
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
             "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
-            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
-            f"⚡ Server 3: <b>{labels['nokos']}</b>",
+            f"⚡ Server 1: <b>{server1_label}</b>\n"
+            f"⚡ Server 2: <b>{server2_label}</b>\n"
+            f"⚡ Server 3: <b>{server3_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
-                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nokos']}", callback_data="admin_server_toggle:nokos")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 3 — {server3_label}", callback_data="admin_server_toggle:premotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
@@ -7536,29 +7677,33 @@ async def admin_callback(
     elif query.data == "admin_payment_methods":
         auto_enabled = _is_payment_method_enabled("AUTO")
         manual_enabled = _is_payment_method_enabled("MANUAL")
+        premotp_enabled = _is_payment_method_enabled("PREMOTP_QRIS")
         auto_label = "🟢 ON" if auto_enabled else "🔴 OFF"
         manual_label = "🟢 ON" if manual_enabled else "🔴 OFF"
+        premotp_label = "🟢 ON" if premotp_enabled else "🔴 OFF"
         await query.edit_message_text(
             "💳 <b>METODE PEMBAYARAN MAINTENANCE</b>\n\n"
             "Atur masing-masing metode pembayaran secara terpisah.\n"
             "Jika suatu metode dimatikan, user tetap dapat melihat pilihannya tetapi saat diklik akan mendapat pemberitahuan bahwa metode tersebut sedang maintenance.\n\n"
             f"⚡ Pembayaran Otomatis: <b>{auto_label}</b>\n"
-            f"📷 QRIS Manual: <b>{manual_label}</b>",
+            f"📷 QRIS Manual: <b>{manual_label}</b>\n"
+            f"💳 QRIS Otomatis: <b>{premotp_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"⚡ Otomatis — {auto_label}", callback_data="admin_payment_toggle:auto")],
                 [InlineKeyboardButton(f"📷 QRIS Manual — {manual_label}", callback_data="admin_payment_toggle:manual")],
+                [InlineKeyboardButton(f"💳 QRIS Otomatis — {premotp_label}", callback_data="admin_payment_toggle:premotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
 
     elif query.data.startswith("admin_payment_toggle:"):
         method = query.data.split(":", 1)[1].strip().lower()
-        if method not in {"auto", "manual"}:
+        if method not in {"auto", "manual", "premotp"}:
             await query.answer("Metode pembayaran tidak valid.", show_alert=True)
             return
-        key = "payment_auto_enabled" if method == "auto" else "payment_manual_enabled"
-        current = _is_payment_method_enabled("AUTO" if method == "auto" else "MANUAL")
+        key = {"auto": "payment_auto_enabled", "manual": "payment_manual_enabled", "premotp": "payment_premotp_qris_enabled"}[method]
+        current = _is_payment_method_enabled({"auto": "AUTO", "manual": "MANUAL", "premotp": "PREMOTP_QRIS"}[method])
         set_bot_setting(key, "0" if current else "1")
         await query.answer(
             ("Metode pembayaran diaktifkan." if not current else "Metode pembayaran dimatikan."),
@@ -7566,18 +7711,22 @@ async def admin_callback(
         )
         auto_enabled = _is_payment_method_enabled("AUTO")
         manual_enabled = _is_payment_method_enabled("MANUAL")
+        premotp_enabled = _is_payment_method_enabled("PREMOTP_QRIS")
         auto_label = "🟢 ON" if auto_enabled else "🔴 OFF"
         manual_label = "🟢 ON" if manual_enabled else "🔴 OFF"
+        premotp_label = "🟢 ON" if premotp_enabled else "🔴 OFF"
         await query.edit_message_text(
             "💳 <b>METODE PEMBAYARAN MAINTENANCE</b>\n\n"
             "Atur masing-masing metode pembayaran secara terpisah.\n"
             "Jika suatu metode dimatikan, user tetap dapat melihat pilihannya tetapi saat diklik akan mendapat pemberitahuan bahwa metode tersebut sedang maintenance.\n\n"
             f"⚡ Pembayaran Otomatis: <b>{auto_label}</b>\n"
-            f"📷 QRIS Manual: <b>{manual_label}</b>",
+            f"📷 QRIS Manual: <b>{manual_label}</b>\n"
+            f"💳 QRIS Otomatis: <b>{premotp_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"⚡ Otomatis — {auto_label}", callback_data="admin_payment_toggle:auto")],
                 [InlineKeyboardButton(f"📷 QRIS Manual — {manual_label}", callback_data="admin_payment_toggle:manual")],
+                [InlineKeyboardButton(f"💳 QRIS Otomatis — {premotp_label}", callback_data="admin_payment_toggle:premotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
@@ -7764,13 +7913,11 @@ async def admin_callback(
         checks = await asyncio.gather(
             asyncio.to_thread(check_5sim_api),
             asyncio.to_thread(check_rumahotp_api),
-            asyncio.to_thread(check_nokos_api),
             return_exceptions=True,
         )
         balances = await asyncio.gather(
             asyncio.to_thread(get_5sim_balance),
             asyncio.to_thread(get_rumahotp_balance),
-            asyncio.to_thread(get_nokos_balance),
             return_exceptions=True,
         )
 
@@ -7783,16 +7930,14 @@ async def admin_callback(
             except Exception:
                 return 0.0
 
-        b1, b2, b3 = [money(x) for x in balances]
+        b1, b2 = [money(x) for x in balances]
         s1 = "🟢 CONNECTED" if ok(checks[0]) else "🔴 OFFLINE"
         s2 = "🟢 CONNECTED" if ok(checks[1]) else "🔴 OFFLINE"
-        s3 = "🟢 CONNECTED" if ok(checks[2]) else "🔴 OFFLINE"
 
         await query.edit_message_text(
             "💰 <b>PROVIDER STATUS</b>\n\n"
             f"⚡ <b>Server 1 — {ADMIN_PROVIDER_NAMES['5sim']}</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
             f"⚡ <b>Server 2 — {ADMIN_PROVIDER_NAMES['rumahotp']}</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
-            f"⚡ <b>Server 3 — {ADMIN_PROVIDER_NAMES['nokos']}</b>\n{s3}\n💵 Saldo: <b>Rp{b3:,.0f}</b>\n\n"
             f"💱 Kurs otomatis: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
             f"💵 Kurs jual + margin: <b>Rp{KURS_DOLAR * (1 + PROFIT_PERCENT / 100):,.2f} / USD</b>\n"
             f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
@@ -7919,7 +8064,7 @@ async def button_handler(
     # Answering here first would consume the callback query and prevent the
     # later alert/status response from being displayed.
     deferred_callbacks = (
-        query.data in {"deposit_method:auto", "deposit_method:manual"}
+        query.data in {"deposit_method:auto", "deposit_method:manual", "deposit_method:premotp"}
         or query.data.startswith("otp_server:")
         or query.data.startswith("otp_resend:")
     )
@@ -7934,8 +8079,8 @@ async def button_handler(
     # Handle disabled payment methods here before any generic callback answer.
     # This guarantees the maintenance popup is shown for QRIS Manual as well
     # as automatic payment. Enabled methods continue into user_callback.
-    if query.data in {"deposit_method:auto", "deposit_method:manual"}:
-        selected_method = "AUTO" if query.data.endswith(":auto") else "MANUAL"
+    if query.data in {"deposit_method:auto", "deposit_method:manual", "deposit_method:premotp"}:
+        selected_method = {"auto": "AUTO", "manual": "MANUAL", "premotp": "PREMOTP_QRIS"}[query.data.split(":", 1)[1]]
         if not _is_payment_method_enabled(selected_method):
             try:
                 await query.answer(_payment_method_maintenance_text(selected_method), show_alert=True)
@@ -8449,6 +8594,7 @@ async def text_handler(
     method_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚡ Pembayaran Otomatis", callback_data="deposit_method:auto")],
         [InlineKeyboardButton("📷 QRIS Manual", callback_data="deposit_method:manual")],
+        [InlineKeyboardButton("💳 QRIS Otomatis", callback_data="deposit_method:premotp")],
         [InlineKeyboardButton("❌ Batal", callback_data="cancel_deposit")]
     ])
 

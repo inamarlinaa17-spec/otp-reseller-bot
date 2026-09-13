@@ -91,6 +91,15 @@ def init_database():
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS unique_code INTEGER")
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS confirmed_at TEXT")
         db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS user_message_id BIGINT")
+        db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS external_id TEXT")
+        db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS payment_total BIGINT")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS premotp_webhook_events (
+                delivery_id TEXT PRIMARY KEY,
+                event_name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
 
         # Satu kode unik tidak boleh dipakai bersamaan untuk nominal deposit
         # yang sama. Partial index hanya berlaku selama deposit masih PENDING.
