@@ -3856,6 +3856,47 @@ async def _send_traffic_otp_notification(application, order, code, sms_text):
         logger.exception("[TRAFFIC] failed to send OTP notification order=%s", order.get("order_id"))
 
 
+async def _send_traffic_order_notification(application, order):
+    """Send a new-order notification for Server 3 to the live traffic channel."""
+    if not TRAFFIC_CHANNEL:
+        return
+    try:
+        user = await asyncio.to_thread(get_user, int(order["telegram_id"]))
+        username = (user or {}).get("username") if user else None
+        masked_user = _mask_traffic_value(username, 3, 3) if username else "-"
+        runtime = _RUNTIME_PROVIDER_CACHE.get(order["order_id"]) or {}
+        phone = order.get("phone") or runtime.get("phone") or "-"
+        masked_phone = _mask_traffic_value(phone, 3, 3)
+        service_name = order.get("service_name") or order.get("service") or "-"
+        country_name = order.get("country_name") or order.get("country") or "-"
+        price = format_rupiah(order.get("sell_price") or 0)
+        provider_order_id = (
+            order.get("provider_order_id")
+            or runtime.get("provider_order_id")
+            or order.get("order_id")
+        )
+        traffic_text = (
+            "🛒 <b>ORDER LIVE</b>\\n\\n"
+            f"• <b>ID:</b> <code>{escape(str(provider_order_id))}</code>\\n"
+            f"• <b>Users:</b> {escape(str(masked_user))}\\n"
+            f"• <b>Number:</b> <code>{escape(str(masked_phone))}</code>\\n"
+            f"• <b>Price:</b> {escape(str(price))}\\n\\n"
+            f"{escape(str(service_name))} - {escape(str(country_name))}"
+        )
+        token = TRAFFIC_BOT_TOKEN or BOT_TOKEN
+        async with Bot(token=token) as traffic_bot:
+            await traffic_bot.send_message(
+                chat_id=TRAFFIC_CHANNEL,
+                text=traffic_text,
+                parse_mode="HTML",
+            )
+    except Exception:
+        logger.exception(
+            "[TRAFFIC] failed to send ORDER notification order=%s",
+            order.get("order_id"),
+        )
+
+
 async def _send_otp_received_message(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
@@ -4059,11 +4100,42 @@ async def auto_process_pending_orders(application):
                             try:
                                 data_sms = await asyncio.to_thread(checker, provider_order_id)
                                 if provider == "premotp":
+                                    # PremOTP returns the received OTP as a top-level
+                                    # field (otp_code/otp/code), while the common
+                                    # AZHURA OTP worker expects the RumahOTP/5SIM
+                                    # shape: sms=[{"code": ..., "text": ...}].
+                                    # Normalize the provider response here so the
+                                    # existing user/order flow remains unchanged.
+                                    premotp_data = data_sms or {}
+                                    premotp_code = (
+                                        premotp_data.get("otp_code")
+                                        or premotp_data.get("otp")
+                                        or premotp_data.get("code")
+                                    )
+                                    premotp_text = (
+                                        premotp_data.get("sms_text")
+                                        or premotp_data.get("message")
+                                        or premotp_data.get("text")
+                                        or ""
+                                    )
                                     data_sms = {
                                         "response": "OK",
-                                        "phone": (data_sms or {}).get("phone_number") or (data_sms or {}).get("phone") or (data_sms or {}).get("number"),
-                                        "otp": (data_sms or {}).get("otp_code") or (data_sms or {}).get("otp") or (data_sms or {}).get("code"),
-                                        "expired_at": (data_sms or {}).get("expired_at") or (data_sms or {}).get("expires_at") or (data_sms or {}).get("expires"),
+                                        "phone": (
+                                            premotp_data.get("phone_number")
+                                            or premotp_data.get("phone")
+                                            or premotp_data.get("number")
+                                        ),
+                                        "otp": premotp_code,
+                                        "expired_at": (
+                                            premotp_data.get("expired_at")
+                                            or premotp_data.get("expires_at")
+                                            or premotp_data.get("expires")
+                                        ),
+                                        "sms": (
+                                            [{"code": premotp_code, "text": premotp_text}]
+                                            if premotp_code
+                                            else []
+                                        ),
                                     }
                                 if data_sms and data_sms.get("response") != "ERROR":
                                     await _send_otp_received_message(application, selected["order_id"], data_sms)
@@ -4615,6 +4687,20 @@ async def process_otp_order(
             await asyncio.to_thread(save_order_message_id, order_id, message_id)
         except Exception:
             logger.exception("[ORDER FLOW] failed to save Telegram message id order=%s", order_id)
+
+    # Server 3 only: announce the successful order in the live traffic channel.
+    # Keep Server 1/2 behavior untouched.
+    if server == "premotp":
+        current_order = get_order(order_id) or {
+            "order_id": order_id,
+            "telegram_id": user_id,
+            "provider_order_id": provider_order_id,
+            "phone": phone,
+            "sell_price": sell_price,
+            "service_name": service_label,
+            "country_name": display_country,
+        }
+        await _send_traffic_order_notification(context.application, current_order)
 
 
 def _save_order_labels(order_id, service_name, country_name):
