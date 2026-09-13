@@ -133,6 +133,7 @@ from nokos import (
     get_services as get_nokos_services,
     get_service_countries as get_nokos_service_countries,
     get_price_options as get_nokos_price_options,
+    get_operators as get_nokos_operators,
     buy_number as buy_nokos_number,
     get_sms as get_nokos_sms,
     complete_number as complete_nokos_number,
@@ -1392,7 +1393,7 @@ async def show_server_page(
         "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
         "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
         "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
-        "⚡ <b>SERVER 3 — HIGH STOCK</b>\n"
+        "⚡ <b>SERVER 3 — SERVER ALTERNATIF</b>\n"
         "Server alternatif dengan dua jalur stok untuk membantu mendapatkan nomor yang tersedia.\n\n"
         "Silakan pilih server melalui tombol di bawah ini :",
         parse_mode="HTML",
@@ -1912,7 +1913,23 @@ async def _get_otp_operator_names(server, country, service):
         return sorted(names.values(), key=str.lower)
 
     if server == "nokos":
-        return []
+        try:
+            rows = await asyncio.wait_for(
+                asyncio.to_thread(get_nokos_operators, country, service),
+                timeout=8,
+            )
+        except Exception:
+            logger.exception("Nokosnesia operator lookup failed")
+            rows = []
+        names = {}
+        for item in rows or []:
+            oid = str(item.get("id") or item.get("operator_id") or "").strip()
+            name = str(item.get("name") or item.get("operator_name") or "").strip()
+            if not oid or not name:
+                continue
+            key = name.lower().replace("_", " ").strip()
+            names[key] = f"{name}||{oid}"
+        return sorted(names.values(), key=lambda x: x.split("||", 1)[0].lower())
 
     if server == "rumahotp":
         try:
@@ -1982,10 +1999,11 @@ async def show_otp_operator_page(query, server, service, country, page=0):
     for i in range(0, len(page_items), 2):
         row = []
         for op in page_items[i:i + 2]:
-            label = str(op).replace("_", " ").title()
+            raw_op = str(op)
+            label = raw_op.split("||", 1)[0].replace("_", " ").title()
             row.append(InlineKeyboardButton(
                 f"📡 {label}",
-                callback_data=f"otp_operator:{server}:{service}:{country}:{op}",
+                callback_data=f"otp_operator:{server}:{service}:{country}:{raw_op}",
             ))
         if row:
             keyboard.append(row)
@@ -2126,7 +2144,13 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
                 rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
 
     elif server == "nokos":
-        live = await asyncio.to_thread(get_nokos_price_options, country, service)
+        operator_id = None
+        if operator and operator != "any":
+            if "||" in str(operator):
+                _op_name, operator_id = str(operator).split("||", 1)
+            elif str(operator).isdigit():
+                operator_id = str(operator)
+        live = await asyncio.to_thread(get_nokos_price_options, country, service, operator_id)
         grouped = {}
         for item in live or []:
             try:
@@ -2149,7 +2173,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
             save_otp_quote(
                 quote_id=quote_id, telegram_id=user_id, provider="nokos",
                 country=str(country), country_name=display_country, service=str(service),
-                operator="any", pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
+                operator=(str(operator) if operator and operator != "any" else "any"), pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
                 cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
             )
             rows.append({"_display": (format_rupiah(sell), int(group["stock"]), quote_id)})
@@ -2192,7 +2216,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     await query.edit_message_text(
         "💰 <b>PILIH HARGA / STOCK</b>\n\n"
         f"{country_flag(display_country)} Negara: <b>{escape(display_country)}</b>\n"
-        f"📡 Operator: <b>{escape('Semua Operator (Acak)' if operator == 'any' else operator)}</b>\n"
+        f"📡 Operator: <b>{escape('Semua Operator (Acak)' if operator == 'any' else (str(operator).split('||', 1)[0] if '||' in str(operator) else str(operator)))}</b>\n"
         f"📱 Layanan: <b>{escape(str(service_label))}</b>\n\n"
         "Harga diurutkan dari yang paling rendah.",
         parse_mode="HTML",
@@ -2359,7 +2383,7 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
             save_otp_quote(
                 quote_id=quote_id, telegram_id=user_id, provider="nokos",
                 country=str(country), country_name=display_country, service=str(service),
-                operator="any", pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
+                operator=(str(operator) if operator and operator != "any" else "any"), pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
                 cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
             )
             keyboard.append([InlineKeyboardButton(
@@ -3394,13 +3418,19 @@ def _payment_method_maintenance_text(method):
 
 
 def _is_server_enabled(server):
-    if server == "nokos":
-        return True
-    key = "server1_enabled" if server == "5sim" else "server2_enabled"
+    key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "nokos": "server3_enabled"}.get(server)
+    if not key:
+        return False
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
 
 
 def _server_maintenance_text(server):
+    if server == "nokos":
+        return (
+            "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
+            "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
+            "Silakan gunakan Server 1 atau Server 2 atau coba kembali beberapa saat lagi. 🙏"
+        )
     if server == "5sim":
         return (
             "⚠️ Server 1 Sedang Dalam Maintenance\n\n"
@@ -7431,50 +7461,47 @@ async def admin_callback(
         await _admin_user_ledger(query, telegram_id)
 
     elif query.data == "admin_server_maintenance":
-        server1_enabled = _is_server_enabled("5sim")
-        server2_enabled = _is_server_enabled("rumahotp")
-        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
-        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        states = {s: _is_server_enabled(s) for s in ("5sim", "rumahotp", "nokos")}
+        labels = {s: ("🟢 ON" if states[s] else "🔴 OFF") for s in states}
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
+            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{server1_label}</b>\n"
-            f"⚡ Server 2: <b>{server2_label}</b>",
+            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
+            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
+            f"⚡ Server 3: <b>{labels['nokos']}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nokos']}", callback_data="admin_server_toggle:nokos")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
 
     elif query.data.startswith("admin_server_toggle:"):
         server = query.data.split(":", 1)[1].strip().lower()
-        if server not in {"5sim", "rumahotp"}:
+        if server not in {"5sim", "rumahotp", "nokos"}:
             await query.answer("Server tidak valid.", show_alert=True)
             return
-        key = "server1_enabled" if server == "5sim" else "server2_enabled"
+        key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "nokos": "server3_enabled"}[server]
         current = _is_server_enabled(server)
         set_bot_setting(key, "0" if current else "1")
-        await query.answer(
-            ("Server diaktifkan." if not current else "Server dimatikan."),
-            show_alert=False
-        )
-        server1_enabled = _is_server_enabled("5sim")
-        server2_enabled = _is_server_enabled("rumahotp")
-        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
-        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
+        await query.answer(("Server diaktifkan." if not current else "Server dimatikan."), show_alert=False)
+        states = {s: _is_server_enabled(s) for s in ("5sim", "rumahotp", "nokos")}
+        labels = {s: ("🟢 ON" if states[s] else "🔴 OFF") for s in states}
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
+            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{server1_label}</b>\n"
-            f"⚡ Server 2: <b>{server2_label}</b>",
+            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
+            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
+            f"⚡ Server 3: <b>{labels['nokos']}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nokos']}", callback_data="admin_server_toggle:nokos")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
