@@ -2404,7 +2404,14 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
             InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="otp_noop"),
             InlineKeyboardButton("▶️", callback_data=f"otp_prices:{server}:{service}:{country}:{operator}:{min(total_pages-1,page+1)}"),
         ])
-    keyboard.append([InlineKeyboardButton("↩️ Kembali", callback_data=f"otp_choose_server:{server}:{service}:{country}")])
+    # Server 3 tidak memiliki tahap operator. Tombol Kembali dari
+    # harga/stok harus kembali ke daftar negara, bukan memanggil halaman
+    # harga lagi (yang sebelumnya membuat navigasi Server 3 berputar/stuck).
+    if server == "premotp":
+        back_callback = f"otp_service_countries:{server}:{service}:0"
+    else:
+        back_callback = f"otp_choose_server:{server}:{service}:{country}"
+    keyboard.append([InlineKeyboardButton("↩️ Kembali", callback_data=back_callback)])
 
     await query.edit_message_text(
         "💰 <b>PILIH HARGA / STOCK</b>\n\n"
@@ -3298,11 +3305,12 @@ async def show_product_page(
 # =========================================================
 
 BOT_COMMANDS = [
-    ("start", "Menu Utama Bot"),
-    ("server1", "List Layanan Server1"),
-    ("server2", "List Layanan Server2"),
-    ("deposit", "Menu Deposit"),
-    ("checkin", "Saldo Gratis"),
+    ("start", "🚀 Memulai bot"),
+    ("layanan1", "📋 List Layanan Server 1"),
+    ("layanan2", "📋 List Layanan Server 2"),
+    ("layanan3", "📋 List Layanan Server 3"),
+    ("deposit", "💳 Deposit Saldo"),
+    ("checkin", "🎁 Check-in Harian"),
 ]
 
 
@@ -9019,6 +9027,11 @@ def run():
 
     )
 
+    # Command menu utama sesuai daftar AZHURA. Command /server1 dan /server2
+    # tetap dipertahankan sebagai kompatibilitas untuk pengguna lama.
+    application.add_handler(CommandHandler("layanan1", lambda u, c: command_server(u, c, "5sim")))
+    application.add_handler(CommandHandler("layanan2", lambda u, c: command_server(u, c, "rumahotp")))
+    application.add_handler(CommandHandler("layanan3", lambda u, c: command_server(u, c, "premotp")))
     application.add_handler(CommandHandler("server1", lambda u, c: command_server(u, c, "5sim")))
     application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "rumahotp")))
     application.add_handler(CommandHandler("deposit", command_deposit))
