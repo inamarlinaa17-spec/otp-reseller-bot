@@ -133,7 +133,6 @@ from nokos import (
     get_services as get_nokos_services,
     get_service_countries as get_nokos_service_countries,
     get_price_options as get_nokos_price_options,
-    get_operators as get_nokos_operators,
     buy_number as buy_nokos_number,
     get_sms as get_nokos_sms,
     complete_number as complete_nokos_number,
@@ -1474,10 +1473,7 @@ def get_service_catalog(server):
             if code and code.lower() not in seen:
                 catalog.append((code, label))
                 seen.add(code.lower())
-        # Server 3 must NEVER fall back to the static Server 1-style catalog.
-        # If Nokosnesia is unavailable, keep the result empty so the UI can
-        # show that its own live catalog could not be loaded.
-        return catalog
+        return catalog or list(OTP_SERVICES)
 
     if server == "rumahotp":
         # Server 2 must follow the live RumahOTP catalog. The old static
@@ -1539,19 +1535,6 @@ async def show_service_page(
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"otp_server:{server}"),
                 InlineKeyboardButton("⬅️ Kembali", callback_data="order"),
-            ]])
-        )
-        return
-
-    if server == "nokos" and not services:
-        await query.edit_message_text(
-            "⚠️ <b>Katalog Server 3 tidak dapat dimuat.</b>\n\n"
-            "Data layanan sedang tidak tersedia dari Nokosnesia.\n"
-            "Silakan tekan Refresh untuk mengambil katalog Nokosnesia kembali.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Refresh", callback_data="otp_server:nokos"),
-                InlineKeyboardButton("⬅️ Pilih Server", callback_data="order"),
             ]])
         )
         return
@@ -1929,23 +1912,7 @@ async def _get_otp_operator_names(server, country, service):
         return sorted(names.values(), key=str.lower)
 
     if server == "nokos":
-        try:
-            rows = await asyncio.wait_for(
-                asyncio.to_thread(get_nokos_operators, country, service),
-                timeout=8,
-            )
-        except Exception:
-            logger.exception("Nokosnesia operator lookup failed")
-            rows = []
-        names = {}
-        for item in rows or []:
-            oid = str(item.get("id") or item.get("operator_id") or "").strip()
-            name = str(item.get("name") or item.get("operator_name") or "").strip()
-            if not oid or not name:
-                continue
-            key = name.lower().replace("_", " ").strip()
-            names[key] = f"{name}||{oid}"
-        return sorted(names.values(), key=lambda x: x.split("||", 1)[0].lower())
+        return []
 
     if server == "rumahotp":
         try:
@@ -2015,11 +1982,10 @@ async def show_otp_operator_page(query, server, service, country, page=0):
     for i in range(0, len(page_items), 2):
         row = []
         for op in page_items[i:i + 2]:
-            raw_op = str(op)
-            label = raw_op.split("||", 1)[0].replace("_", " ").title()
+            label = str(op).replace("_", " ").title()
             row.append(InlineKeyboardButton(
                 f"📡 {label}",
-                callback_data=f"otp_operator:{server}:{service}:{country}:{raw_op}",
+                callback_data=f"otp_operator:{server}:{service}:{country}:{op}",
             ))
         if row:
             keyboard.append(row)
@@ -2160,13 +2126,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
                 rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
 
     elif server == "nokos":
-        operator_id = None
-        if operator and operator != "any":
-            if "||" in str(operator):
-                _op_name, operator_id = str(operator).split("||", 1)
-            elif str(operator).isdigit():
-                operator_id = str(operator)
-        live = await asyncio.to_thread(get_nokos_price_options, country, service, operator_id)
+        live = await asyncio.to_thread(get_nokos_price_options, country, service)
         grouped = {}
         for item in live or []:
             try:
@@ -2189,7 +2149,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
             save_otp_quote(
                 quote_id=quote_id, telegram_id=user_id, provider="nokos",
                 country=str(country), country_name=display_country, service=str(service),
-                operator=(str(operator) if operator and operator != "any" else "any"), pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
+                operator="any", pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
                 cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
             )
             rows.append({"_display": (format_rupiah(sell), int(group["stock"]), quote_id)})
@@ -2232,7 +2192,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     await query.edit_message_text(
         "💰 <b>PILIH HARGA / STOCK</b>\n\n"
         f"{country_flag(display_country)} Negara: <b>{escape(display_country)}</b>\n"
-        f"📡 Operator: <b>{escape('Semua Operator (Acak)' if operator == 'any' else (str(operator).split('||', 1)[0] if '||' in str(operator) else str(operator)))}</b>\n"
+        f"📡 Operator: <b>{escape('Semua Operator (Acak)' if operator == 'any' else operator)}</b>\n"
         f"📱 Layanan: <b>{escape(str(service_label))}</b>\n\n"
         "Harga diurutkan dari yang paling rendah.",
         parse_mode="HTML",
@@ -2399,7 +2359,7 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
             save_otp_quote(
                 quote_id=quote_id, telegram_id=user_id, provider="nokos",
                 country=str(country), country_name=display_country, service=str(service),
-                operator=(str(operator) if operator and operator != "any" else "any"), pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
+                operator="any", pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
                 cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
             )
             keyboard.append([InlineKeyboardButton(
@@ -3203,18 +3163,7 @@ async def command_server(update, context, server):
             asyncio.to_thread(get_service_catalog, server), timeout=15
         )
     except Exception:
-        services = [] if server == "nokos" else list(OTP_SERVICES)
-    if server == "nokos" and not services:
-        await update.message.reply_text(
-            "⚠️ <b>Katalog Server 3 tidak dapat dimuat.</b>\n\n"
-            "Data layanan sedang tidak tersedia dari Nokosnesia. Silakan coba lagi.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Coba Lagi", callback_data="otp_server:nokos"),
-                InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
-            ]]),
-        )
-        return
+        services = list(OTP_SERVICES)
     await update.message.reply_text(
         "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
         f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"
