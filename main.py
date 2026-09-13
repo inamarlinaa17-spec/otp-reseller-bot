@@ -971,7 +971,11 @@ def premotp_webhook():
                 return jsonify({"received": True, "ignored": True}), 200
             if deposit.get("status") == "SUCCESS":
                 return jsonify({"received": True, "already_paid": True}), 200
-            result = complete_deposit_payment(deposit["deposit_id"], str(qris_id or ref_id or deposit["deposit_id"]), int(deposit["amount"]))
+            result = complete_deposit_payment(
+                deposit["deposit_id"],
+                str(qris_id or ref_id or deposit["deposit_id"]),
+                int(deposit["amount"]),
+            )
             if result.get("completed"):
                 send_telegram_message(
                     result["telegram_id"],
@@ -1607,6 +1611,39 @@ def get_service_catalog(server):
             if code and code.lower() not in seen:
                 catalog.append((code, label))
                 seen.add(code.lower())
+
+        # PremOTP returns its catalog in provider/database order, which is not
+        # the same as AZHURA's preferred customer-facing order. Put the most
+        # commonly purchased services first so page 1 is immediately useful.
+        # We deliberately do NOT hard-code the catalog itself: every service
+        # still comes from PremOTP and this only changes presentation order.
+        priority_terms = [
+            (0, ("whatsapp", "wa")),
+            (1, ("shopee",)),
+            (2, ("tiktok",)),
+            (3, ("gmail", "google", "youtube")),
+            (4, ("telegram",)),
+            (5, ("facebook",)),
+            (6, ("instagram",)),
+            (7, ("tokopedia",)),
+            (8, ("gojek",)),
+            (9, ("grab",)),
+            (10, ("dana",)),
+            (11, ("discord",)),
+            (12, ("lazada",)),
+            (13, ("blibli",)),
+            (14, ("twitter", "x.com", "x twitter")),
+        ]
+
+        def _premotp_service_rank(item):
+            code, label = item
+            text = f"{code} {label}".lower().replace("_", " ").replace("-", " ")
+            for rank, terms in priority_terms:
+                if any(term in text for term in terms):
+                    return (rank, text)
+            return (1000, text)
+
+        catalog.sort(key=_premotp_service_rank)
         return catalog
 
     return list(OTP_SERVICES)
@@ -3985,6 +4022,104 @@ async def auto_process_pending_orders(application):
 
 
 # =========================================================
+# PREMOTP QRIS RECONCILIATION
+# =========================================================
+
+async def reconcile_pending_premotp_qris(application):
+    """Fallback for qris.paid webhook delivery.
+
+    PremOTP documents GET /v1/qris/:id and allows the ID or ref_id to be used.
+    Webhooks remain the primary path, but polling prevents a correctly paid QRIS
+    from getting stuck when the webhook URL is not configured or a delivery is
+    temporarily unavailable. Only PENDING PREMOTP_QRIS deposits are queried.
+    """
+    while True:
+        try:
+            with get_db() as db:
+                rows = db.execute(
+                    """
+                    SELECT deposit_id, telegram_id, amount, payment_reference, external_id, status
+                    FROM deposits
+                    WHERE payment_method = 'PREMOTP_QRIS'
+                      AND status = 'PENDING'
+                      AND payment_reference IS NOT NULL
+                    ORDER BY created_at ASC
+                    LIMIT 25
+                    """
+                ).fetchall()
+
+            for row in rows:
+                lookup_id = str(row.get("payment_reference") or row.get("external_id") or row["deposit_id"]).strip()
+                if not lookup_id:
+                    continue
+                try:
+                    data = await asyncio.to_thread(get_premotp_qris, lookup_id)
+                    if not isinstance(data, dict):
+                        continue
+
+                    status = str(
+                        data.get("status")
+                        or data.get("payment_status")
+                        or data.get("state")
+                        or ""
+                    ).strip().lower()
+
+                    # Some API responses nest the transaction under data/payment.
+                    if not status:
+                        nested = data.get("data") or data.get("payment") or {}
+                        if isinstance(nested, dict):
+                            status = str(
+                                nested.get("status")
+                                or nested.get("payment_status")
+                                or nested.get("state")
+                                or ""
+                            ).strip().lower()
+
+                    if status in {"paid", "success", "settlement", "settled", "completed"}:
+                        # The amount to credit is AZHURA's requested deposit amount,
+                        # not PremOTP's customer-facing total_payment (which may
+                        # include a payment fee). PremOTP docs explicitly state that
+                        # amount enters the wallet after total_payment is paid.
+                        result = complete_deposit_payment(
+                            row["deposit_id"],
+                            lookup_id,
+                            int(row["amount"]),
+                        )
+                        if result.get("completed"):
+                            send_telegram_message(
+                                result["telegram_id"],
+                                f"✅ <b>DEPOSIT BERHASIL</b>\n\n"
+                                f"💰 Deposit: <b>{format_rupiah(result['amount'])}</b>\n"
+                                + (f"🎁 Bonus 10%: <b>{format_rupiah(result['bonus'])}</b>\n" if result.get("bonus") else "")
+                                + f"💳 Status: <b>PAID</b>\n"
+                                f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>",
+                            )
+                            logger.info(
+                                "[PREMOTP QRIS] deposit paid via status polling deposit=%s qris=%s",
+                                row["deposit_id"], lookup_id,
+                            )
+                    elif status in {"expired", "cancelled", "canceled", "failed", "error", "void"}:
+                        with get_db() as db:
+                            db.execute(
+                                "UPDATE deposits SET status='FAILED', confirmed_at=%s WHERE deposit_id=%s AND status='PENDING'",
+                                (now(), row["deposit_id"]),
+                            )
+                        logger.info(
+                            "[PREMOTP QRIS] invoice ended without payment deposit=%s status=%s",
+                            row["deposit_id"], status,
+                        )
+                except Exception:
+                    logger.exception(
+                        "[PREMOTP QRIS] status polling failed deposit=%s qris=%s",
+                        row["deposit_id"], lookup_id,
+                    )
+        except Exception:
+            logger.exception("[PREMOTP QRIS] reconciliation loop failed")
+
+        await asyncio.sleep(10)
+
+
+# =========================================================
 # RUMAHOTP REFUND RECONCILIATION
 # =========================================================
 
@@ -4057,6 +4192,7 @@ async def post_init(application):
     # inconsistencies. It does not touch user balances.
     application.create_task(reconcile_refunded_rumahotp_orders())
     application.create_task(auto_process_pending_orders(application))
+    application.create_task(reconcile_pending_premotp_qris(application))
 
 
 # =========================================================
