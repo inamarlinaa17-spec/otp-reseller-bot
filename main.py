@@ -127,6 +127,19 @@ from rumahotp import (
     resend_otp as resend_rumahotp_otp
 )
 
+from nokos import (
+    check_api as check_nokos_api,
+    get_balance as get_nokos_balance,
+    get_services as get_nokos_services,
+    get_service_countries as get_nokos_service_countries,
+    get_price_options as get_nokos_price_options,
+    buy_number as buy_nokos_number,
+    get_sms as get_nokos_sms,
+    complete_number as complete_nokos_number,
+    cancel_number as cancel_nokos_number,
+    resend_otp as resend_nokos_otp,
+)
+
 
 # =========================================================
 # KONFIGURASI
@@ -159,7 +172,7 @@ logger = logging.getLogger(__name__)
 # This does not change order logic; it only prevents the Telegram callback from
 # remaining stuck when the provider has already issued the number.
 _RUNTIME_PROVIDER_CACHE = {}
-_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0}
+_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "nokos": 0.0}
 _AUTO_POLL_CURSOR = 0
 
 
@@ -199,6 +212,7 @@ COUNTRY_QUOTES_PER_PAGE = 8
 OTP_SERVERS = {
     "5sim": "⚡ Server 1 — JOS🔥",
     "rumahotp": "⚡ Server 2 — ELIT HIGH STOCK",
+    "nokos": "⚡ Server 3 — HIGH STOCK",
 }
 
 
@@ -379,6 +393,17 @@ def rumah_service_label(service):
     found = find_rumahotp_service(service)
     if found:
         return str(found.get("name") or service).strip()
+    return str(service).strip()
+
+
+def nokos_service_label(service):
+    try:
+        target = str(service or "").strip().lower()
+        for item in get_nokos_services() or []:
+            if str(item.get("service_code") or "").strip().lower() == target:
+                return str(item.get("service_name") or service).strip()
+    except Exception:
+        pass
     return str(service).strip()
 
 
@@ -1346,6 +1371,13 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
+                "Server 3",
+                callback_data="otp_server:nokos"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
                 "🏠 Menu Utama",
                 callback_data="user_home"
             )
@@ -1360,6 +1392,8 @@ async def show_server_page(
         "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
         "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
         "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
+        "⚡ <b>SERVER 3 — HIGH STOCK</b>\n"
+        "Server alternatif dengan dua jalur stok untuk membantu mendapatkan nomor yang tersedia.\n\n"
         "Silakan pilih server melalui tombol di bawah ini :",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1427,6 +1461,19 @@ def get_service_catalog(server):
                     seen.add(code.lower())
 
         return catalog
+
+    if server == "nokos":
+        catalog = []
+        seen = set()
+        for item in get_nokos_services() or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("service_code") or item.get("code") or "").strip()
+            label = str(item.get("service_name") or item.get("name") or code).strip()
+            if code and code.lower() not in seen:
+                catalog.append((code, label))
+                seen.add(code.lower())
+        return catalog or list(OTP_SERVICES)
 
     if server == "rumahotp":
         # Server 2 must follow the live RumahOTP catalog. The old static
@@ -1687,6 +1734,8 @@ def get_service_countries(server, service):
         return _country_items_5sim(service)
     if server == "rumahotp":
         return _country_items_rumahotp(service)
+    if server == "nokos":
+        return get_nokos_service_countries(service)
     return []
 
 
@@ -1862,6 +1911,9 @@ async def _get_otp_operator_names(server, country, service):
                 names.setdefault(key, display)
         return sorted(names.values(), key=str.lower)
 
+    if server == "nokos":
+        return []
+
     if server == "rumahotp":
         try:
             rows = await asyncio.wait_for(
@@ -1905,7 +1957,11 @@ async def _get_otp_operator_names(server, country, service):
 
 async def show_otp_operator_page(query, server, service, country, page=0):
     """Operator selection shown after country, matching the reference UI."""
-    service_label = rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, str(service).title())
+    service_label = (
+        rumah_service_label(service) if server == "rumahotp"
+        else nokos_service_label(service) if server == "nokos"
+        else dict(OTP_SERVICES).get(service, str(service).title())
+    )
     display_country = str(country)
     names = await _get_otp_operator_names(server, country, service)
 
@@ -1958,7 +2014,11 @@ async def show_otp_operator_page(query, server, service, country, page=0):
 
 async def show_otp_price_page(query, user_id, server, service, country, operator="any", page=0):
     """Show price/stock tiers, 2 columns, always cheapest first."""
-    service_label = rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, str(service).title())
+    service_label = (
+        rumah_service_label(service) if server == "rumahotp"
+        else nokos_service_label(service) if server == "nokos"
+        else dict(OTP_SERVICES).get(service, str(service).title())
+    )
     display_country = str(country)
     operator = str(operator or "any")
     rows = []
@@ -2064,6 +2124,35 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
                     cost_usd=cost_idr / float(KURS_DOLAR), stock=stock,
                 )
                 rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
+
+    elif server == "nokos":
+        live = await asyncio.to_thread(get_nokos_price_options, country, service)
+        grouped = {}
+        for item in live or []:
+            try:
+                cost_idr = float(item.get("cost_idr") or 0)
+                stock = int(item.get("stock") or 0)
+            except Exception:
+                continue
+            if cost_idr <= 0 or stock <= 0:
+                continue
+            sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+            key = sell
+            group = grouped.setdefault(key, {"cost_idr": cost_idr, "stock": 0, "products": []})
+            group["cost_idr"] = min(float(group["cost_idr"]), cost_idr)
+            group["stock"] += stock
+            group["products"].append(item)
+        rows = []
+        for sell in sorted(grouped):
+            group = grouped[sell]
+            quote_id = "3Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id, telegram_id=user_id, provider="nokos",
+                country=str(country), country_name=display_country, service=str(service),
+                operator="any", pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
+                cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
+            )
+            rows.append({"_display": (format_rupiah(sell), int(group["stock"]), quote_id)})
 
     if not rows:
         await query.edit_message_text(
@@ -2242,6 +2331,41 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
                 "⚡ Server 2"
             )
             keyboard.append([InlineKeyboardButton(label, callback_data=f"otp_quote:{quote_id}")])
+            available += 1
+
+    elif source_server == "nokos":
+        try:
+            offers = await asyncio.to_thread(get_nokos_price_options, country, service)
+        except Exception:
+            logger.exception("Nokosnesia offer lookup failed")
+            offers = []
+        grouped = {}
+        for item in offers or []:
+            try:
+                cost_idr = float(item.get("cost_idr") or 0)
+                stock = int(item.get("stock") or 0)
+            except Exception:
+                continue
+            if cost_idr <= 0 or stock <= 0:
+                continue
+            sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+            group = grouped.setdefault(sell_price, {"cost_idr": cost_idr, "stock": 0, "products": []})
+            group["cost_idr"] = min(float(group["cost_idr"]), cost_idr)
+            group["stock"] += stock
+            group["products"].append(item)
+        for sell_price in sorted(grouped):
+            group = grouped[sell_price]
+            quote_id = "3Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id, telegram_id=user_id, provider="nokos",
+                country=str(country), country_name=display_country, service=str(service),
+                operator="any", pool=json.dumps({"products": group["products"]}, separators=(",", ":")),
+                cost_usd=float(group["cost_idr"]) / float(KURS_DOLAR), stock=int(group["stock"]),
+            )
+            keyboard.append([InlineKeyboardButton(
+                f"💰 {format_rupiah(sell_price)} • 📦 {int(group['stock'])}\n⚡ Server 3",
+                callback_data=f"otp_quote:{quote_id}",
+            )])
             available += 1
 
     if not available:
@@ -3270,6 +3394,8 @@ def _payment_method_maintenance_text(method):
 
 
 def _is_server_enabled(server):
+    if server == "nokos":
+        return True
     key = "server1_enabled" if server == "5sim" else "server2_enabled"
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
 
@@ -3544,7 +3670,12 @@ async def _auto_expire_order(application, order, provider_order_id):
         logger.warning("[AUTO EXPIRE] provider order id missing order=%s; refund blocked", order_id)
         return
 
-    canceler = cancel_rumahotp_number if provider == "rumahotp" else cancel_number
+    if provider == "rumahotp":
+        canceler = cancel_rumahotp_number
+    elif provider == "nokos":
+        canceler = cancel_nokos_number
+    else:
+        canceler = cancel_number
     result = await asyncio.to_thread(canceler, provider_order_id)
     if not result or result.get("response") != "OK":
         logger.warning(
@@ -3640,15 +3771,20 @@ async def auto_process_pending_orders(application):
                         runtime = _RUNTIME_PROVIDER_CACHE.get(selected["order_id"]) or {}
                         provider_order_id = str(selected.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
                         if provider_order_id:
-                            checker = get_rumahotp_sms if provider == "rumahotp" else get_sms
+                            if provider == "rumahotp":
+                                checker = get_rumahotp_sms
+                            elif provider == "nokos":
+                                checker = get_nokos_sms
+                            else:
+                                checker = get_sms
                             try:
                                 data_sms = await asyncio.to_thread(checker, provider_order_id)
                                 if data_sms and data_sms.get("response") != "ERROR":
                                     await _send_otp_received_message(application, selected["order_id"], data_sms)
                             except Exception:
                                 logger.exception("[AUTO OTP] polling failed order=%s", selected["order_id"])
-                            # 2.2 seconds => at most 4-5 requests in a rolling 10s window.
-                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + 2.2
+                            # Keep provider polling comfortably below documented read limits.
+                            _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + (3.2 if provider == "nokos" else 2.2)
                         else:
                             # Provider order data may still be finishing its DB save.
                             _AUTO_POLL_NEXT[provider] = now_mono + 1.0
@@ -3749,7 +3885,11 @@ async def process_otp_order(
 ):
     """Order OTP dari provider terpilih dengan margin sesuai PROFIT_PERCENT (default 7%)."""
 
-    service_label = (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, service))
+    service_label = (
+        rumah_service_label(service) if server == "rumahotp"
+        else nokos_service_label(service) if server == "nokos"
+        else dict(OTP_SERVICES).get(service, service)
+    )
     display_country = country
 
     # -----------------------------------------------------
@@ -3946,6 +4086,43 @@ async def process_otp_order(
             not result or result.get("response") == "ERROR"
         )
         error_reason = "Pembelian nomor Server 2 gagal."
+    elif server == "nokos":
+        products = []
+        if quote and quote.get("pool"):
+            try:
+                meta = json.loads(quote.get("pool") or "{}")
+                products = meta.get("products") or []
+            except Exception:
+                products = []
+        if not products:
+            try:
+                products = await asyncio.to_thread(get_nokos_price_options, country, service)
+            except Exception:
+                products = []
+        # Try the cheapest quoted product first, then other products in the
+        # same displayed price tier if the provider reports stock/availability
+        # failure. No other AZHURA provider flow is touched.
+        products = sorted(
+            [p for p in products if isinstance(p, dict)],
+            key=lambda p: (float(p.get("cost_idr") or 0), -int(p.get("stock") or 0)),
+        )
+        result = None
+        for idx, product in enumerate(products):
+            candidate = await asyncio.to_thread(
+                buy_nokos_number, country, service, operator or "any", product, f"{order_id}-nokos-{idx}"
+            )
+            result = candidate
+            if candidate and candidate.get("response") != "ERROR" and (candidate.get("id") or candidate.get("order_id")) and candidate.get("phone"):
+                break
+            error_text = str((candidate or {}).get("error") or "").lower()
+            retryable_stock = any(x in error_text for x in ("stock", "stok", "available", "availability", "tersedia", "provider"))
+            if idx + 1 >= len(products) or not retryable_stock:
+                break
+        provider_order_id = (result.get("id") or result.get("order_id")) if result else None
+        phone = result.get("phone") if result else None
+        provider_expired_at = result.get("expired_at") if result else None
+        provider_error = not result or result.get("response") == "ERROR"
+        error_reason = "Pembelian nomor Server 3 gagal."
     else:
         provider_expired_at = None
         provider_error = True
@@ -5467,6 +5644,63 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
+        # Server 3 (Nokos): provider-side resend uses setStatus status=3.
+        if provider == "nokos":
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(resend_nokos_otp, provider_order_id), timeout=12.0
+                )
+            except asyncio.TimeoutError:
+                await query.edit_message_text(
+                    "⚠️ <b>Resend OTP belum mendapat respons.</b>\n\nSilakan tekan <b>Resend OTP</b> lagi beberapa saat kemudian.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                    ]),
+                )
+                return
+            if not result or result.get("response") != "OK":
+                await query.edit_message_text(
+                    "⚠️ <b>Resend OTP gagal.</b>\n\nNokos tidak mengonfirmasi permintaan resend. Silakan coba lagi beberapa saat kemudian.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                    ]),
+                )
+                return
+            changed = await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
+            if not changed:
+                await query.edit_message_text(
+                    "⚠️ <b>Resend belum dapat diproses.</b>\n\nSilakan coba lagi beberapa saat kemudian.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                        [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                    ]),
+                )
+                return
+            current = get_order(order_id) or order
+            runtime = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
+            service_name = current.get("service_name") or current.get("service") or "-"
+            country_name = current.get("country_name") or current.get("country") or "-"
+            phone = current.get("phone") or runtime.get("phone") or "-"
+            expired_at = current.get("expired_at") or runtime.get("expired_at")
+            waiting_text = (
+                "⏳ <b>MENUNGGU SMS OTP...</b>\n\n"
+                f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                f"📱 Layanan: <b>{escape(str(service_name))}</b>\n"
+                f"🌐 Negara: <b>{escape(str(country_name))}</b>\n"
+                f"📞 Nomor: <code>{escape(str(phone))}</code>\n"
+                f"🕐 Transaksi: <b>{escape(format_datetime_wib(current.get('created_at')))}</b>\n"
+                f"⏰ Expired: <b>{escape(format_datetime_wib(expired_at))}</b>\n\n"
+                "⏳ <b>Menunggu SMS OTP...</b>\n"
+                "Kode OTP baru akan ditampilkan otomatis saat benar-benar diterima."
+            )
+            await query.edit_message_text(waiting_text, parse_mode="HTML", reply_markup=None)
+            return
+
         # Server 1 (5SIM): there is no official resend operation for an
         # existing activation. Do NOT call /reuse here: /reuse creates a
         # new activation and may charge the provider again; it is not a
@@ -5569,7 +5803,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
-        finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
+        if provider == "rumahotp":
+            finisher = complete_rumahotp_number
+        elif provider == "nokos":
+            finisher = complete_nokos_number
+        else:
+            finisher = finish_number
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(finisher, provider_order_id),
@@ -5737,6 +5976,8 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         if provider == "rumahotp":
             canceler = cancel_rumahotp_number
+        elif provider == "nokos":
+            canceler = cancel_nokos_number
         else:
             canceler = cancel_number
 
@@ -6624,6 +6865,7 @@ ADMIN_PAGE_SIZE = 8
 ADMIN_PROVIDER_NAMES = {
     "5sim": "5SIM",
     "rumahotp": "RUMAHOTP",
+    "nokos": "NOKOS",
 }
 ADMIN_SEARCH_USERS = set()
 ADMIN_SEARCH_DEPOSITS = set()
@@ -6813,6 +7055,8 @@ async def _admin_cancel_order(query, context, order_id):
     try:
         if provider == "rumahotp":
             cancel_result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
+        elif provider == "nokos":
+            cancel_result = await asyncio.to_thread(cancel_nokos_number, provider_order_id)
         elif provider == "5sim":
             cancel_result = await asyncio.to_thread(cancel_number, provider_order_id)
         else:
@@ -7466,11 +7710,13 @@ async def admin_callback(
         checks = await asyncio.gather(
             asyncio.to_thread(check_5sim_api),
             asyncio.to_thread(check_rumahotp_api),
+            asyncio.to_thread(check_nokos_api),
             return_exceptions=True,
         )
         balances = await asyncio.gather(
             asyncio.to_thread(get_5sim_balance),
             asyncio.to_thread(get_rumahotp_balance),
+            asyncio.to_thread(get_nokos_balance),
             return_exceptions=True,
         )
 
@@ -7483,14 +7729,16 @@ async def admin_callback(
             except Exception:
                 return 0.0
 
-        b1, b2 = [money(x) for x in balances]
+        b1, b2, b3 = [money(x) for x in balances]
         s1 = "🟢 CONNECTED" if ok(checks[0]) else "🔴 OFFLINE"
         s2 = "🟢 CONNECTED" if ok(checks[1]) else "🔴 OFFLINE"
+        s3 = "🟢 CONNECTED" if ok(checks[2]) else "🔴 OFFLINE"
 
         await query.edit_message_text(
             "💰 <b>PROVIDER STATUS</b>\n\n"
             f"⚡ <b>Server 1 — {ADMIN_PROVIDER_NAMES['5sim']}</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
             f"⚡ <b>Server 2 — {ADMIN_PROVIDER_NAMES['rumahotp']}</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
+            f"⚡ <b>Server 3 — {ADMIN_PROVIDER_NAMES['nokos']}</b>\n{s3}\n💵 Saldo: <b>Rp{b3:,.0f}</b>\n\n"
             f"💱 Kurs otomatis: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
             f"💵 Kurs jual + margin: <b>Rp{KURS_DOLAR * (1 + PROFIT_PERCENT / 100):,.2f} / USD</b>\n"
             f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
