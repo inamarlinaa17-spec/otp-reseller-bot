@@ -1392,7 +1392,7 @@ async def show_server_page(
         "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
         "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
         "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
-        "⚡ <b>SERVER 3 — SERVER ALTERNATIF</b>\n"
+        "⚡ <b>SERVER 3 — HIGH STOCK</b>\n"
         "Server alternatif dengan dua jalur stok untuk membantu mendapatkan nomor yang tersedia.\n\n"
         "Silakan pilih server melalui tombol di bawah ini :",
         parse_mode="HTML",
@@ -3394,19 +3394,13 @@ def _payment_method_maintenance_text(method):
 
 
 def _is_server_enabled(server):
-    key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "nokos": "server3_enabled"}.get(server)
-    if not key:
-        return False
+    if server == "nokos":
+        return True
+    key = "server1_enabled" if server == "5sim" else "server2_enabled"
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
 
 
 def _server_maintenance_text(server):
-    if server == "nokos":
-        return (
-            "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
-            "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
-            "Silakan gunakan Server 1 atau Server 2 atau coba kembali beberapa saat lagi. 🙏"
-        )
     if server == "5sim":
         return (
             "⚠️ Server 1 Sedang Dalam Maintenance\n\n"
@@ -7437,47 +7431,50 @@ async def admin_callback(
         await _admin_user_ledger(query, telegram_id)
 
     elif query.data == "admin_server_maintenance":
-        states = {s: _is_server_enabled(s) for s in ("5sim", "rumahotp", "nokos")}
-        labels = {s: ("🟢 ON" if states[s] else "🔴 OFF") for s in states}
+        server1_enabled = _is_server_enabled("5sim")
+        server2_enabled = _is_server_enabled("rumahotp")
+        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
+        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
+            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
-            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
-            f"⚡ Server 3: <b>{labels['nokos']}</b>",
+            f"⚡ Server 1: <b>{server1_label}</b>\n"
+            f"⚡ Server 2: <b>{server2_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
-                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nokos']}", callback_data="admin_server_toggle:nokos")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
 
     elif query.data.startswith("admin_server_toggle:"):
         server = query.data.split(":", 1)[1].strip().lower()
-        if server not in {"5sim", "rumahotp", "nokos"}:
+        if server not in {"5sim", "rumahotp"}:
             await query.answer("Server tidak valid.", show_alert=True)
             return
-        key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "nokos": "server3_enabled"}[server]
+        key = "server1_enabled" if server == "5sim" else "server2_enabled"
         current = _is_server_enabled(server)
         set_bot_setting(key, "0" if current else "1")
-        await query.answer(("Server diaktifkan." if not current else "Server dimatikan."), show_alert=False)
-        states = {s: _is_server_enabled(s) for s in ("5sim", "rumahotp", "nokos")}
-        labels = {s: ("🟢 ON" if states[s] else "🔴 OFF") for s in states}
+        await query.answer(
+            ("Server diaktifkan." if not current else "Server dimatikan."),
+            show_alert=False
+        )
+        server1_enabled = _is_server_enabled("5sim")
+        server2_enabled = _is_server_enabled("rumahotp")
+        server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
+        server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
+            "Atur maintenance Server 1 dan Server 2 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
-            f"⚡ Server 1: <b>{labels['5sim']}</b>\n"
-            f"⚡ Server 2: <b>{labels['rumahotp']}</b>\n"
-            f"⚡ Server 3: <b>{labels['nokos']}</b>",
+            f"⚡ Server 1: <b>{server1_label}</b>\n"
+            f"⚡ Server 2: <b>{server2_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {labels['5sim']}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {labels['rumahotp']}", callback_data="admin_server_toggle:rumahotp")],
-                [InlineKeyboardButton(f"⚡ Server 3 — {labels['nokos']}", callback_data="admin_server_toggle:nokos")],
+                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
