@@ -101,6 +101,7 @@ from provider import (
     get_price_options,
     get_price_options_for_operator,
     hitung_harga_jual,
+    hitung_harga_jual_idr,
     buy_number,
     buy_number_any_operator,
     get_sms,
@@ -2407,7 +2408,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
                     pass
             rows = sorted(grouped.values(), key=lambda x: x["cost_idr"])
             for group in rows:
-                sell = int(round(group["cost_idr"] * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+                sell = hitung_harga_jual_idr(group["cost_idr"])
                 quote_id = "2Q-" + uuid.uuid4().hex[:12].upper()
                 save_otp_quote(
                     quote_id=quote_id, telegram_id=user_id, provider="rumahotp",
@@ -2433,7 +2434,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
             for q in filtered:
                 cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
                 stock = int(q.get("stock") or 0)
-                sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+                sell = hitung_harga_jual_idr(cost_idr)
                 quote_id = "2Q-" + uuid.uuid4().hex[:12].upper()
                 save_otp_quote(
                     quote_id=quote_id, telegram_id=user_id, provider="rumahotp",
@@ -2470,7 +2471,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
             if stock <= 0:
                 # Some PremOTP offers expose stock at country level only.
                 stock = 1
-            sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+            sell = hitung_harga_jual_idr(cost_idr)
             quote_id = "3Q-" + uuid.uuid4().hex[:12].upper()
             save_otp_quote(
                 quote_id=quote_id, telegram_id=user_id, provider="premotp",
@@ -2616,7 +2617,7 @@ async def show_server_choice_page(query, user_id, service, country, source_serve
                 continue
             if cost_idr <= 0 or stock <= 0:
                 continue
-            sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+            sell_price = hitung_harga_jual_idr(cost_idr)
             group = grouped.setdefault(sell_price, {"cost_idr": cost_idr, "stock": 0, "quotes": []})
             group["stock"] += stock
             group["quotes"].append(q)
@@ -2696,7 +2697,7 @@ async def show_rumahotp_operator_page(query, user_id, quote):
     country = str(quote.get("country") or "")
     country_name = str(quote.get("country_name") or country)
     base_cost_idr = float(quote.get("cost_usd") or 0) * float(KURS_DOLAR)
-    target_sell = int(round(base_cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+    target_sell = hitung_harga_jual_idr(base_cost_idr)
 
     try:
         operator_quotes = await asyncio.wait_for(
@@ -2717,7 +2718,7 @@ async def show_rumahotp_operator_page(query, user_id, quote):
             continue
         if cost_idr <= 0:
             continue
-        sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        sell = hitung_harga_jual_idr(cost_idr)
         name = str(item.get("provider_operator") or item.get("operator") or "").strip()
         if sell != target_sell or not name or name.lower() in {"any", "all", "auto", "automatic", "-"}:
             continue
@@ -2814,7 +2815,7 @@ async def show_rumahotp_quote_page(query, service, country, page=0):
             stock=int(q.get("stock") or 0)
         )
         cost_idr = float(q.get("cost_idr") or q.get("price_idr") or 0)
-        sell_price = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        sell_price = hitung_harga_jual_idr(cost_idr)
         stock = int(q.get("stock") or 0)
         server_id = str(q.get("server_id") or "2")
         provider_id = str(q.get("provider_id") or "-")
@@ -5301,7 +5302,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             operator_quotes = []
 
         base_cost_idr = float(base_quote.get("cost_usd") or 0) * float(KURS_DOLAR)
-        target_sell = int(round(base_cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100)
+        target_sell = hitung_harga_jual_idr(base_cost_idr)
         matching = []
         seen = set()
         for item in operator_quotes or []:
@@ -5310,7 +5311,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             except Exception:
                 continue
             name = str(item.get("provider_operator") or item.get("operator") or "").strip()
-            sell = int(round(cost_idr * (1 + PROFIT_PERCENT / 100) / 100) * 100) if cost_idr > 0 else 0
+            sell = hitung_harga_jual_idr(cost_idr) if cost_idr > 0 else 0
             key = (name.lower(), str(item.get("provider_id") or ""), str(item.get("pool") or ""))
             if cost_idr <= 0 or sell != target_sell or not name or name.lower() in {"any", "all", "auto", "automatic", "-"} or key in seen:
                 continue
@@ -8810,7 +8811,7 @@ async def text_handler(
             else:
                 if server == "rumahotp":
                     live_cost = float(item.get("cost_idr") or item.get("price_idr") or 0)
-                    price = int(round(live_cost * (1 + PROFIT_PERCENT / 100) / 100) * 100) if live_cost > 0 else 0
+                    price = hitung_harga_jual_idr(live_cost) if live_cost > 0 else 0
                     label = f"{country_flag(item.get('iso_code') or name)} {name} | mulai {format_rupiah(price)} | 📦 {stock}"
                     cb = f"otp_choose_server:{server}:{service}:{country}"
                 else:

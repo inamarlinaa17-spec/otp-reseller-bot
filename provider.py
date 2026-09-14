@@ -1,6 +1,7 @@
 import requests
 import time
 import threading
+from decimal import Decimal, ROUND_CEILING
 
 from config import (
     FIVESIM_API_KEY,
@@ -438,6 +439,23 @@ def get_cheapest_operator(
 # CALCULATE SELL PRICE
 # =========================================================
 
+def hitung_harga_jual_idr(
+    harga_modal_rp
+):
+    """Apply the configured profit margin to an IDR provider cost."""
+    try:
+        cost = Decimal(str(harga_modal_rp))
+        if cost <= 0:
+            return 0
+        margin = Decimal(str(PROFIT_PERCENT)) / Decimal("100")
+        sell = cost * (Decimal("1") + margin)
+        # Round up to the nearest whole rupiah so the configured margin
+        # is never lost because of rounding.
+        return int(sell.to_integral_value(rounding=ROUND_CEILING))
+    except Exception:
+        return 0
+
+
 def hitung_harga_jual(
     harga_dolar
 ):
@@ -455,26 +473,7 @@ def hitung_harga_jual(
         KURS_DOLAR
     )
 
-    keuntungan = (
-        harga_modal_rp *
-        (
-            PROFIT_PERCENT /
-            100
-        )
-    )
-
-    harga_jual = (
-        harga_modal_rp +
-        keuntungan
-    )
-
-    # Dibulatkan ke Rp100
-    return int(
-        round(
-            harga_jual /
-            100
-        ) * 100
-    )
+    return hitung_harga_jual_idr(harga_modal_rp)
 
 
 # =========================================================
