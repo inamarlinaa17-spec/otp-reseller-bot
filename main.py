@@ -4087,12 +4087,17 @@ async def _send_otp_received_message(application, order_id, data_sms):
 
 
 async def _auto_expire_order(application, order, provider_order_id):
-    """Cancel an expired active order first, then refund the user locally."""
+    """Cancel an expired active order first, then refund the user locally.
+
+    Return True only when the local refund completed.  An expired order that
+    cannot be cancelled at the provider must never block OTP polling for
+    other active orders.
+    """
     order_id = str(order.get("order_id"))
     provider = str(order.get("provider") or "5sim").strip().lower()
     if not provider_order_id:
         logger.warning("[AUTO EXPIRE] provider order id missing order=%s; refund blocked", order_id)
-        return
+        return False
 
     if provider == "rumahotp":
         canceler = cancel_rumahotp_number
@@ -4111,7 +4116,7 @@ async def _auto_expire_order(application, order, provider_order_id):
             "[AUTO EXPIRE] cancel not confirmed order=%s provider_order=%s result=%s",
             order_id, provider_order_id, result,
         )
-        return
+        return False
 
     try:
         refund = await asyncio.to_thread(
@@ -4121,7 +4126,7 @@ async def _auto_expire_order(application, order, provider_order_id):
         )
     except Exception:
         logger.exception("[AUTO EXPIRE] refund failed order=%s", order_id)
-        return
+        return False
 
     try:
         await application.bot.send_message(
@@ -4141,6 +4146,8 @@ async def _auto_expire_order(application, order, provider_order_id):
         )
     except Exception:
         logger.exception("[AUTO EXPIRE] failed to notify user order=%s", order_id)
+
+    return True
 
 
 async def auto_process_pending_orders(application):
@@ -4180,11 +4187,16 @@ async def auto_process_pending_orders(application):
                         provider_order_id = str(row.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
                         if _order_expired(row, runtime):
                             if provider_order_id:
-                                await _auto_expire_order(application, row, provider_order_id)
-                            expired_done = True
-                            break
+                                expired_done = await _auto_expire_order(application, row, provider_order_id)
+                                # Only stop this worker cycle when the expired
+                                # order was actually resolved. If provider
+                                # cancellation fails, immediately continue to
+                                # the normal OTP polling below so one stale
+                                # order can never starve 5SIM/RumahOTP/PremOTP.
+                                if expired_done:
+                                    break
                     if expired_done:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.2)
                         continue
 
                 # Round-robin across all pending orders/providers. Each provider
