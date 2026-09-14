@@ -4164,21 +4164,14 @@ async def auto_process_pending_orders(application):
                 ).fetchall()
 
             if rows:
-                # PremOTP orders must not wait behind a large backlog of old
-                # Server 2/other-provider PENDING rows. Prioritize a live
-                # PremOTP order first so its OTP reaches the user immediately.
+                # Poll every provider fairly. The previous PremOTP-priority
+                # shortcut could starve RumahOTP/5SIM while any PremOTP order
+                # remained pending, so Server 2 could stop receiving OTP checks.
                 selected = None
                 now_mono = asyncio.get_running_loop().time()
-                premotp_candidates = []
-                for candidate in rows:
-                    if str(candidate.get("provider") or "").strip().lower() == "premotp":
-                        runtime = _RUNTIME_PROVIDER_CACHE.get(candidate["order_id"]) or {}
-                        if not _order_expired(candidate, runtime):
-                            premotp_candidates.append(candidate)
-                if premotp_candidates and now_mono >= _AUTO_POLL_NEXT["premotp"]:
-                    selected = premotp_candidates[0]
 
-                # If no PremOTP order is due, first handle one expired order at
+                # First handle one expired order at a time so cancellation/refund
+                # verification remains safe.
                 # a time so cancellation/refund verification remains safe.
                 if selected is None:
                     expired_done = False
@@ -4194,8 +4187,9 @@ async def auto_process_pending_orders(application):
                         await asyncio.sleep(0.5)
                         continue
 
-                # Otherwise use the existing round-robin worker for Server 1/2
-                # and any remaining orders.
+                # Round-robin across all pending orders/providers. Each provider
+                # has its own minimum polling interval, so a busy provider cannot
+                # monopolize the worker and block the others.
                 total = len(rows)
                 if total and selected is None:
                     for offset in range(total):
@@ -4209,10 +4203,10 @@ async def auto_process_pending_orders(application):
                             _AUTO_POLL_CURSOR = (idx + 1) % total
                             break
 
-                # IMPORTANT: this block is outside the selection condition so a
-                # PremOTP order preselected above is actually polled.
+                # Polling below is shared by 5SIM, RumahOTP and PremOTP.
                 if selected:
                     provider = str(selected.get("provider") or "5sim").strip().lower()
+                    logger.info("[AUTO OTP] polling provider=%s order=%s", provider, selected.get("order_id"))
                     runtime = _RUNTIME_PROVIDER_CACHE.get(selected["order_id"]) or {}
                     provider_order_id = str(selected.get("provider_order_id") or runtime.get("provider_order_id") or "").strip()
                     if provider_order_id:
