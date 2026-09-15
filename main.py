@@ -185,6 +185,7 @@ _AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0}
 # are blocked while that countdown is running.
 CANCEL_PROCESSING_SECONDS = 120
 _ACTIVE_CANCEL_COUNTDOWNS = set()
+_CANCEL_COUNTDOWN_STATE = {}
 # Runtime reference used by the PremOTP Flask webhook to notify Telegram immediately.
 _WEBHOOK_APPLICATION = None
 _WEBHOOK_LOOP = None
@@ -4094,11 +4095,12 @@ async def _send_otp_received_message(application, order_id, data_sms):
 
 
 async def _auto_expire_order(application, order, provider_order_id):
-    """Cancel an expired active order first, then refund the user locally.
+    """Cancel an expired active order at the provider, verify cancellation, then refund locally.
 
-    Return True only when the local refund completed.  An expired order that
-    cannot be cancelled at the provider must never block OTP polling for
-    other active orders.
+    This is intentionally provider-aware: Server 1 (5SIM) and Server 3
+    (PremOTP) do not return the same ``response=OK`` envelope as RumahOTP.
+    A local refund is allowed only after an explicit provider-side cancelled
+    state is observed.
     """
     order_id = str(order.get("order_id"))
     provider = str(order.get("provider") or "5sim").strip().lower()
@@ -4106,20 +4108,93 @@ async def _auto_expire_order(application, order, provider_order_id):
         logger.warning("[AUTO EXPIRE] provider order id missing order=%s; refund blocked", order_id)
         return False
 
-    if provider == "rumahotp":
-        canceler = cancel_rumahotp_number
-    elif provider == "premotp":
-        canceler = cancel_premotp_order
-    else:
-        canceler = cancel_number
+    cancelled_states = {"cancel", "canceled", "cancelled", "canceled_by_user", "cancelled_by_user"}
+
+    def _status_values(value):
+        """Collect explicit status/state values from common provider response shapes."""
+        found = []
+        if isinstance(value, dict):
+            for key in ("status", "state", "order_status", "activation_status"):
+                item = value.get(key)
+                if item not in (None, ""):
+                    found.append(str(item).strip().lower())
+            for key in ("data", "result", "order", "activation"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    found.extend(_status_values(nested))
+        return found
+
+    async def _cancel_and_verify_5sim():
+        try:
+            result = await asyncio.to_thread(cancel_number, provider_order_id)
+        except Exception as exc:
+            logger.warning("[AUTO EXPIRE] 5SIM cancel request failed order=%s: %s", order_id, exc)
+            return False
+
+        statuses = _status_values(result)
+        if any(status in cancelled_states for status in statuses):
+            logger.info("[AUTO EXPIRE] 5SIM cancel confirmed order=%s status=%s", order_id, statuses)
+            return True
+
+        # 5SIM's cancel endpoint returns the activation object. If the cancel
+        # response is ambiguous, re-read the activation before allowing refund.
+        try:
+            verify = await asyncio.to_thread(get_sms, provider_order_id)
+        except Exception as exc:
+            logger.warning("[AUTO EXPIRE] 5SIM cancel verification failed order=%s: %s", order_id, exc)
+            return False
+        verify_statuses = _status_values(verify)
+        confirmed = any(status in cancelled_states for status in verify_statuses)
+        if confirmed:
+            logger.info("[AUTO EXPIRE] 5SIM cancel verified order=%s status=%s", order_id, verify_statuses)
+        else:
+            logger.warning("[AUTO EXPIRE] 5SIM cancel not confirmed order=%s result=%s verify=%s", order_id, result, verify)
+        return confirmed
+
+    async def _cancel_and_verify_premotp():
+        try:
+            result = await asyncio.to_thread(cancel_premotp_order, provider_order_id)
+        except Exception as exc:
+            logger.warning("[AUTO EXPIRE] PremOTP cancel request failed order=%s: %s", order_id, exc)
+            return False
+
+        statuses = _status_values(result)
+        if any(status in cancelled_states for status in statuses):
+            logger.info("[AUTO EXPIRE] PremOTP cancel confirmed order=%s status=%s", order_id, statuses)
+            return True
+
+        # PremOTP may return a successful API envelope without exposing the
+        # final status in the cancel response. Re-read the order and require
+        # an explicit cancelled state before refunding the user.
+        try:
+            verify = await asyncio.to_thread(get_premotp_order, provider_order_id)
+        except Exception as exc:
+            logger.warning("[AUTO EXPIRE] PremOTP cancel verification failed order=%s: %s", order_id, exc)
+            return False
+        verify_statuses = _status_values(verify)
+        confirmed = any(status in cancelled_states for status in verify_statuses)
+        if confirmed:
+            logger.info("[AUTO EXPIRE] PremOTP cancel verified order=%s status=%s", order_id, verify_statuses)
+        else:
+            logger.warning("[AUTO EXPIRE] PremOTP cancel not confirmed order=%s result=%s verify=%s", order_id, result, verify)
+        return confirmed
+
     try:
-        result = await asyncio.to_thread(canceler, provider_order_id)
+        if provider == "rumahotp":
+            result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
+            cancel_confirmed = bool(result and result.get("response") == "OK")
+        elif provider == "premotp":
+            cancel_confirmed = await _cancel_and_verify_premotp()
+        else:
+            cancel_confirmed = await _cancel_and_verify_5sim()
     except Exception as exc:
-        result = {"response": "ERROR", "error": str(exc)}
-    if not result or result.get("response") != "OK":
+        logger.exception("[AUTO EXPIRE] cancel handling failed order=%s provider=%s", order_id, provider)
+        cancel_confirmed = False
+
+    if not cancel_confirmed:
         logger.warning(
-            "[AUTO EXPIRE] cancel not confirmed order=%s provider_order=%s result=%s",
-            order_id, provider_order_id, result,
+            "[AUTO EXPIRE] cancel not confirmed order=%s provider=%s provider_order=%s; refund blocked",
+            order_id, provider, provider_order_id,
         )
         return False
 
@@ -6480,64 +6555,84 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     order_id, provider_order_id,
                 )
 
-        # Prevent duplicate cancellation/refund processes for the same order.
+        # Keep the original ORDER BERHASIL message completely untouched.
+        # The countdown exists only in runtime state; the user sees it through
+        # Telegram popup alerts. No extra countdown message is sent/edited.
         if order_id in _ACTIVE_CANCEL_COUNTDOWNS:
-            await query.answer(
-                "⏳ Permintaan Batal / Refund untuk order ini sedang diproses. "
-                "Mohon tunggu sampai selesai.",
-                show_alert=True,
-            )
+            state = _CANCEL_COUNTDOWN_STATE.get(order_id) or {}
+            phase = state.get("phase", "countdown")
+            remaining = max(0, int(state.get("remaining", 0)))
+            if phase == "provider_cancel":
+                await query.answer(
+                    "⏳ Waktu tunggu sudah selesai. Sistem sedang meminta pembatalan ke provider.\n\n"
+                    "Mohon tunggu konfirmasi pembatalan sebelum saldo dikembalikan.",
+                    show_alert=True,
+                )
+            else:
+                await query.answer(
+                    f"⏳ Proses Batal / Refund masih berjalan.\n\n"
+                    f"Sisa waktu: {remaining} detik.\n\n"
+                    "Silakan tekan OK. Waktu tetap berjalan di latar belakang.",
+                    show_alert=True,
+                )
             return
 
         _ACTIVE_CANCEL_COUNTDOWNS.add(order_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CANCEL_PROCESSING_SECONDS
+        _CANCEL_COUNTDOWN_STATE[order_id] = {
+            "remaining": CANCEL_PROCESSING_SECONDS,
+            "phase": "countdown",
+        }
 
         try:
-            await query.answer(
-                "⏳ Batal / Refund dimulai.\n\n"
-                "Mohon tunggu sekitar 120 detik sampai proses selesai.",
-                show_alert=True,
-            )
-        except Exception:
-            pass
-
-        # Start the real second-by-second 120-second processing countdown
-        # immediately after the user presses Batal / Refund. Telegram alert
-        # popups cannot be updated every second, so the order message is edited
-        # once per second instead.
-        for seconds_left in range(CANCEL_PROCESSING_SECONDS, 0, -1):
-            current_order = get_order(order_id)
-            if (
-                not current_order
-                or str(current_order.get("status") or "").upper() != "PENDING"
-                or _order_has_received_otp(current_order)
-            ):
-                await query.edit_message_text(
-                    "ℹ️ <b>PEMBATALAN DIHENTIKAN</b>\n\n"
-                    "Order sudah berubah status atau OTP sudah diterima. "
-                    "Refund tidak dapat diproses melalui pembatalan ini.",
-                    parse_mode="HTML",
-                )
-                _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
-                return
-
+            # IMPORTANT: this is the ONLY visible action at the beginning.
+            # The original order card is never edited or replaced.
             try:
-                await query.edit_message_text(
-                    "⚠️ <b>PERMINTAAN BATAL / REFUND DITERIMA</b>\n\n"
-                    "Mohon tunggu, sistem sedang menyiapkan pembatalan "
-                    "dan akan mengembalikan saldo setelah provider "
-                    "mengonfirmasi pembatalan.\n\n"
-                    f"⏳ <b>Proses pembatalan: {seconds_left} detik</b>\n\n"
-                    "🙏 Mohon jangan menekan tombol berulang kali.",
-                    parse_mode="HTML",
+                await query.answer(
+                    "⏳ Batal / Refund dimulai.\n\n"
+                    "Mohon tunggu sekitar 120 detik sampai proses selesai.\n\n"
+                    "Silakan tekan OK. Waktu akan tetap berjalan.",
+                    show_alert=True,
                 )
             except Exception:
-                # A Telegram edit failure must not stop the actual countdown.
-                logger.warning(
-                    "[OTP CANCEL] countdown message update failed order=%s seconds=%s",
-                    order_id, seconds_left
-                )
+                pass
 
-            await asyncio.sleep(1)
+            # Real second-by-second background countdown. No Telegram message
+            # is created for the countdown, so the ORDER BERHASIL card remains
+            # visible together with the phone number, OTP area and button.
+            while True:
+                current_order = get_order(order_id)
+                if (
+                    not current_order
+                    or str(current_order.get("status") or "").upper() != "PENDING"
+                    or _order_has_received_otp(current_order)
+                ):
+                    _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
+                    _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
+                    return
+
+                remaining_float = deadline - loop.time()
+                if remaining_float <= 0:
+                    break
+
+                remaining = min(
+                    CANCEL_PROCESSING_SECONDS,
+                    max(1, int(remaining_float + 0.999)),
+                )
+                _CANCEL_COUNTDOWN_STATE[order_id]["remaining"] = remaining
+                await asyncio.sleep(min(1.0, max(0.05, remaining_float)))
+
+            # The 120-second countdown is complete. Provider cancellation is
+            # requested only now. During this stage, repeated button presses
+            # show a popup instead of starting another countdown.
+            _CANCEL_COUNTDOWN_STATE[order_id]["remaining"] = 0
+            _CANCEL_COUNTDOWN_STATE[order_id]["phase"] = "provider_cancel"
+
+        except Exception:
+            _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
+            _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
+            raise
 
         # Re-read immediately after the countdown. OTP receipt or an automatic
         # expiry/refund may have happened during the 120 seconds.
@@ -6547,23 +6642,17 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             or str(order.get("status") or "").upper() != "PENDING"
             or _order_has_received_otp(order)
         ):
+            _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
+            _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
             try:
-                await query.edit_message_text(
-                    "ℹ️ <b>PEMBATALAN TIDAK DILANJUTKAN</b>\n\n"
-                    "Order sudah berubah status atau OTP sudah diterima. "
-                    "Tidak ada refund ganda yang dilakukan.",
-                    parse_mode="HTML",
+                await query.answer(
+                    "ℹ️ Pembatalan tidak dilanjutkan karena order sudah berubah status atau OTP sudah diterima.\n\n"
+                    "Pesan order utama tetap tersedia.",
+                    show_alert=True,
                 )
-            finally:
-                _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
+            except Exception:
+                pass
             return
-
-        await query.edit_message_text(
-            "⏳ <b>SEDANG MEMBATALKAN PESANAN...</b>\n\n"
-            "Mohon tunggu beberapa saat. Saldo hanya akan dikembalikan "
-            "setelah pembatalan provider benar-benar terkonfirmasi.",
-            parse_mode="HTML"
-        )
 
         cancel_result = {"response": "ERROR", "error": "ID order provider belum tersedia."}
 
@@ -6571,19 +6660,15 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             # Never refund locally when the upstream order ID is missing.
             # Without it we cannot cancel the actual paid order, so an instant
             # local refund would leave the provider order active.
-            await query.edit_message_text(
-                "⚠️ <b>Pembatalan belum dapat diproses.</b>\n\n"
-                f"🧾 Order: <code>{order_id}</code>\n"
-                "Sistem belum mendapatkan ID pesanan dari server. "
-                "Saldo <b>belum</b> dikembalikan untuk mencegah saldo kembali "
-                "sementara pesanan masih aktif.\n\n"
-                "Silakan tunggu beberapa saat lalu tekan tombol pembatalan lagi.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Coba Batalkan Lagi", callback_data=f"otp_cancel:{order_id}")],
-                    [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
-                ])
-            )
+            try:
+                await query.answer(
+                    "⚠️ Pembatalan belum dapat diproses karena ID pesanan provider belum tersedia.\n\n"
+                    "Saldo belum dikembalikan. Silakan coba Batal / Refund lagi dari pesan order utama.",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
+            _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
             _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
             return
 
@@ -6620,19 +6705,17 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 or cancel_result.get("message")
                 or "Pembatalan belum dikonfirmasi oleh server."
             )
-            await query.edit_message_text(
-                "⚠️ <b>Refund belum dapat diberikan.</b>\n\n"
-                f"🧾 Order: <code>{order_id}</code>\n"
-                f"❗ <b>{escape(provider_error)}</b>\n\n"
-                "Pesanan masih dianggap aktif sampai pembatalannya benar-benar terkonfirmasi. "
-                "Saldo <b>belum</b> dikembalikan.\n\n"
-                "Silakan tunggu beberapa detik lalu coba lagi.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Coba Batalkan Lagi", callback_data=f"otp_cancel:{order_id}")],
-                    [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
-                ])
-            )
+            try:
+                await query.answer(
+                    "⚠️ REFUND BELUM DAPAT DIBERIKAN\n\n"
+                    f"❗ {escape(provider_error)}\n\n"
+                    "Pembatalan provider belum terkonfirmasi. Saldo belum dikembalikan.\n\n"
+                    "Pesan order utama tetap tersedia. Silakan coba lagi nanti.",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
+            _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
             _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
             return
 
@@ -6677,58 +6760,30 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 "Refund gagal."
             )
 
-            await query.edit_message_text(
+            try:
+                await query.answer(
+                    f"❌ Refund gagal diproses.\n\nError: {escape(error)}\n\nSaldo belum dikembalikan.",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
 
-                "❌ <b>Refund gagal diproses.</b>\n\n"
-
-                f"Order: "
-                f"<code>{order_id}</code>\n"
-
-                f"Error: "
-                f"<code>{error}</code>",
-
-                parse_mode="HTML"
-
-            )
-
+            _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
             _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
             return
 
-        await query.edit_message_text(
+        try:
+            await query.answer(
+                "✅ ORDER BERHASIL DIBATALKAN\n\n"
+                f"💸 Refund: {format_rupiah(order['sell_price'])}\n"                f"💰 Saldo sekarang: {format_rupiah(result['balance'])}\n\n"
+                "Pembatalan provider telah dikonfirmasi dan saldo sudah dikembalikan.",
+                show_alert=True,
+            )
+        except Exception:
+            pass
 
-            "✅ <b>ORDER DIBATALKAN</b>\n\n"
 
-            f"🧾 Order: "
-            f"<code>{order_id}</code>\n"
-
-            f"💸 Refund: "
-            f"<b>{format_rupiah(order['sell_price'])}</b>\n"
-
-            f"💰 Saldo sekarang: "
-            f"<b>{format_rupiah(result['balance'])}</b>",
-
-            parse_mode="HTML",
-
-            reply_markup=InlineKeyboardMarkup([
-
-                [
-                    InlineKeyboardButton(
-                        "📱 Order Lagi",
-                        callback_data="order"
-                    )
-                ],
-
-                [
-                    InlineKeyboardButton(
-                        "🏠 Menu Utama",
-                        callback_data="user_home"
-                    )
-                ]
-
-            ])
-
-        )
-
+        _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
         _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
         return
 
