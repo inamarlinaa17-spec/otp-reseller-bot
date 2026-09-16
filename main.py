@@ -3918,17 +3918,13 @@ def _is_real_otp_code(value):
     return any(ch.isdigit() for ch in code) and 3 <= len(code) <= 32
 
 
-def _mask_traffic_value(value, keep_start=3, keep_end=4):
-    """Mask sensitive traffic values while preserving a small prefix/suffix.
-
-    Phone example: 0851234567894545 -> 085xxxxxxxx4545
-    """
+def _mask_traffic_value(value, keep_start=3, keep_end=3):
     raw = str(value or "-").strip()
     if raw in {"", "-"}:
         return "-"
     if len(raw) <= keep_start + keep_end:
-        return "x" * len(raw)
-    return raw[:keep_start] + "x" * (len(raw) - keep_start - keep_end) + raw[-keep_end:]
+        return "*" * len(raw)
+    return raw[:keep_start] + "*" * (len(raw) - keep_start - keep_end) + raw[-keep_end:]
 
 
 def _order_has_received_otp(order):
@@ -3954,33 +3950,50 @@ async def _send_traffic_otp_notification(application, order, code, sms_text):
     try:
         user = await asyncio.to_thread(get_user, int(order["telegram_id"]))
         username = (user or {}).get("username") if user else None
-        masked_user = _mask_traffic_value(username, 3, 4) if username else "-"
+        masked_user = _mask_traffic_value(username, 3, 3) if username else "-"
         runtime = _RUNTIME_PROVIDER_CACHE.get(order["order_id"]) or {}
         phone = order.get("phone") or runtime.get("phone") or "-"
-        masked_phone = _mask_traffic_value(phone, 3, 4)
+        masked_phone = _mask_traffic_value(phone, 3, 3)
         service_name = order.get("service_name") or order.get("service") or "-"
         country_name = order.get("country_name") or order.get("country") or "-"
         price = format_rupiah(order.get("sell_price") or 0)
         provider_order_id = order.get("provider_order_id") or runtime.get("provider_order_id") or order.get("order_id")
-        # Live traffic receives only the event/status and masked metadata.
-        # Never place the authentication/verification code or raw SMS body in
-        # the shared channel. The code remains available only through the
-        # normal first-party/user flow.
         traffic_text = (
-            "🔐 <b>CODE RECEIVED</b>\n\n"
+            "🔐 <b>CODE RECEIVED 2.0</b>\n\n"
             f"• <b>ID:</b> <code>{escape(str(provider_order_id))}</code>\n"
             f"• <b>Users:</b> {escape(str(masked_user))}\n"
+            f"• <b>Code:</b> <code>{escape(str(code))}</code>\n"
             f"• <b>Number:</b> <code>{escape(str(masked_phone))}</code>\n"
-            f"• <b>Price:</b> {escape(str(price))}\n"
-            f"• <b>Status:</b> OTP received\n\n"
+            f"• <b>Price:</b> {escape(str(price))}\n\n"
+            "<b>message_text</b>\n"
+            f"<code>{escape(str(sms_text or '-'))}</code>\n\n"
             f"{escape(str(service_name))} - {escape(str(country_name))}"
         )
         token = TRAFFIC_BOT_TOKEN or BOT_TOKEN
         if not token:
             logger.error("[TRAFFIC] BOT token kosong; OTP notification tidak dapat dikirim order=%s", order.get("order_id"))
             return False
-        async with Bot(token=token) as traffic_bot:
-            await traffic_bot.send_message(chat_id=TRAFFIC_CHANNEL, text=traffic_text, parse_mode="HTML")
+        if TRAFFIC_BOT_TOKEN:
+            async with Bot(token=token) as traffic_bot:
+                await traffic_bot.send_message(
+                    chat_id=TRAFFIC_CHANNEL,
+                    text=traffic_text,
+                    parse_mode="HTML",
+                )
+        else:
+            # Reuse the running Telegram application when the main bot token is
+            # used. This avoids opening a second Bot client for every OTP and
+            # keeps the notification on the same authenticated application.
+            await application.bot.send_message(
+                chat_id=TRAFFIC_CHANNEL,
+                text=traffic_text,
+                parse_mode="HTML",
+            )
+        logger.info(
+            "[TRAFFIC] OTP notification sent order=%s channel=%s",
+            order.get("order_id"),
+            TRAFFIC_CHANNEL,
+        )
         return True
     except Exception:
         logger.exception("[TRAFFIC] failed to send OTP notification order=%s", order.get("order_id"))
@@ -3994,10 +4007,10 @@ async def _send_traffic_order_notification(application, order):
     try:
         user = await asyncio.to_thread(get_user, int(order["telegram_id"]))
         username = (user or {}).get("username") if user else None
-        masked_user = _mask_traffic_value(username, 3, 4) if username else "-"
+        masked_user = _mask_traffic_value(username, 3, 3) if username else "-"
         runtime = _RUNTIME_PROVIDER_CACHE.get(order["order_id"]) or {}
         phone = order.get("phone") or runtime.get("phone") or "-"
-        masked_phone = _mask_traffic_value(phone, 3, 4)
+        masked_phone = _mask_traffic_value(phone, 3, 3)
         service_name = order.get("service_name") or order.get("service") or "-"
         country_name = order.get("country_name") or order.get("country") or "-"
         price = format_rupiah(order.get("sell_price") or 0)
@@ -4028,12 +4041,76 @@ async def _send_traffic_order_notification(application, order):
         )
 
 
+
+def _normalize_otp_response(data):
+    """Normalize common provider OTP response shapes into the internal format.
+
+    OTP delivery must not depend on one exact provider response envelope.
+    This helper only extracts an actual OTP/message and leaves all order logic
+    unchanged.
+    """
+    if not isinstance(data, dict):
+        return {"response": "ERROR", "sms": []}
+
+    # Some APIs wrap the payload under data/result/order.
+    payload = data
+    for key in ("data", "result", "order"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            # Keep the outer response/error fields, but use the actual payload.
+            payload = nested
+            break
+
+    sms_items = payload.get("sms")
+    if not isinstance(sms_items, list):
+        sms_items = []
+
+    first = sms_items[0] if sms_items and isinstance(sms_items[0], dict) else {}
+
+    code = (
+        first.get("code")
+        or payload.get("otp_code")
+        or payload.get("otp")
+        or payload.get("code")
+    )
+    text = (
+        first.get("text")
+        or first.get("message")
+        or payload.get("sms_text")
+        or payload.get("otp_msg")
+        or payload.get("message")
+        or payload.get("text")
+        or ""
+    )
+
+    normalized = dict(data)
+    normalized["response"] = str(
+        data.get("response")
+        or ("OK" if not data.get("error") else "ERROR")
+    ).upper()
+    normalized["expired_at"] = (
+        payload.get("expired_at")
+        or payload.get("expires_at")
+        or payload.get("expires")
+        or data.get("expired_at")
+    )
+
+    if _is_real_otp_code(code):
+        normalized["sms"] = [{"code": str(code), "text": str(text)}]
+        normalized["otp"] = str(code)
+    else:
+        normalized["sms"] = []
+
+    return normalized
+
+
 async def _send_otp_received_message(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
     if not order or str(order.get("status") or "").upper() != "PENDING":
         return False
 
+    data_sms = _normalize_otp_response(data_sms)
     sms_list = data_sms.get("sms") or []
     if not sms_list:
         return False
@@ -4318,10 +4395,7 @@ async def auto_process_pending_orders(application):
 
     RumahOTP documents a maximum of 5 API requests per 10 seconds. The
     worker therefore spaces status reads per provider instead of polling every
-    order aggressively. Active polling is limited to recent pending orders
-    (30 minutes) and newest orders are considered first, so an old backlog
-    cannot delay newly created orders. Expiration/refund handling remains a
-    separate concern and does not make stale orders eligible for OTP polling.
+    order aggressively. This also removes the need for users to press Cek OTP.
     """
     global _AUTO_POLL_CURSOR
     while True:
@@ -4331,8 +4405,7 @@ async def auto_process_pending_orders(application):
                     """
                     SELECT * FROM orders
                     WHERE status = 'PENDING'
-                      AND created_at >= (NOW() - INTERVAL '30 minutes')
-                    ORDER BY created_at DESC
+                    ORDER BY created_at ASC
                     LIMIT 100
                     """
                 ).fetchall()
@@ -4399,23 +4472,10 @@ async def auto_process_pending_orders(application):
                             data_sms = await asyncio.to_thread(checker, provider_order_id)
                             if provider == "premotp":
                                 # PremOTP may return an API envelope or direct data.
+                                # Keep the existing fields and normalize below.
                                 premotp_data = data_sms or {}
                                 if isinstance(premotp_data, dict) and isinstance(premotp_data.get("data"), dict):
                                     premotp_data = premotp_data.get("data") or premotp_data
-                                premotp_sms = premotp_data.get("sms") if isinstance(premotp_data, dict) else None
-                                first_sms = premotp_sms[0] if isinstance(premotp_sms, list) and premotp_sms else {}
-                                premotp_code = (
-                                    premotp_data.get("otp_code")
-                                    or premotp_data.get("otp")
-                                    or premotp_data.get("code")
-                                    or first_sms.get("code")
-                                ) if isinstance(premotp_data, dict) else None
-                                premotp_text = (
-                                    premotp_data.get("sms_text")
-                                    or premotp_data.get("message")
-                                    or premotp_data.get("text")
-                                    or first_sms.get("text")
-                                ) if isinstance(premotp_data, dict) else ""
                                 data_sms = {
                                     "response": "OK",
                                     "phone": (
@@ -4423,21 +4483,53 @@ async def auto_process_pending_orders(application):
                                         or premotp_data.get("phone")
                                         or premotp_data.get("number")
                                     ) if isinstance(premotp_data, dict) else None,
-                                    "otp": premotp_code,
+                                    "otp": (
+                                        premotp_data.get("otp_code")
+                                        or premotp_data.get("otp")
+                                        or premotp_data.get("code")
+                                    ) if isinstance(premotp_data, dict) else None,
                                     "expired_at": (
                                         premotp_data.get("expired_at")
                                         or premotp_data.get("expires_at")
                                         or premotp_data.get("expires")
                                     ) if isinstance(premotp_data, dict) else None,
                                     "sms": (
-                                        [{"code": premotp_code, "text": premotp_text or ""}]
-                                        if premotp_code else []
+                                        premotp_data.get("sms")
+                                        if isinstance(premotp_data, dict)
+                                        and isinstance(premotp_data.get("sms"), list)
+                                        else []
                                     ),
+                                    "sms_text": (
+                                        premotp_data.get("sms_text")
+                                        or premotp_data.get("message")
+                                        or premotp_data.get("text")
+                                        or ""
+                                    ) if isinstance(premotp_data, dict) else "",
                                 }
-                            if data_sms and data_sms.get("response") != "ERROR":
-                                await _send_otp_received_message(application, selected["order_id"], data_sms)
+                            data_sms = _normalize_otp_response(data_sms)
+                            if data_sms.get("sms"):
+                                logger.info(
+                                    "[AUTO OTP] OTP detected provider=%s order=%s",
+                                    provider,
+                                    selected["order_id"],
+                                )
+                                processed = await _send_otp_received_message(
+                                    application,
+                                    selected["order_id"],
+                                    data_sms,
+                                )
+                                if processed:
+                                    logger.info(
+                                        "[AUTO OTP] OTP delivered user+traffic provider=%s order=%s",
+                                        provider,
+                                        selected["order_id"],
+                                    )
                         except Exception:
-                            logger.exception("[AUTO OTP] polling failed order=%s", selected["order_id"])
+                            logger.exception(
+                                "[AUTO OTP] polling failed provider=%s order=%s",
+                                provider,
+                                selected["order_id"],
+                            )
                         # PremOTP is prioritized above the old pending-order backlog.
                         _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + (1.5 if provider == "premotp" else 2.2)
                     else:
