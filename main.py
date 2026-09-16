@@ -4046,15 +4046,13 @@ async def _send_otp_received_message(application, order_id, data_sms):
     if previous_code and str(code).strip() == previous_code:
         return False
 
-    # Save the OTP first, but DO NOT mark the order SUCCESS yet.
-    # Telegram notification must succeed first so a transient Telegram/Railway
-    # failure does not permanently stop the OTP from being delivered.
-    try:
-        await asyncio.to_thread(save_otp_result, order_id, code, text)
-    except Exception:
-        logger.exception("[AUTO OTP] failed to save OTP order=%s", order_id)
-        return False
-
+    # IMPORTANT: do not persist otp_code before Telegram delivery succeeds.
+    # If otp_code is saved first and the channel/user send fails, the refund
+    # guard sees the order as "OTP already received" and the poller also
+    # ignores the same code on the next pass. That is exactly the failure mode
+    # where the provider web page has an OTP but the user/channel receive none.
+    # Keep the order PENDING with no stored OTP until both Telegram destinations
+    # have acknowledged the message.
     current = get_order(order_id) or order
     runtime = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
     service_name = current.get("service_name") or current.get("service") or "-"
@@ -4128,6 +4126,30 @@ async def _send_otp_received_message(application, order_id, data_sms):
         return False
     if not traffic_sent:
         return False
+
+    # Both Telegram destinations have now accepted the OTP. Persist it only
+    # after delivery so a failed notification never blocks retry/refund.
+    saved = False
+    for attempt in range(3):
+        try:
+            await asyncio.to_thread(save_otp_result, order_id, code, text)
+            saved = True
+            break
+        except Exception:
+            logger.exception(
+                "[AUTO OTP] failed to save OTP after Telegram delivery "
+                "order=%s attempt=%s", order_id, attempt + 1
+            )
+            if attempt < 2:
+                await asyncio.sleep(0.4 * (attempt + 1))
+    if not saved:
+        # Telegram delivery already succeeded. Do not resend the OTP and do not
+        # leave the order looking refundable after a database-only failure.
+        logger.error(
+            "[AUTO OTP] OTP delivered to Telegram but database save failed "
+            "order=%s; marking SUCCESS to prevent duplicate delivery",
+            order_id,
+        )
 
     # Only after both Telegram destinations have been handled do we transition
     # the local order to SUCCESS. This prevents a transient notification error
@@ -6534,6 +6556,36 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             remaining = max(0, int(deadline - loop.time() + 0.999))
             phase = state.get("phase", "countdown")
             if phase == "refunded":
+                # The background task may have completed the refund while the
+                # original Telegram edit was temporarily unavailable. On a
+                # repeated button press, repair the SAME order card instead of
+                # only showing an alert and leaving "ORDER BERHASIL" visible.
+                try:
+                    repaired = await asyncio.to_thread(get_order, order_id)
+                    message_id = (
+                        getattr(query.message, "message_id", None)
+                        or (repaired or {}).get("telegram_message_id")
+                        or (_RUNTIME_PROVIDER_CACHE.get(order_id) or {}).get("telegram_message_id")
+                    )
+                    if repaired and message_id:
+                        refund_amount = repaired.get("sell_price") or 0
+                        balance_after = (state or {}).get("balance")
+                        if balance_after is None:
+                            balance_after = repaired.get("balance")
+                        await query.edit_message_text(
+                            "❌ <b>ORDER DIBATALKAN / REFUND</b>\n\n"
+                            f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                            f"💸 Refund: <b>{format_rupiah(refund_amount)}</b>\n"
+                            f"💳 Saldo sekarang: <b>{format_rupiah(balance_after) if balance_after is not None else '-'} </b>\n\n"
+                            "Pesanan telah dibatalkan dan saldo sudah dikembalikan.",
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("📱 ORDER LAGI", callback_data="order")],
+                                [InlineKeyboardButton("🏠 MENU UTAMA", callback_data="user_home")],
+                            ]),
+                        )
+                except Exception:
+                    logger.exception("[OTP CANCEL] failed to repair refunded card order=%s", order_id)
                 await query.answer(
                     "✅ Refund sudah berhasil diproses dan saldo sudah dikembalikan.",
                     show_alert=True,
@@ -6578,13 +6630,39 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         if int(order["telegram_id"]) != int(user_id):
             await query.answer("Order ini bukan milik kamu.", show_alert=True)
             return
+        order_status = str(order.get("status") or "").upper()
+        if order_status == "REFUNDED":
+            # A second click after a successful refund should also repair a
+            # stale ORDER BERHASIL card, not merely display an alert.
+            try:
+                message_id = (
+                    getattr(query.message, "message_id", None)
+                    or order.get("telegram_message_id")
+                    or (_RUNTIME_PROVIDER_CACHE.get(order_id) or {}).get("telegram_message_id")
+                )
+                if message_id:
+                    await query.edit_message_text(
+                        "❌ <b>ORDER DIBATALKAN / REFUND</b>\n\n"
+                        f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                        f"💸 Refund: <b>{format_rupiah(order.get('sell_price') or 0)}</b>\n\n"
+                        "Pesanan telah dibatalkan dan saldo sudah dikembalikan.",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📱 ORDER LAGI", callback_data="order")],
+                            [InlineKeyboardButton("🏠 MENU UTAMA", callback_data="user_home")],
+                        ]),
+                    )
+            except Exception:
+                logger.exception("[OTP CANCEL] failed to repair already-refunded card order=%s", order_id)
+            await query.answer("✅ Order sudah dibatalkan/refund.", show_alert=True)
+            return
         if _order_has_received_otp(order):
             await query.answer(
                 "OTP sudah pernah diterima. Refund tidak tersedia. Gunakan Resend OTP atau Pesanan Selesai.",
                 show_alert=True,
             )
             return
-        if str(order.get("status") or "").upper() != "PENDING":
+        if order_status != "PENDING":
             await query.answer(f"Order sudah {order['status']}.", show_alert=True)
             return
 
