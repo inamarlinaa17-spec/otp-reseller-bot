@@ -6572,7 +6572,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             runtime = _RUNTIME_PROVIDER_CACHE.get(order_id) or {}
             provider_order_id = str(runtime.get("provider_order_id") or "").strip()
 
-        if not provider_order_id:
+        if not provider_order_id and provider != "premotp":
             await query.edit_message_text(
                 "⚠️ <b>Pesanan belum dapat diselesaikan.</b>\n\n"
                 "Data order belum lengkap. Silakan coba lagi beberapa saat.",
@@ -6584,14 +6584,19 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
-            finisher = None
-        else:
-            finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
         try:
-            result = result if provider == "premotp" else await asyncio.wait_for(
-                asyncio.to_thread(finisher, provider_order_id),
-                timeout=12.0,
-            )
+            if provider == "premotp":
+                # Server 3 does not expose a provider-side "finish" endpoint.
+                # OTP has already been delivered, so closing the local order is
+                # the correct completion action. This also avoids the previous
+                # unbound `result` bug that left the callback stuck.
+                result = {"response": "OK", "provider_status": "completed_local"}
+            else:
+                finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(finisher, provider_order_id),
+                    timeout=12.0,
+                )
         except asyncio.TimeoutError:
             await query.edit_message_text(
                 "⚠️ <b>Pesanan belum mendapat respons.</b>\n\n"
