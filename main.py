@@ -6663,6 +6663,45 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     _CANCEL_COUNTDOWN_STATE[order_id]["phase"] = "refunded"
                     _CANCEL_COUNTDOWN_STATE[order_id]["balance"] = refund.get("balance")
                     _CANCEL_COUNTDOWN_STATE[order_id]["refund"] = current.get("sell_price")
+
+                    # Refund is complete: replace the original ORDER BERHASIL
+                    # card so the user no longer sees the old active order.
+                    # Keep this as the same Telegram message (no extra message).
+                    try:
+                        message_id = (
+                            current.get("telegram_message_id")
+                            or (_RUNTIME_PROVIDER_CACHE.get(order_id) or {}).get("telegram_message_id")
+                        )
+                        if message_id:
+                            refund_amount = refund.get("amount") or current.get("sell_price") or 0
+                            balance_after = refund.get("balance")
+                            balance_text = (
+                                format_rupiah(balance_after)
+                                if balance_after is not None
+                                else "-"
+                            )
+                            refund_text = (
+                                "❌ <b>ORDER DIBATALKAN / REFUND</b>\n\n"
+                                f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                                f"💸 Refund: <b>{format_rupiah(refund_amount)}</b>\n"
+                                f"💳 Saldo sekarang: <b>{balance_text}</b>\n\n"
+                                "Pesanan telah dibatalkan dan saldo sudah dikembalikan."
+                            )
+                            await application.bot.edit_message_text(
+                                chat_id=int(current["telegram_id"]),
+                                message_id=int(message_id),
+                                text=refund_text,
+                                parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("📱 ORDER LAGI", callback_data="order")],
+                                    [InlineKeyboardButton("🏠 MENU UTAMA", callback_data="user_home")],
+                                ]),
+                            )
+                    except Exception:
+                        logger.exception(
+                            "[OTP CANCEL] failed to update order message after refund order=%s",
+                            order_id,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
