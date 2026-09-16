@@ -3918,13 +3918,17 @@ def _is_real_otp_code(value):
     return any(ch.isdigit() for ch in code) and 3 <= len(code) <= 32
 
 
-def _mask_traffic_value(value, keep_start=3, keep_end=3):
+def _mask_traffic_value(value, keep_start=3, keep_end=4):
+    """Mask sensitive traffic values while preserving a small prefix/suffix.
+
+    Phone example: 0851234567894545 -> 085xxxxxxxx4545
+    """
     raw = str(value or "-").strip()
     if raw in {"", "-"}:
         return "-"
     if len(raw) <= keep_start + keep_end:
-        return "*" * len(raw)
-    return raw[:keep_start] + "*" * (len(raw) - keep_start - keep_end) + raw[-keep_end:]
+        return "x" * len(raw)
+    return raw[:keep_start] + "x" * (len(raw) - keep_start - keep_end) + raw[-keep_end:]
 
 
 def _order_has_received_otp(order):
@@ -3950,23 +3954,25 @@ async def _send_traffic_otp_notification(application, order, code, sms_text):
     try:
         user = await asyncio.to_thread(get_user, int(order["telegram_id"]))
         username = (user or {}).get("username") if user else None
-        masked_user = _mask_traffic_value(username, 3, 3) if username else "-"
+        masked_user = _mask_traffic_value(username, 3, 4) if username else "-"
         runtime = _RUNTIME_PROVIDER_CACHE.get(order["order_id"]) or {}
         phone = order.get("phone") or runtime.get("phone") or "-"
-        masked_phone = _mask_traffic_value(phone, 3, 3)
+        masked_phone = _mask_traffic_value(phone, 3, 4)
         service_name = order.get("service_name") or order.get("service") or "-"
         country_name = order.get("country_name") or order.get("country") or "-"
         price = format_rupiah(order.get("sell_price") or 0)
         provider_order_id = order.get("provider_order_id") or runtime.get("provider_order_id") or order.get("order_id")
+        # Live traffic receives only the event/status and masked metadata.
+        # Never place the authentication/verification code or raw SMS body in
+        # the shared channel. The code remains available only through the
+        # normal first-party/user flow.
         traffic_text = (
-            "🔐 <b>CODE RECEIVED 2.0</b>\n\n"
+            "🔐 <b>CODE RECEIVED</b>\n\n"
             f"• <b>ID:</b> <code>{escape(str(provider_order_id))}</code>\n"
             f"• <b>Users:</b> {escape(str(masked_user))}\n"
-            f"• <b>Code:</b> <code>{escape(str(code))}</code>\n"
             f"• <b>Number:</b> <code>{escape(str(masked_phone))}</code>\n"
-            f"• <b>Price:</b> {escape(str(price))}\n\n"
-            "<b>message_text</b>\n"
-            f"<code>{escape(str(sms_text or '-'))}</code>\n\n"
+            f"• <b>Price:</b> {escape(str(price))}\n"
+            f"• <b>Status:</b> OTP received\n\n"
             f"{escape(str(service_name))} - {escape(str(country_name))}"
         )
         token = TRAFFIC_BOT_TOKEN or BOT_TOKEN
@@ -3988,10 +3994,10 @@ async def _send_traffic_order_notification(application, order):
     try:
         user = await asyncio.to_thread(get_user, int(order["telegram_id"]))
         username = (user or {}).get("username") if user else None
-        masked_user = _mask_traffic_value(username, 3, 3) if username else "-"
+        masked_user = _mask_traffic_value(username, 3, 4) if username else "-"
         runtime = _RUNTIME_PROVIDER_CACHE.get(order["order_id"]) or {}
         phone = order.get("phone") or runtime.get("phone") or "-"
-        masked_phone = _mask_traffic_value(phone, 3, 3)
+        masked_phone = _mask_traffic_value(phone, 3, 4)
         service_name = order.get("service_name") or order.get("service") or "-"
         country_name = order.get("country_name") or order.get("country") or "-"
         price = format_rupiah(order.get("sell_price") or 0)
@@ -4312,7 +4318,10 @@ async def auto_process_pending_orders(application):
 
     RumahOTP documents a maximum of 5 API requests per 10 seconds. The
     worker therefore spaces status reads per provider instead of polling every
-    order aggressively. This also removes the need for users to press Cek OTP.
+    order aggressively. Active polling is limited to recent pending orders
+    (30 minutes) and newest orders are considered first, so an old backlog
+    cannot delay newly created orders. Expiration/refund handling remains a
+    separate concern and does not make stale orders eligible for OTP polling.
     """
     global _AUTO_POLL_CURSOR
     while True:
@@ -4322,7 +4331,8 @@ async def auto_process_pending_orders(application):
                     """
                     SELECT * FROM orders
                     WHERE status = 'PENDING'
-                    ORDER BY created_at ASC
+                      AND created_at >= (NOW() - INTERVAL '30 minutes')
+                    ORDER BY created_at DESC
                     LIMIT 100
                     """
                 ).fetchall()
