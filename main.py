@@ -4292,20 +4292,46 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
             return result or {"response": "ERROR", "error": "Pembatalan RumahOTP belum dikonfirmasi."}
 
         if provider == "premotp":
-            result = await asyncio.to_thread(cancel_premotp_order, provider_order_id)
+            # PremOTP may raise on POST /cancel when the provider has already
+            # ended the activation because its time window expired. Do not stop
+            # the refund flow at that exception: verify the provider order
+            # immediately and use its terminal status as the source of truth.
+            cancel_error = None
+            result = None
+            try:
+                result = await asyncio.to_thread(cancel_premotp_order, provider_order_id)
+            except Exception as exc:
+                cancel_error = str(exc)
+
             statuses = _provider_status_values(result)
             if any(status in CANCELLED_PROVIDER_STATES for status in statuses):
                 return {"response": "OK", "provider_status": statuses, "raw": result}
+
             try:
                 verify = await asyncio.to_thread(get_premotp_order, provider_order_id)
             except Exception as exc:
-                return {"response": "ERROR", "error": f"Verifikasi PremOTP gagal: {exc}", "raw": result}
+                return {
+                    "response": "ERROR",
+                    "error": f"Verifikasi PremOTP gagal: {exc}",
+                    "raw": result,
+                    "cancel_error": cancel_error,
+                }
+
             verify_statuses = _provider_status_values(verify)
             if any(status in CANCELLED_PROVIDER_STATES for status in verify_statuses):
                 return {"response": "OK", "provider_status": verify_statuses, "raw": verify}
+
+            # PremOTP can reject POST /cancel after its own expiration has
+            # already terminated the order (e.g. "Order tidak dapat
+            # dibatalkan."). Explicit expiration is terminal and means the
+            # provider has already ended the activation, so it is safe to
+            # continue to the local refund for Server 3.
+            if any(status in {"expired", "expire", "timeout", "timed_out"} for status in verify_statuses):
+                return {"response": "OK", "provider_status": verify_statuses, "raw": verify}
+
             return {
                 "response": "ERROR",
-                "error": "Pembatalan PremOTP belum terkonfirmasi oleh provider.",
+                "error": cancel_error or "Pembatalan PremOTP belum terkonfirmasi oleh provider.",
                 "provider_status": verify_statuses,
                 "raw": result,
             }
@@ -4478,6 +4504,12 @@ async def auto_process_pending_orders(application):
                                     premotp_data = premotp_data.get("data") or premotp_data
                                 data_sms = {
                                     "response": "OK",
+                                    "status": (
+                                        premotp_data.get("status")
+                                        or premotp_data.get("state")
+                                        or premotp_data.get("order_status")
+                                        or premotp_data.get("activation_status")
+                                    ) if isinstance(premotp_data, dict) else None,
                                     "phone": (
                                         premotp_data.get("phone_number")
                                         or premotp_data.get("phone")
@@ -4507,6 +4539,33 @@ async def auto_process_pending_orders(application):
                                     ) if isinstance(premotp_data, dict) else "",
                                 }
                             data_sms = _normalize_otp_response(data_sms)
+
+                            # Server 3 may report an already-expired activation
+                            # before the local expired_at is available. Route that
+                            # terminal provider state through the same cancel ->
+                            # verify -> refund path. This block is deliberately
+                            # limited to PremOTP.
+                            if provider == "premotp" and not data_sms.get("sms"):
+                                provider_statuses = _provider_status_values(data_sms)
+                                if any(
+                                    status in CANCELLED_PROVIDER_STATES
+                                    or status in {"expired", "expire", "timeout", "timed_out"}
+                                    for status in provider_statuses
+                                ):
+                                    expired_resolved = await _auto_expire_order(
+                                        application,
+                                        selected,
+                                        provider_order_id,
+                                    )
+                                    if expired_resolved:
+                                        logger.info(
+                                            "[AUTO EXPIRE] PremOTP terminal order refunded order=%s provider_status=%s",
+                                            selected["order_id"],
+                                            provider_statuses,
+                                        )
+                                        _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + 1.5
+                                        continue
+
                             if data_sms.get("sms"):
                                 logger.info(
                                     "[AUTO OTP] OTP detected provider=%s order=%s",
@@ -6518,33 +6577,105 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         if not order or int(order["telegram_id"]) != int(user_id):
             await query.answer("Order tidak ditemukan.", show_alert=True)
             return
+
         service_name = order.get("service_name") or order.get("service") or "-"
         country_name = order.get("country_name") or order.get("country") or "-"
+        provider = str(order.get("provider") or "").strip().lower()
+        server_name = OTP_SERVERS.get(provider, provider or "-")
         phone = order.get("phone") or "-"
         otp_code = order.get("otp_code") or "-"
         transaction_time = format_datetime_wib(order.get("created_at"))
         expired_time = format_datetime_wib(order.get("expired_at"))
-        text = (f"📦 <b>DETAIL ORDER</b>\n\n🧾 Order: <code>{order_id}</code>\n"
-                f"🌐 Negara: <b>{escape(str(country_name))}</b>\n📱 Layanan: <b>{escape(str(service_name))}</b>\n"
-                f"📞 Nomor: <code>{escape(str(phone))}</code>\n🔐 OTP: <code>{escape(str(otp_code))}</code>\n"
-                f"💰 Harga: <b>{format_rupiah(order['sell_price'])}</b>\n"
-                f"🕐 Transaksi: <b>{escape(transaction_time)}</b>\n"
-                f"⏰ Expired: <b>{escape(expired_time)}</b>\n"
-                f"📌 Status: <b>{escape(str(order['status']))}</b>")
-        kb=[]
-        status_upper = str(order["status"]).upper()
-        if status_upper == "PENDING":
-            # Initial PENDING orders can be cancelled/refunded. Once an OTP
-            # has arrived, including while waiting for a resend OTP, refund
-            # is permanently unavailable.
-            if not _order_has_received_otp(order):
+        # Recover the balance that was left immediately after this order was
+        # charged. This keeps the history detail consistent with the original
+        # ORDER BERHASIL card without changing the users current balance.
+        balance_after = None
+        try:
+            with get_db() as db:
+                balance_row = db.execute(
+                    """
+                    SELECT balance_after
+                    FROM ledger
+                    WHERE telegram_id = %s
+                      AND reference = %s
+                      AND transaction_type = 'ORDER_OTP'
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (user_id, order_id),
+                ).fetchone()
+                if balance_row:
+                    balance_after = balance_row.get("balance_after")
+        except Exception:
+            logger.exception("[HISTORY] gagal mengambil sisa saldo order=%s", order_id)
+
+        # Read the original post-order state again from the database. This is
+        # important when the user left the order screen and opened History: a
+        # still-PENDING order must continue to look like the live order card.
+        status_upper = str(order.get("status") or "").upper()
+        has_otp = _order_has_received_otp(order)
+        current_otp = _is_real_otp_code(order.get("otp_code"))
+        previous_otp = _is_real_otp_code(order.get("previous_otp_code"))
+
+        if status_upper == "PENDING" and not current_otp:
+            status_line = "⏳ <b>Menunggu SMS OTP...</b>"
+        elif status_upper == "SUCCESS" and has_otp:
+            status_line = "🔐 <b>OTP DITERIMA</b>"
+        elif status_upper == "COMPLETED":
+            status_line = "✅ <b>PESANAN SELESAI</b>"
+        elif status_upper == "REFUNDED":
+            status_line = "❌ <b>REFUNDED</b>"
+        else:
+            status_line = f"📌 <b>{escape(str(order.get('status') or '-'))}</b>"
+
+        text = (
+            "📦 <b>DETAIL ORDER</b>\n\n"
+            f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+            f"🖥 Server: <b>{escape(str(server_name))}</b>\n"
+            f"🌐 Negara: <b>{escape(str(country_name))}</b>\n"
+            f"📱 Layanan: <b>{escape(str(service_name))}</b>\n\n"
+            f"📞 Nomor:\n<code>{escape(str(phone))}</code>\n\n"
+            f"💰 Harga: <b>{format_rupiah(order.get('sell_price') or 0)}</b>\n"
+            f"🕐 Waktu transaksi: <b>{escape(transaction_time)}</b>\n"
+            f"⏰ Waktu expired: <b>{escape(expired_time)}</b>\n"
+        )
+
+        if balance_after is not None:
+            text += f"💳 Sisa saldo: <b>{format_rupiah(balance_after)}</b>\n\n"
+        else:
+            text += "\n"
+
+        if status_upper == "SUCCESS" and has_otp:
+            text += (
+                f"🔐 OTP: <code>{escape(str(otp_code))}</code>\n\n"
+                f"📨 SMS:\n<code>{escape(str(order.get('sms_text') or '-'))}</code>\n\n"
+            )
+        elif status_upper == "PENDING" and not current_otp:
+            text += ""
+        else:
+            text += f"🔐 OTP: <code>{escape(str(otp_code))}</code>\n\n"
+
+        text += status_line
+
+        kb = []
+        if status_upper == "PENDING" and not current_otp:
+            if not previous_otp:
                 kb.append([InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")])
-        elif status_upper == "SUCCESS":
+            else:
+                kb.append([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")])
+        elif status_upper == "SUCCESS" and has_otp:
             kb.append([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")])
             kb.append([InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")])
         elif status_upper == "COMPLETED":
             kb.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")])
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        elif status_upper == "REFUNDED":
+            kb.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")])
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb) if kb else None
+        )
         return
 
     # =====================================================
@@ -7217,40 +7348,86 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # HISTORY ORDER
     # =====================================================
 
-    if data == "user_history_order":
+    if data == "user_history_order" or data.startswith("user_history_order_page:"):
 
-        orders = get_order_history(user_id, limit=5)
+        # No history limit: all orders are loaded, while Telegram only shows
+        # a small page at a time so the message stays within Telegram limits.
+        page = 0
+        if data.startswith("user_history_order_page:"):
+            try:
+                page = max(0, int(data.split(":", 1)[1]))
+            except (TypeError, ValueError):
+                page = 0
+
+        orders = get_order_history(user_id, limit=None)
+        page_size = 3
+        total_pages = max(1, (len(orders) + page_size - 1) // page_size)
+        page = min(page, total_pages - 1)
+        page_orders = orders[page * page_size:(page + 1) * page_size]
 
         if not orders:
             text = (
-                "📋 <b>Histori Order</b>\n\n"
+                "📋 <b>HISTORI ORDER</b>\n\n"
                 "Belum ada histori order."
             )
             kb = [[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]
         else:
             entries = []
             buttons = []
-            for idx, o in enumerate(orders, 1):
+            for local_idx, o in enumerate(page_orders):
+                idx = page * page_size + local_idx + 1
                 service_name = o.get("service_name") or o.get("service") or "-"
                 country_name = o.get("country_name") or o.get("country") or "-"
                 phone = o.get("phone") or "-"
                 otp_code = o.get("otp_code") or "-"
-                status = o.get("status") or "-"
+                status_upper = str(o.get("status") or "").upper()
+
+                if status_upper == "PENDING" and not _is_real_otp_code(o.get("otp_code")):
+                    status_text = "⏳ Menunggu SMS OTP..."
+                elif status_upper == "SUCCESS" and _order_has_received_otp(o):
+                    status_text = "🔐 OTP DITERIMA"
+                elif status_upper == "COMPLETED":
+                    status_text = "✅ PESANAN SELESAI"
+                elif status_upper == "REFUNDED":
+                    status_text = "❌ REFUNDED"
+                else:
+                    status_text = status_upper or "-"
+
                 entries.append(
                     f"<b>{idx}. {escape(str(service_name))} — {escape(str(country_name))}</b>\n"
-                    f"   📞 <code>{escape(str(phone))}</code>\n"
-                    f"   🔐 OTP: <code>{escape(str(otp_code))}</code>\n"
-                    f"   💰 {format_rupiah(o.get('sell_price') or 0)} | 📌 {escape(str(status))}\n"
-                    f"   🕐 {escape(format_datetime_wib(o.get('created_at')))}\n"
-                    f"   ⏰ Expired: {escape(format_datetime_wib(o.get('expired_at')))}\n"
-                    f"   🧾 <code>{escape(str(o.get('order_id') or '-'))}</code>"
+                    f"🖥 Server: <b>{escape(str(OTP_SERVERS.get(str(o.get('provider') or '').lower(), o.get('provider') or '-')))}</b>\n"
+                    f"📞 Nomor: <code>{escape(str(phone))}</code>\n"
+                    f"💰 Harga: <b>{format_rupiah(o.get('sell_price') or 0)}</b>\n"
+                    f"🕐 Transaksi: <b>{escape(format_datetime_wib(o.get('created_at')))}</b>\n"
+                    f"⏰ Expired: <b>{escape(format_datetime_wib(o.get('expired_at')))}</b>\n"
+                    f"📌 Status: <b>{escape(status_text)}</b>\n"
+                    f"🔐 OTP: <code>{escape(str(otp_code))}</code>\n"
+                    f"🧾 Order: <code>{escape(str(o.get('order_id') or '-'))}</code>"
                 )
+                # The detail button is directly under this history entry, not
+                # collected at the bottom of the whole history message.
                 buttons.append([InlineKeyboardButton(
-                    f"🔎 Detail #{idx}",
+                    f"📦 Buka Pesanan #{idx}",
                     callback_data=f"otp_order_view:{o.get('order_id')}"
                 )])
+
             text = "📋 <b>HISTORI ORDER</b>\n\n" + "\n\n".join(entries)
-            kb = buttons + [[InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")]]
+            kb = []
+            # Rebuild the keyboard in the same order as the descriptions: each
+            # history entry has its own button immediately below it.
+            for button in buttons:
+                kb.append(button)
+
+            if total_pages > 1:
+                nav = []
+                if page > 0:
+                    nav.append(InlineKeyboardButton("◀️", callback_data=f"user_history_order_page:{page - 1}"))
+                nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=f"user_history_order_page:{page}"))
+                if page < total_pages - 1:
+                    nav.append(InlineKeyboardButton("▶️", callback_data=f"user_history_order_page:{page + 1}"))
+                kb.append(nav)
+
+            kb.append([InlineKeyboardButton("⬅️ Kembali", callback_data="user_home")])
 
         await query.edit_message_text(
             text,

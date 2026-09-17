@@ -360,23 +360,55 @@ def get_deposit_history(
 
 def get_order_history(
     telegram_id,
-    limit=5
+    limit=None,
+    offset=0
 ):
 
     with get_db() as db:
 
+        # User order history is intentionally not capped at 5 items.
+        # Pagination is handled by the Telegram UI so older orders remain
+        # accessible without changing any order/refund/OTP logic.
+        if limit is None:
+            return db.execute(
+                """
+                SELECT
+                    o.*,
+                    (
+                        SELECT l.balance_after
+                        FROM ledger l
+                        WHERE l.telegram_id = o.telegram_id
+                          AND l.reference = o.order_id
+                          AND l.transaction_type = 'ORDER_OTP'
+                        ORDER BY l.id ASC
+                        LIMIT 1
+                    ) AS order_balance_after
+                FROM orders o
+                WHERE o.telegram_id = %s
+                ORDER BY o.created_at DESC, o.id DESC
+                """,
+                (telegram_id,)
+            ).fetchall()
+
         return db.execute(
             """
-            SELECT *
-            FROM orders
-            WHERE telegram_id = %s
-            ORDER BY created_at DESC
-            LIMIT %s
+            SELECT
+                o.*,
+                (
+                    SELECT l.balance_after
+                    FROM ledger l
+                    WHERE l.telegram_id = o.telegram_id
+                      AND l.reference = o.order_id
+                      AND l.transaction_type = 'ORDER_OTP'
+                    ORDER BY l.id ASC
+                    LIMIT 1
+                ) AS order_balance_after
+            FROM orders o
+            WHERE o.telegram_id = %s
+            ORDER BY o.created_at DESC, o.id DESC
+            LIMIT %s OFFSET %s
             """,
-            (
-                telegram_id,
-                limit
-            )
+            (telegram_id, limit, offset)
         ).fetchall()
 
 
