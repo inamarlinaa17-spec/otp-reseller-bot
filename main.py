@@ -4142,6 +4142,13 @@ async def _send_otp_received_message(application, order_id, data_sms):
     country_name = current.get("country_name") or current.get("country") or "-"
     phone = current.get("phone") or runtime.get("phone") or "-"
     expired_at = current.get("expired_at") or data_sms.get("expired_at") or runtime.get("expired_at")
+    previous_code = str(current.get("previous_otp_code") or "").strip()
+    otp_lines = (
+        f"🔐 OTP 1: <code>{escape(previous_code)}</code>\n"
+        f"🔐 OTP 2: <code>{escape(str(code))}</code>"
+        if _is_real_otp_code(previous_code) and str(code).strip() != previous_code
+        else f"🔐 OTP: <code>{escape(str(code))}</code>"
+    )
     text_body = (
         "🎉 <b>OTP DITERIMA</b>\n\n"
         f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
@@ -4150,7 +4157,7 @@ async def _send_otp_received_message(application, order_id, data_sms):
         f"📞 Nomor: <code>{escape(str(phone))}</code>\n"
         f"🕐 Transaksi: <b>{escape(format_datetime_wib(current.get('created_at')))}</b>\n"
         f"⏰ Expired: <b>{escape(format_datetime_wib(expired_at))}</b>\n\n"
-        f"🔐 OTP: <code>{escape(str(code))}</code>\n\n"
+        f"{otp_lines}\n\n"
         f"📨 SMS:\n<code>{escape(str(text))}</code>"
     )
     # Telegram delivery is part of the OTP processing path. If this fails,
@@ -6406,6 +6413,14 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             await query.answer("Resend baru tersedia setelah OTP diterima.", show_alert=True)
             return
 
+        # All three OTP servers: once the original activation has passed its
+        # expiry time, Resend OTP must no longer contact the provider. History
+        # may contain an older inline button, so enforce the same rule at the
+        # callback level too.
+        if provider in {"5sim", "rumahotp", "premotp"} and _order_expired(order):
+            await query.answer("⏰ Masa aktif order sudah berakhir. Resend OTP tidak tersedia.", show_alert=True)
+            return
+
         # The provider order ID can temporarily live only in the runtime cache
         # when the asynchronous DB save is still pending or failed. Recover it
         # here so Resend OTP can still reach RumahOTP.
@@ -6616,13 +6631,22 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         has_otp = _order_has_received_otp(order)
         current_otp = _is_real_otp_code(order.get("otp_code"))
         previous_otp = _is_real_otp_code(order.get("previous_otp_code"))
+        # History/detail uses the same expiry presentation for Server 1, 2,
+        # and 3. Once an order has received at least one real OTP and the
+        # original activation has expired, present it as completed and hide
+        # Resend OTP. The stored database status is not changed here.
+        history_expired = provider in {"5sim", "rumahotp", "premotp"} and _order_expired(order)
+        history_completed = (
+            status_upper == "COMPLETED"
+            or (history_expired and has_otp)
+        )
 
-        if status_upper == "PENDING" and not current_otp:
+        if history_completed:
+            status_line = "✅ <b>PESANAN SELESAI</b>"
+        elif status_upper == "PENDING" and not current_otp:
             status_line = "⏳ <b>Menunggu SMS OTP...</b>"
         elif status_upper == "SUCCESS" and has_otp:
             status_line = "🔐 <b>OTP DITERIMA</b>"
-        elif status_upper == "COMPLETED":
-            status_line = "✅ <b>PESANAN SELESAI</b>"
         elif status_upper == "REFUNDED":
             status_line = "❌ <b>REFUNDED</b>"
         else:
@@ -6645,11 +6669,17 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         else:
             text += "\n"
 
-        if status_upper == "SUCCESS" and has_otp:
-            text += (
-                f"🔐 OTP: <code>{escape(str(otp_code))}</code>\n\n"
-                f"📨 SMS:\n<code>{escape(str(order.get('sms_text') or '-'))}</code>\n\n"
-            )
+        if has_otp:
+            if previous_otp and current_otp and str(order.get("previous_otp_code")).strip() != str(order.get("otp_code")).strip():
+                text += (
+                    f"🔐 OTP 1: <code>{escape(str(order.get('previous_otp_code')))}</code>\n"
+                    f"🔐 OTP 2: <code>{escape(str(order.get('otp_code')))}</code>\n\n"
+                )
+            elif current_otp:
+                text += f"🔐 OTP: <code>{escape(str(otp_code))}</code>\n\n"
+            elif previous_otp:
+                text += f"🔐 OTP 1: <code>{escape(str(order.get('previous_otp_code')))}</code>\n\n"
+            text += f"📨 SMS:\n<code>{escape(str(order.get('sms_text') or '-'))}</code>\n\n"
         elif status_upper == "PENDING" and not current_otp:
             text += ""
         else:
@@ -6659,14 +6689,19 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         kb = []
         if status_upper == "PENDING" and not current_otp:
-            if not previous_otp:
+            if history_completed:
+                kb.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")])
+            elif not previous_otp:
                 kb.append([InlineKeyboardButton("❌ Batal / Refund", callback_data=f"otp_cancel:{order_id}")])
             else:
                 kb.append([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")])
         elif status_upper == "SUCCESS" and has_otp:
-            kb.append([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")])
-            kb.append([InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")])
-        elif status_upper == "COMPLETED":
+            if history_expired:
+                kb.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")])
+            else:
+                kb.append([InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")])
+                kb.append([InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")])
+        elif history_completed or status_upper == "COMPLETED":
             kb.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")])
         elif status_upper == "REFUNDED":
             kb.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")])
