@@ -26,6 +26,7 @@ from urllib.parse import quote
 from psycopg.errors import UniqueViolation
 
 from flask import Flask, request, jsonify
+from webapp import webapp_bp
 
 from telegram import (
     Update,
@@ -199,6 +200,7 @@ _AUTO_POLL_CURSOR = 0
 # =========================================================
 
 app = Flask(__name__)
+app.register_blueprint(webapp_bp)
 
 
 # =========================================================
