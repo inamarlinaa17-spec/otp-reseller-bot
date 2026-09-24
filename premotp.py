@@ -1,6 +1,8 @@
 import base64
 import io
 import os
+import threading
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -29,8 +31,35 @@ def _request(path, method="GET", payload=None, timeout=20):
     return data.get("data") or {}
 
 
+# Cache hanya katalog layanan Server 3. Endpoint negara, harga, order,
+# QRIS, dan status tetap memakai jalur API semula (data live).
+_SERVICES_CACHE_TTL = 300  # 5 menit
+_services_cache = {}
+_services_cache_lock = threading.Lock()
+
+
 def get_services(service_type="regular"):
-    return _request(f"/catalog/services?type={service_type}")
+    current = time.monotonic()
+    cached = _services_cache.get(service_type)
+    if cached and current - cached[0] < _SERVICES_CACHE_TTL:
+        return cached[1]
+
+    # Satu permintaan API saja ketika beberapa user membuka Server 3 bersamaan.
+    with _services_cache_lock:
+        cached = _services_cache.get(service_type)
+        if cached and time.monotonic() - cached[0] < _SERVICES_CACHE_TTL:
+            return cached[1]
+        try:
+            result = _request(f"/catalog/services?type={service_type}", timeout=10)
+        except Exception:
+            # Katalog terakhir tetap bisa dinavigasi saat API sedang lambat.
+            # Negara/harga/stok tetap diperiksa langsung pada tahap berikutnya.
+            if cached:
+                return cached[1]
+            raise
+        if result:
+            _services_cache[service_type] = (time.monotonic(), result)
+        return result
 
 
 def get_countries(service_key, service_type="regular"):

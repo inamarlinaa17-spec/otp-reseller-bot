@@ -1787,31 +1787,40 @@ def get_service_catalog(server):
         # commonly purchased services first so page 1 is immediately useful.
         # We deliberately do NOT hard-code the catalog itself: every service
         # still comes from PremOTP and this only changes presentation order.
+        # Cocokkan nama layanan secara spesifik: "wa" tidak boleh
+        # mencocokkan "Rewardy" atau "SwagBucks" secara tidak sengaja.
+        import re
         priority_terms = [
-            (0, ("whatsapp", "wa")),
-            (1, ("shopee",)),
-            (2, ("tiktok",)),
-            (3, ("gmail", "google", "youtube")),
-            (4, ("telegram",)),
-            (5, ("facebook",)),
-            (6, ("instagram",)),
-            (7, ("tokopedia",)),
-            (8, ("gojek",)),
-            (9, ("grab",)),
-            (10, ("dana",)),
-            (11, ("discord",)),
-            (12, ("lazada",)),
-            (13, ("blibli",)),
-            (14, ("twitter", "x.com", "x twitter")),
+            ("whatsapp", "whatsapp messenger"),
+            ("shopee",),
+            ("tiktok", "douyin"),
+            ("google / youtube / gmail", "google/youtube/gmail", "google gmail youtube", "gmail"),
+            ("telegram",),
+            ("facebook",),
+            ("instagram", "instagram / threads"),
+            ("tokopedia",),
+            ("gojek",),
+            ("grab",),
+            ("dana",),
+            ("discord",),
+            ("lazada",),
+            ("blibli",),
+            ("twitter", "x twitter"),
         ]
 
         def _premotp_service_rank(item):
             code, label = item
-            text = f"{code} {label}".lower().replace("_", " ").replace("-", " ")
-            for rank, terms in priority_terms:
-                if any(term in text for term in terms):
-                    return (rank, text)
-            return (1000, text)
+            name = re.sub(r"\s+", " ", str(label).lower().replace("_", " ").replace("-", " ")).strip()
+            key = str(code).lower().strip()
+            for rank, aliases in enumerate(priority_terms):
+                if name in aliases or key in aliases:
+                    return (rank, name)
+            # Variasi nama provider (misalnya WhatsApp Business, TikTok / Douyin).
+            for rank, aliases in enumerate(priority_terms):
+                if any(name.startswith(alias + " ") or name.startswith(alias + " /")
+                       for alias in aliases):
+                    return (rank, name)
+            return (1000, name)
 
         catalog.sort(key=_premotp_service_rank)
         return catalog
