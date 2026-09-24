@@ -1,5 +1,7 @@
 import base64
 import io
+import json
+import logging
 import os
 import threading
 import time
@@ -31,35 +33,99 @@ def _request(path, method="GET", payload=None, timeout=20):
     return data.get("data") or {}
 
 
-# Cache hanya katalog layanan Server 3. Endpoint negara, harga, order,
-# QRIS, dan status tetap memakai jalur API semula (data live).
-_SERVICES_CACHE_TTL = 300  # 5 menit
+# Hanya katalog layanan Server 3 yang di-cache; order, stok, negara,
+# harga dan transaksi lain tetap menggunakan API langsung.
+_SERVICES_CACHE_TTL = 300
+_CACHE_FILE = os.getenv("PREMOTP_CATALOG_CACHE_FILE", "/app/.premotp_catalog_cache.json")
 _services_cache = {}
 _services_cache_lock = threading.Lock()
+_services_refreshing = set()
+_logger = logging.getLogger(__name__)
+
+
+def _load_services_cache():
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+        if isinstance(saved, dict):
+            for kind, item in saved.items():
+                if isinstance(item, dict) and item.get("data"):
+                    _services_cache[kind] = (float(item.get("saved_at", 0)), item["data"])
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _save_services_cache():
+    # Atomic replace prevents incomplete JSON when Railway restarts mid-write.
+    temp = _CACHE_FILE + ".tmp"
+    try:
+        parent = os.path.dirname(_CACHE_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        data = {key: {"saved_at": saved_at, "data": catalog}
+                for key, (saved_at, catalog) in _services_cache.items()}
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False)
+        os.replace(temp, _CACHE_FILE)
+    except OSError as exc:
+        _logger.warning("PremOTP catalog cache not persisted: %s", exc)
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+
+
+def _refresh_services(service_type):
+    try:
+        result = _request(f"/catalog/services?type={service_type}", timeout=5)
+        if result:
+            with _services_cache_lock:
+                _services_cache[service_type] = (time.time(), result)
+                _save_services_cache()
+        return result
+    except Exception as exc:
+        _logger.warning("PremOTP catalog refresh failed (%s): %s", service_type, exc)
+        return None
+    finally:
+        with _services_cache_lock:
+            _services_refreshing.discard(service_type)
 
 
 def get_services(service_type="regular"):
-    current = time.monotonic()
-    cached = _services_cache.get(service_type)
-    if cached and current - cached[0] < _SERVICES_CACHE_TTL:
-        return cached[1]
-
-    # Satu permintaan API saja ketika beberapa user membuka Server 3 bersamaan.
+    # Return cached catalog immediately, even if expired, while refreshing in
+    # the background. Users never wait on a slow PremOTP API when cache exists.
     with _services_cache_lock:
         cached = _services_cache.get(service_type)
-        if cached and time.monotonic() - cached[0] < _SERVICES_CACHE_TTL:
+        if cached and time.time() - cached[0] < _SERVICES_CACHE_TTL:
             return cached[1]
-        try:
-            result = _request(f"/catalog/services?type={service_type}", timeout=10)
-        except Exception:
-            # Katalog terakhir tetap bisa dinavigasi saat API sedang lambat.
-            # Negara/harga/stok tetap diperiksa langsung pada tahap berikutnya.
-            if cached:
-                return cached[1]
-            raise
+        if service_type not in _services_refreshing:
+            _services_refreshing.add(service_type)
+            start_refresh = True
+        else:
+            start_refresh = False
+    if cached:
+        if start_refresh:
+            threading.Thread(target=_refresh_services, args=(service_type,), daemon=True).start()
+        return cached[1]
+    if start_refresh:
+        # Cold start without any saved catalog: one bounded API request.
+        result = _refresh_services(service_type)
         if result:
-            _services_cache[service_type] = (time.monotonic(), result)
-        return result
+            return result
+    else:
+        # Another user is already loading; wait briefly for that one request.
+        for _ in range(20):
+            time.sleep(0.1)
+            with _services_cache_lock:
+                cached = _services_cache.get(service_type)
+                if cached:
+                    return cached[1]
+                if service_type not in _services_refreshing:
+                    break
+    raise RuntimeError("Katalog PremOTP belum tersedia. Coba lagi sebentar.")
+
+
+_load_services_cache()
 
 
 def get_countries(service_key, service_type="regular"):
