@@ -3504,9 +3504,8 @@ def _manual_admin_url(deposit_id, amount, payment_amount):
 
 
 def _manual_code_max(amount):
-    # Kode unik menyesuaikan nominal: makin kecil deposit, makin kecil
-    # rentang kode. Batas maksimum selalu 500.
-    return min(500, max(1, int(amount) // 200))
+    # Khusus QRIS manual: kode unik selalu dalam rentang Rp50–Rp150.
+    return 150
 
 
 def _generate_manual_payment_amount(amount):
@@ -3514,8 +3513,8 @@ def _generate_manual_payment_amount(amount):
     max_code = _manual_code_max(amount)
     with get_db() as db:
         for _ in range(max(100, max_code * 3)):
-            code = random.randint(1, max_code)
-            payment_amount = amount + code
+            code = random.randint(50, max_code)
+            payment_amount = amount + 150 + code
             exists = db.execute(
                 "SELECT 1 FROM deposits WHERE status='PENDING' AND payment_method='MANUAL_QRIS' AND amount=%s AND unique_code=%s LIMIT 1",
                 (amount, code)
@@ -3530,11 +3529,12 @@ def _manual_deposit_message(deposit_id, amount, payment_amount, code):
         "💳 <b>DEPOSIT QRIS MANUAL</b>\n\n"
         f"🧾 ID: <code>{escape(str(deposit_id))}</code>\n"
         f"💰 Saldo masuk: <b>{format_rupiah(amount)}</b>\n"
-        f"🔢 Kode unik: <b>{code:03d}</b>\n"
+        "🧾 Biaya admin: <b>Rp150</b>\n"
+        f"🔢 Kode unik: <b>Rp{code}</b>\n"
         f"💸 <b>Transfer tepat: {format_rupiah(payment_amount)}</b>\n\n"
-        "⚠️ Transfer <b>sesuai nominal sampai 3 digit terakhir</b> agar admin mudah mencocokkan pembayaran.\n"
+        "⚠️ Transfer <b>sesuai nominal yang tertera</b> agar admin mudah mencocokkan pembayaran.\n"
         "Setelah pembayaran, tekan <b>Saya Sudah Bayar</b>.\n\n"
-        "Kode unik <b>tidak ikut menjadi saldo</b>."
+        "Biaya admin dan kode unik <b>tidak ikut menjadi saldo</b>."
     )
 
 
