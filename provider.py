@@ -207,6 +207,9 @@ def get_all_products():
         if not isinstance(data, dict):
             return catalog
 
+        # Identify country keys using the official countries endpoint.
+        countries = get_all_countries()
+        country_keys = {str(k).lower() for k in countries} if isinstance(countries, dict) else set()
         # /guest/prices => {country: {product: {operator: {...}}}}
         # Be tolerant of the alternative {product: {country: ...}} shape.
         for first_key, first_value in data.items():
@@ -218,7 +221,15 @@ def get_all_products():
                     continue
 
                 # Country -> product -> operator
-                if any(
+                if str(first_key).lower() in country_keys or (not country_keys and any(
+                    isinstance(v, dict) and ("cost" in v or "count" in v)
+                    for v in second_value.values()
+                )):
+                    product = str(second_key).strip()
+                    if product:
+                        catalog.setdefault(product, {"Category": "activation"})
+                    continue
+                if (not country_keys or str(first_key).lower() in country_keys) and any(
                     isinstance(v, dict) and (
                         "cost" in v or "count" in v or "rate" in v
                     )
