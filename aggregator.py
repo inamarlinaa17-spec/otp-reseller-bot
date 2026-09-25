@@ -5,6 +5,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 from provider import get_prices as get_5sim_prices, get_all_products as get_5sim_products
+from smspool import (
+    get_prices as get_smspool_prices,
+    find_service as find_smspool_service,
+    get_all_countries as get_smspool_countries,
+    get_all_services as get_smspool_services,
+    get_suggested_countries as get_smspool_suggested_countries,
+)
 from rumahotp import (
     get_all_quotes as get_rumahotp_all_quotes,
     get_operator_quotes as get_rumahotp_operator_quotes,
@@ -155,7 +162,7 @@ def _same_country(a, b):
 
 
 def _extract_service_records(data):
-    """Normalize service-list responses from both providers."""
+    """Normalize service-list responses from all three providers."""
     records = []
 
     if isinstance(data, dict):
@@ -247,14 +254,15 @@ def get_aggregator_service_catalog():
 
     records = []
 
-    # Fetch the two catalogs concurrently. One slow provider no longer
+    # Fetch the three catalogs concurrently. One slow provider no longer
     # blocks the other provider's service list.
-    # Multi Server hanya menggabungkan RumahOTP + 5SIM.
+    # Multi Server hanya menggabungkan RumahOTP + SMSPool + 5SIM.
     loaders = (
         ("5SIM", get_5sim_products),
-                ("RumahOTP", lambda: [{"service_code": x.get("service_code"), "service_name": x.get("service_name")} for x in __import__("rumahotp").get_services()]),
+        ("SMSPool", get_smspool_services),
+        ("RumahOTP", lambda: [{"service_code": x.get("service_code"), "service_name": x.get("service_name")} for x in __import__("rumahotp").get_services()]),
     )
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(loader): name for name, loader in loaders}
         for future in as_completed(futures):
             provider_name = futures[future]
@@ -334,8 +342,66 @@ def _resolve_5sim_service(service):
     return None
 
 
+def _resolve_smspool_service(service):
+    for candidate in _service_candidates(service):
+        try:
+            found = find_smspool_service(candidate)
+            if found and found.get("id") is not None:
+                return found
+        except Exception:
+            continue
+
+    # Raw-catalog fallback; SMSPool permits either ID or service name in
+    # /sms/all_stock, so a resolved name is enough for the quote request.
+    try:
+        target = _canonical_service_key(service)
+        for item in get_smspool_services() or []:
+            if not isinstance(item, dict):
+                continue
+            sid = item.get("ID") or item.get("id") or item.get("service_id")
+            vals = [item.get("name"), item.get("service"), item.get("title")]
+            for value in vals:
+                if value and _canonical_service_key(value) == target:
+                    return {"id": sid, "name": str(item.get("name") or value)}
+    except Exception:
+        logger.exception("[AGGREGATOR] SMSPool raw service resolution failed: %s", service)
+    return None
 
 
+def _smspool_country_map():
+    mapping = {}
+    try:
+        data = get_smspool_countries()
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    name = (
+                        value.get("name")
+                        or value.get("country")
+                        or value.get("country_name")
+                        or value.get("short_name")
+                    )
+                    cid = value.get("ID") or value.get("id") or key
+                else:
+                    name, cid = value, key
+                if name is not None:
+                    mapping[str(cid)] = str(name)
+        elif isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                cid = item.get("ID") or item.get("id") or item.get("country") or item.get("code")
+                name = (
+                    item.get("name")
+                    or item.get("country_name")
+                    or item.get("short_name")
+                    or item.get("country")
+                )
+                if cid is not None and name:
+                    mapping[str(cid)] = str(name)
+    except Exception:
+        logger.exception("SMSPool country map error")
+    return mapping
 
 
 def _5sim_all_quotes(service):
@@ -405,23 +471,164 @@ def _5sim_all_quotes(service):
     return quotes
 
 
+def _smspool_all_quotes(service):
+    """Fetch SMSPool stock for a canonical service.
+
+    SMSPool accepts either the service ID or service name.  Prefer the
+    resolved service name because it is less brittle when the provider
+    changes numeric IDs.  If /sms/all_stock returns no rows, fall back to
+    /request/suggested_countries so a valid service is not incorrectly
+    reported as unavailable.
+    """
+    found = _resolve_smspool_service(service)
+    lookup_service = (
+        found.get("name")
+        if found and found.get("name")
+        else (found.get("id") if found else service)
+    )
+
+    data = get_smspool_prices(service=lookup_service)
+    country_names = _smspool_country_map()
+    quotes = []
+
+    def add_row(cid, value, fallback_name=None, pool=None, allow_zero_stock=False):
+        if not isinstance(value, dict):
+            return
+
+        cost = _num(
+            value.get("cost")
+            or value.get("price")
+            or value.get("amount")
+        )
+        stock = _int(
+            value.get("stock")
+            or value.get("count")
+            or value.get("available")
+        )
+        if stock <= 0 and allow_zero_stock and cost > 0:
+            stock = 1
+        if cost <= 0 or stock <= 0 or cid is None:
+            return
+
+        cid = str(cid)
+        quotes.append({
+            "provider": "smspool",
+            "country": cid,
+            "country_name": str(
+                value.get("country_name")
+                or country_names.get(cid)
+                or value.get("name")
+                or fallback_name
+                or cid
+            ),
+            "service": str(lookup_service),
+            "service_name": str(service),
+            "operator": _operator_label(
+                value.get("operator")
+                or value.get("operator_name")
+                or value.get("carrier")
+                or value.get("carrier_name")
+                or value.get("network")
+                or "AUTO"
+            ),
+            "pool": (
+                str(value.get("pool"))
+                if value.get("pool") is not None
+                else pool
+            ),
+            "cost_usd": cost,
+            "stock": stock,
+        })
+
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            add_row(
+                item.get("country")
+                or item.get("country_id")
+                or item.get("country_code"),
+                item,
+            )
+
+    elif isinstance(data, dict):
+        # Tolerate {country: {...}} and {country: {pool: {...}}}.
+        for country_id, country_data in data.items():
+            if not isinstance(country_data, dict):
+                continue
+
+            direct_cost = (
+                country_data.get("cost")
+                or country_data.get("price")
+                or country_data.get("amount")
+            )
+            if direct_cost is not None:
+                add_row(country_id, country_data)
+                continue
+
+            candidates = []
+            for pool, nested in country_data.items():
+                if not isinstance(nested, dict):
+                    continue
+                cost = _num(
+                    nested.get("cost")
+                    or nested.get("price")
+                    or nested.get("amount")
+                )
+                stock = _int(
+                    nested.get("stock")
+                    or nested.get("count")
+                    or nested.get("available")
+                )
+                if cost > 0 and stock > 0:
+                    candidates.append((cost, stock, pool, nested))
+            if candidates:
+                _, _, pool, nested = min(candidates, key=lambda x: x[0])
+                add_row(country_id, nested, pool=pool)
+
+    if quotes:
+        return quotes
+
+    # Fallback: suggested countries returns a price even when all_stock is
+    # temporarily unavailable. It does not expose stock count, so mark it
+    # as 1 only as an availability indicator.
+    try:
+        suggested = get_smspool_suggested_countries(lookup_service)
+        if isinstance(suggested, list):
+            for item in suggested:
+                if not isinstance(item, dict):
+                    continue
+                add_row(
+                    item.get("country_id") or item.get("country") or item.get("ID"),
+                    {
+                        "price": item.get("price") or item.get("cost"),
+                        "stock": 1,
+                        "country_name": item.get("name") or item.get("country_name") or item.get("short_name"),
+                    },
+                    allow_zero_stock=True,
+                )
+    except Exception:
+        logger.exception("[AGGREGATOR] SMSPool suggested countries fallback failed")
+
+    return quotes
 
 
 def _all_quotes(service):
-    """Fetch both providers in parallel, with a short-lived cache."""
+    """Fetch all three providers in parallel, with a short-lived cache."""
     cached = _cache_get_quotes(service)
     if cached is not None:
         return cached
 
     results = []
-    # Multi Server hanya mengambil quote live dari RumahOTP dan 5SIM.
+    # Multi Server hanya mengambil quote live dari RumahOTP, SMSPool, dan 5SIM.
     providers = (
         ("RumahOTP", get_rumahotp_all_quotes),
-                ("5SIM", _5sim_all_quotes),
+        ("SMSPool", _smspool_all_quotes),
+        ("5SIM", _5sim_all_quotes),
     )
 
     # Provider calls are independent, so never wait for them sequentially.
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(fn, service): name for name, fn in providers}
         for future in as_completed(futures):
             name = futures[future]
@@ -456,6 +663,8 @@ def get_provider_quotes(server, country, service):
         except Exception:
             logger.exception("[PROVIDER] RumahOTP operator quotes failed")
         quotes = get_rumahotp_all_quotes(service)
+    elif server == "smspool":
+        quotes = _smspool_all_quotes(service)
     elif server == "5sim":
         quotes = _5sim_all_quotes(service)
     else:

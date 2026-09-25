@@ -1710,10 +1710,8 @@ def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
 def get_service_catalog(server):
     """Katalog layanan dari provider Server 1 (5SIM) atau Server 2 (RumahOTP)."""
     if server == "5sim":
-        catalog = []
-        seen = set()
-        # Show only actual 5SIM products; static labels are for display only.
-        labels = dict(OTP_SERVICES)
+        catalog = list(OTP_SERVICES)
+        seen = {code.lower() for code, _ in catalog}
 
         data = get_all_products()
         if isinstance(data, dict):
@@ -1726,7 +1724,7 @@ def get_service_catalog(server):
                         continue
                 code = str(product).strip()
                 if code and code.lower() not in seen:
-                    catalog.append((code, labels.get(code, code.replace("_", " ").title())))
+                    catalog.append((code, code.replace("_", " ").title()))
                     seen.add(code.lower())
 
         return catalog
@@ -2211,16 +2209,41 @@ async def _get_otp_operator_names(server, country, service):
                     break
         names = {}
         for name, info in (product_data or {}).items():
-            if not isinstance(info, dict):
-                continue
             try:
                 stock = int(info.get("count") or 0)
-                cost = float(info.get("cost") or 0)
-            except (TypeError, ValueError):
-                continue
-            text = str(name).strip()
-            if stock > 0 and cost > 0 and text and text.lower() not in {"any", "all", "auto", "automatic", "-"}:
-                names.setdefault(text.lower(), text)
+            except Exception:
+                stock = 0
+            if isinstance(info, dict) and stock > 0:
+                text = str(name).strip()
+                if not text or text.lower() in {"any", "all", "auto", "automatic", "-"}:
+                    continue
+                key = text.lower().replace("_", " ").strip()
+                # Merge common aliases/casing so AXIS/Axis and 3/Three are
+                # shown as one operator button.
+                if key in {"3", "three", "3 (three)"}:
+                    display = "3 (Three)"
+                    key = "three"
+                elif key in {"tsel", "telkom", "telkomsel", "telkomsel indonesia"}:
+                    display = "Telkomsel"
+                    key = "telkomsel"
+                elif key in {"xl", "xl axiata"}:
+                    display = "XL"
+                    key = "xl"
+                elif key in {"im3", "im3 ooredoo", "indosat", "indosat ooredoo"}:
+                    display = "Indosat"
+                    key = "indosat"
+                elif key in {"axis"}:
+                    display = "Axis"
+                    key = "axis"
+                elif key in {"smartfren"}:
+                    display = "Smartfren"
+                    key = "smartfren"
+                elif key in {"byu", "by.u"}:
+                    display = "By.U"
+                    key = "byu"
+                else:
+                    display = text
+                names.setdefault(key, display)
         return sorted(names.values(), key=str.lower)
 
     if server == "rumahotp":
@@ -3458,7 +3481,7 @@ async def command_server(update, context, server):
             asyncio.to_thread(get_service_catalog, server), timeout=15
         )
     except Exception:
-        services = [] if server == "5sim" else list(OTP_SERVICES)
+        services = list(OTP_SERVICES)
     await update.message.reply_text(
         "🖥 <b>PILIH LAYANAN OTP</b>\n\n"
         f"Server: <b>{OTP_SERVERS.get(server, server)}</b>\n\n"
