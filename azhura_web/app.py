@@ -4,6 +4,8 @@
 import os, sys, time, json, hmac, hashlib, secrets, uuid, math
 from pathlib import Path
 from datetime import datetime, timezone
+from base64 import b64encode
+from premotp import create_qris as prem_create_qris, qris_id as prem_qris_id, qris_ref_id as prem_qris_ref_id, qris_total_payment as prem_qris_total, qr_image_bytes as prem_qr_image
 import requests, psycopg
 from psycopg.rows import dict_row
 from flask import Flask, request, jsonify, send_from_directory, session, Response
@@ -161,16 +163,94 @@ def manual_qris_paid():
     if not uid():return err('Login diperlukan',401)
     dep=str((request.get_json(silent=True) or {}).get('deposit_id',''))
     if len(dep)>40 or not dep.startswith('DEP-'):return err('ID deposit tidak valid')
+    admin=os.getenv('ADMIN_ID','').strip()
+    if not admin.isdigit():return err('ADMIN_ID belum diatur di Railway web',503)
     with conn() as db:
-        row=db.execute("SELECT deposit_id,status,payment_method FROM deposits WHERE deposit_id=%s AND telegram_id=%s",(dep,uid())).fetchone()
+        row=db.execute('SELECT deposit_id,status,payment_method,amount,payment_amount,unique_code FROM deposits WHERE deposit_id=%s AND telegram_id=%s',(dep,uid())).fetchone()
         if not row or row['payment_method']!='MANUAL_QRIS':return err('Deposit tidak ditemukan',404)
         if row['status']!='PENDING':return jsonify(status=row['status'])
-        db.execute("""CREATE TABLE IF NOT EXISTS azhura_web_manual_confirmations
-            (deposit_id TEXT PRIMARY KEY,telegram_id BIGINT NOT NULL,confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
-        db.execute('INSERT INTO azhura_web_manual_confirmations(deposit_id,telegram_id) VALUES(%s,%s) ON CONFLICT DO NOTHING',(dep,uid()))
-    # This is user self-report, NOT verified payment. Existing Telegram admin
-    # approval is the only path that credits the user's balance.
-    return jsonify(status='WAITING_ADMIN',message='Konfirmasi tersimpan. Saldo masuk setelah admin memverifikasi pembayaran.')
+        db.execute('CREATE TABLE IF NOT EXISTS azhura_web_manual_confirmations (deposit_id TEXT PRIMARY KEY,telegram_id BIGINT NOT NULL,confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())')
+        if db.execute('SELECT 1 FROM azhura_web_manual_confirmations WHERE deposit_id=%s',(dep,)).fetchone():
+            return jsonify(status='WAITING_ADMIN',message='Konfirmasi sudah dikirim. Menunggu pemeriksaan admin.')
+        # Locking is limited to this transaction. Do not credit balance from a user's click.
+        payload={'chat_id':admin,'text':f'🔔 KONFIRMASI QRIS MANUAL VIA WEB\n\nUser ID: {uid()}\nDeposit: {dep}\nSaldo: Rp{row["amount"]:,}\nTransfer: Rp{row["payment_amount"]:,}\nKode unik: {row["unique_code"]}\n\nPeriksa mutasi sebelum menyetujui.', 'reply_markup':{'inline_keyboard':[[{'text':'✅ Terima & Tambah Saldo','callback_data':'admin_manual_approve:'+dep}],[{'text':'❌ Tolak','callback_data':'admin_manual_reject:'+dep}]]}}
+        try:
+            response=requests.post('https://api.telegram.org/bot'+BOT_TOKEN+'/sendMessage',json=payload,timeout=12)
+            response.raise_for_status()
+            if not response.json().get('ok'):return err('Gagal mengirim konfirmasi ke admin. Coba lagi.',503)
+        except (requests.RequestException,ValueError):
+            app.logger.exception('Manual QRIS admin notification failed');return err('Notifikasi admin gagal terkirim. Coba lagi.',503)
+        db.execute('INSERT INTO azhura_web_manual_confirmations(deposit_id,telegram_id) VALUES(%s,%s)',(dep,uid()))
+    return jsonify(status='WAITING_ADMIN',message='Konfirmasi terkirim ke admin. Menunggu verifikasi mutasi.')
+
+
+@app.post('/api/deposit/cancel')
+def web_deposit_cancel():
+    if not uid():return err('Login diperlukan',401)
+    dep=str((request.get_json(silent=True) or {}).get('deposit_id',''))
+    if not dep.startswith('DEP-') or len(dep)>40:return err('ID deposit tidak valid')
+    with conn() as db:
+        row=db.execute('SELECT payment_method,status FROM deposits WHERE deposit_id=%s AND telegram_id=%s FOR UPDATE',(dep,uid())).fetchone()
+        if not row:return err('Invoice tidak ditemukan',404)
+        if row['status']!='PENDING':return err('Invoice sudah diproses, tidak dapat dibatalkan',409)
+        if row['payment_method']=='MANUAL_QRIS':
+            db.execute('CREATE TABLE IF NOT EXISTS azhura_web_manual_confirmations (deposit_id TEXT PRIMARY KEY,telegram_id BIGINT NOT NULL,confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())')
+            if db.execute('SELECT 1 FROM azhura_web_manual_confirmations WHERE deposit_id=%s',(dep,)).fetchone():return err('Konfirmasi sudah dikirim ke admin; hubungi admin untuk pembatalan.',409)
+        elif row['payment_method'] in ('AUTO','PREMOTP_QRIS'):
+            return err('Invoice otomatis tidak dapat dibatalkan dari web karena pembayaran mungkin sedang diproses. Tunggu status atau hubungi admin.',409)
+        else:return err('Metode deposit tidak didukung',400)
+        db.execute("UPDATE deposits SET status='FAILED',confirmed_at=%s WHERE deposit_id=%s AND telegram_id=%s AND status='PENDING'",(datetime.now().strftime('%Y-%m-%d %H:%M:%S'),dep,uid()))
+    return jsonify(ok=True,status='FAILED',message='Invoice manual dibatalkan.')
+
+@app.post('/api/deposit/auto/create')
+def web_midtrans_create():
+    if not uid():return err('Login diperlukan',401)
+    key=os.getenv('MIDTRANS_SERVER_KEY','')
+    if not key:return err('Midtrans belum dikonfigurasi pada service web',503)
+    try:amount=int((request.get_json(silent=True) or {}).get('amount',0))
+    except (TypeError,ValueError):return err('Nominal tidak valid')
+    if not 1000<=amount<=10_000_000:return err('Nominal harus Rp1.000–Rp10.000.000')
+    with conn() as db:
+        setting=db.execute("SELECT setting_value FROM bot_settings WHERE setting_key='payment_auto_enabled'").fetchone()
+        if setting and str(setting['setting_value']).lower() not in ('1','true','yes','on'):return err('Midtrans dinonaktifkan admin',503)
+        dep='DEP-'+uuid.uuid4().hex[:12].upper()
+        db.execute("INSERT INTO deposits(deposit_id,telegram_id,amount,status,created_at,payment_method) VALUES(%s,%s,%s,'PENDING',%s,'AUTO')",(dep,uid(),amount,datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    endpoint='https://app.sandbox.midtrans.com/snap/v1/transactions' if os.getenv('MIDTRANS_IS_PRODUCTION','true').lower() in ('false','0','no') else 'https://app.midtrans.com/snap/v1/transactions'
+    try:
+        r=requests.post(endpoint,json={'transaction_details':{'order_id':dep,'gross_amount':amount},'item_details':[{'id':'DEPOSIT','price':amount,'quantity':1,'name':'Deposit Saldo AZHURA'}],'customer_details':{'first_name':'User '+str(uid())}},headers={'Authorization':'Basic '+b64encode((key+':').encode()).decode(),'Content-Type':'application/json'},timeout=18)
+        r.raise_for_status();data=r.json()
+        if not data.get('redirect_url') or not data.get('token'):raise ValueError('Respons Midtrans tidak lengkap')
+        with conn() as db:db.execute('UPDATE deposits SET payment_reference=%s WHERE deposit_id=%s',(data['token'],dep))
+        return jsonify(deposit_id=dep,amount=amount,payment_url=data['redirect_url'],status='PENDING')
+    except (requests.RequestException,ValueError):
+        app.logger.exception('Midtrans invoice creation failed')
+        with conn() as db:db.execute("UPDATE deposits SET status='FAILED' WHERE deposit_id=%s AND status='PENDING'",(dep,))
+        return err('Gagal membuat invoice Midtrans',503)
+
+@app.post('/api/deposit/qris/create')
+def web_prem_qris_create():
+    if not uid():return err('Login diperlukan',401)
+    try:amount=int((request.get_json(silent=True) or {}).get('amount',0))
+    except (TypeError,ValueError):return err('Nominal tidak valid')
+    if not 1000<=amount<=10_000_000:return err('Nominal harus Rp1.000–Rp10.000.000')
+    with conn() as db:
+        setting=db.execute("SELECT setting_value FROM bot_settings WHERE setting_key='payment_premotp_qris_enabled'").fetchone()
+        if setting and str(setting['setting_value']).lower() not in ('1','true','yes','on'):return err('QRIS otomatis dinonaktifkan admin',503)
+        dep='DEP-'+uuid.uuid4().hex[:12].upper()
+        db.execute("INSERT INTO deposits(deposit_id,telegram_id,amount,status,created_at,payment_method) VALUES(%s,%s,%s,'PENDING',%s,'PREMOTP_QRIS')",(dep,uid(),amount,datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    try:
+        data=prem_create_qris(dep,amount);qid=prem_qris_id(data)
+        if not qid:raise ValueError('ID QRIS tidak tersedia')
+        raw=prem_qr_image(data)
+        if not raw:raise ValueError('Gambar QRIS tidak tersedia')
+        if len(raw)>3_000_000:raise ValueError('Gambar QRIS terlalu besar')
+        ref=prem_qris_ref_id(data) or dep;total=prem_qris_total(data) or amount
+        with conn() as db:db.execute('UPDATE deposits SET payment_reference=%s,external_id=%s,payment_amount=%s,payment_total=%s WHERE deposit_id=%s',(str(qid),str(ref),amount,int(total),dep))
+        return jsonify(deposit_id=dep,amount=amount,payment_amount=int(total),qr_data='data:image/png;base64,'+b64encode(raw).decode(),status='PENDING')
+    except Exception:
+        app.logger.exception('Automatic QRIS invoice creation failed')
+        with conn() as db:db.execute("UPDATE deposits SET status='FAILED' WHERE deposit_id=%s AND status='PENDING'",(dep,))
+        return err('Gagal membuat QRIS otomatis. Silakan coba lagi.',503)
 
 @app.get('/api/terms')
 def web_terms():
