@@ -1,0 +1,1 @@
+AZHURA web UI fix: renderChoices now defined; Server 1/2/3 catalog screens can render; deposit history, terms, and CS profile are accessible from web. NOTE: New QRIS payments are NOT implemented in this patch. Set ADMIN_USERNAME in web Railway for CS link. Preserve existing Railway configuration and secrets.
