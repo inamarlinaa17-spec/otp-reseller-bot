@@ -1671,6 +1671,30 @@ async def show_server_page(
 # PILIH LAYANAN OTP
 # =========================================================
 
+# Jenis katalog Server 3 disimpan per pengguna, bukan secara global untuk semua pengguna.
+_PREMOTP_USER_TYPES = {}
+
+def _premotp_type_for(query):
+    return _PREMOTP_USER_TYPES.get(query.from_user.id, "regular")
+
+async def show_premotp_type_page(query):
+    await query.edit_message_text(
+        "⚡ <b>SERVER 3 — PILIH JENIS NOKOS</b>\n\n"
+        "📦 <b>Nokos Reguler</b>\n"
+        "Pilihan praktis dan hemat untuk kebutuhan OTP sehari-hari.\n\n"
+        "✨ <b>Nokos Plus</b>\n"
+        "Pilihan unggulan dengan kualitas nomor dan ketersediaan yang lebih optimal.\n\n"
+        "Silakan pilih jenis nomor:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦 Nokos Reguler", callback_data="otp_premotp_type:regular")],
+            [InlineKeyboardButton("✨ Nokos Plus", callback_data="otp_premotp_type:plus")],
+            [InlineKeyboardButton("⬅️ Pilih Server", callback_data="order")],
+        ]),
+    )
+
+
+
 
 def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
     """Tambahkan layanan provider ke katalog tanpa duplikasi."""
@@ -1707,7 +1731,7 @@ def _merge_service_catalog(catalog, seen, data, code_keys, label_keys):
             seen.add(code.lower())
 
 
-def get_service_catalog(server):
+def get_service_catalog(server, premotp_type="regular"):
     """Katalog layanan dari provider Server 1 (5SIM) atau Server 2 (RumahOTP)."""
     if server == "5sim":
         catalog = list(OTP_SERVICES)
@@ -1769,7 +1793,7 @@ def get_service_catalog(server):
     if server == "premotp":
         catalog = []
         seen = set()
-        data = get_premotp_services("regular") or []
+        data = get_premotp_services(premotp_type) or []
         iterable = data.items() if isinstance(data, dict) else enumerate(data)
         for key, item in iterable:
             if isinstance(item, dict):
@@ -1837,7 +1861,7 @@ async def show_service_page(
 
     try:
         services = await asyncio.wait_for(
-            asyncio.to_thread(get_service_catalog, server),
+            asyncio.to_thread(get_service_catalog, server, _premotp_type_for(query)),
             timeout=15
         )
     except asyncio.TimeoutError:
@@ -1908,7 +1932,7 @@ async def show_service_page(
         ),
         InlineKeyboardButton(
             "▧ Kembali",
-            callback_data="order"
+            callback_data="otp_server:premotp" if server == "premotp" else "order"
         )
     ])
 
@@ -2042,8 +2066,8 @@ def _country_items_rumahotp(service):
                 grouped[key]["iso_code"] = iso
     return list(grouped.values())
 
-def _country_items_premotp(service):
-    data = get_premotp_countries(service, "regular") or []
+def _country_items_premotp(service, premotp_type="regular"):
+    data = get_premotp_countries(service, premotp_type) or []
     items = []
     iterable = data.items() if isinstance(data, dict) else enumerate(data)
     for key, item in iterable:
@@ -2062,13 +2086,13 @@ def _country_items_premotp(service):
     return items
 
 
-def get_service_countries(server, service):
+def get_service_countries(server, service, premotp_type="regular"):
     if server == "5sim":
         return _country_items_5sim(service)
     if server == "rumahotp":
         return _country_items_rumahotp(service)
     if server == "premotp":
-        return _country_items_premotp(service)
+        return _country_items_premotp(service, premotp_type)
     return []
 
 
@@ -2082,13 +2106,13 @@ async def show_service_country_page(
     if server == "rumahotp":
         service_label = rumah_service_label(service)
     elif server == "premotp":
-        service_label = next((label for code, label in get_service_catalog("premotp") if str(code) == str(service)), str(service).title())
+        service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, service.title())
 
     try:
         items = await asyncio.wait_for(
-            asyncio.to_thread(get_service_countries, server, service),
+            asyncio.to_thread(get_service_countries, server, service, _premotp_type_for(query)),
             timeout=20
         )
     except asyncio.TimeoutError:
@@ -2292,7 +2316,7 @@ async def show_otp_operator_page(query, server, service, country, page=0):
     if server == "rumahotp":
         service_label = rumah_service_label(service)
     elif server == "premotp":
-        service_label = next((label for code, label in get_service_catalog("premotp") if str(code) == str(service)), str(service).title())
+        service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
@@ -2353,7 +2377,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     if server == "rumahotp":
         service_label = rumah_service_label(service)
     elif server == "premotp":
-        service_label = next((label for code, label in get_service_catalog("premotp") if str(code) == str(service)), str(service).title())
+        service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
@@ -2465,7 +2489,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     elif server == "premotp":
         try:
             offers_data = await asyncio.wait_for(
-                asyncio.to_thread(get_premotp_offers, service, country, "regular"),
+                asyncio.to_thread(get_premotp_offers, service, country, _premotp_type_for(query)),
                 timeout=20,
             )
         except Exception:
@@ -2494,7 +2518,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
             save_otp_quote(
                 quote_id=quote_id, telegram_id=user_id, provider="premotp",
                 country=country, country_name=display_country, service=service, operator="any",
-                pool=json.dumps({"offer_id": offer_id, "order_type": "regular", "cost_idr": cost_idr}, separators=(",", ":")),
+                pool=json.dumps({"offer_id": offer_id, "order_type": _premotp_type_for(query), "cost_idr": cost_idr}, separators=(",", ":")),
                 cost_usd=cost_idr / float(KURS_DOLAR), stock=stock,
             )
             rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
@@ -5197,6 +5221,8 @@ async def user_callback(
 ):
 
     data = query.data
+    if context.user_data.get("premotp_type") in {"regular", "plus"}:
+        _PREMOTP_USER_TYPES[user_id] = context.user_data["premotp_type"]
 
     # =====================================================
     # CARA
@@ -5274,6 +5300,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # PILIH SERVER
     # =====================================================
 
+    if context.user_data.get("premotp_type") in {"regular", "plus"}:
+        _PREMOTP_USER_TYPES[user_id] = context.user_data["premotp_type"]
+
     if data.startswith(
         "otp_server:"
     ):
@@ -5296,6 +5325,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             await query.answer(_server_maintenance_text(server), show_alert=True)
             return
 
+        if server == "premotp":
+            await show_premotp_type_page(query)
+            return
+
         await show_service_page(
 
             query,
@@ -5306,6 +5339,25 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         )
 
+        return
+
+    # Server 3: pilihan katalog terpisah, tanpa mengubah alur server lain.
+    if data.startswith("otp_premotp_type:"):
+        kind = data.split(":", 1)[1]
+        if kind not in {"regular", "plus"}:
+            await query.answer("Jenis Nokos tidak valid.", show_alert=True)
+            return
+        if not _is_server_enabled("premotp") and not is_admin(user_id):
+            await query.answer(_server_maintenance_text("premotp"), show_alert=True)
+            return
+        _PREMOTP_USER_TYPES[user_id] = kind
+        context.user_data["premotp_type"] = kind
+        await show_service_page(query, "premotp", 0)
+        return
+
+    if data == "otp_type_services:premotp":
+        _PREMOTP_USER_TYPES[user_id] = context.user_data.get("premotp_type", "regular")
+        await show_service_page(query, "premotp", 0)
         return
 
     # =====================================================
@@ -9069,7 +9121,7 @@ async def button_handler(
 
     if is_maintenance_enabled() and not is_admin(user_id):
         blocked_prefixes = (
-            "otp_server:", "otp_services:", "otp_service:", "otp_country:",
+            "otp_server:", "otp_premotp_type:", "otp_type_services:", "otp_services:", "otp_service:", "otp_country:",
             "otp_country_search:", "otp_search:", "otp_operator:", "otp_operators:", "otp_quote:",
             "otp_prices:", "otp_choose_server:", "otp_rquotes:", "otp_roperator:",
         )
@@ -9369,7 +9421,8 @@ async def text_handler(
 
         services = await asyncio.to_thread(
             get_service_catalog,
-            server
+            server,
+            context.user_data.get("premotp_type", "regular")
         )
 
         matches = [
