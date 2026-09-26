@@ -9,7 +9,19 @@ from psycopg.rows import dict_row
 from flask import Flask, request, jsonify, send_from_directory, session
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 from database import create_pending_order, refund_order, save_provider_order
-from provider import hitung_harga_jual_idr
+# Web pricing is isolated from bot config: importing provider.py also imports
+# config.py, whose bot-only required variables can crash this web service.
+from decimal import Decimal, ROUND_CEILING
+
+def hitung_harga_jual_idr(harga_modal_rp):
+    try:
+        cost = Decimal(str(harga_modal_rp))
+        if cost <= 0:
+            return 0
+        margin = Decimal(os.getenv('PROFIT_PERCENT', '7')) / Decimal('100')
+        return int((cost * (Decimal('1') + margin)).to_integral_value(rounding=ROUND_CEILING))
+    except (ValueError, ArithmeticError):
+        return 0
 from premotp import get_services, get_countries, get_offers, create_order as prem_buy, get_order as prem_status
 app=Flask(__name__,static_folder='static',static_url_path='/static')
 app.secret_key=os.environ['WEB_SESSION_SECRET']
