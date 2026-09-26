@@ -177,7 +177,7 @@ def buy():
     except psycopg.Error:return err('Database sementara bermasalah',503)
 
 # Server 1/2 use independent web adapters so bot-only config is never imported.
-from web_servers import catalog as web_catalog, quote_rows as web_quotes, purchase as web_purchase, check_sms as web_check_sms
+from azhura_web.web_servers import catalog as web_catalog, quote_rows as web_quotes, purchase as web_purchase, check_sms as web_check_sms
 
 @app.get('/api/server/<int:server>/services')
 def server_services(server):
