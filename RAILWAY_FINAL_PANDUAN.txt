@@ -1,0 +1,33 @@
+AZHURA — PANDUAN DUA SERVICE RAILWAY (SATU REPOSITORY)
+=====================================================
+Upload ISI folder otp-reseller-bot-main/ ke ROOT repository GitHub (bukan folder pembungkus).
+Pastikan GitHub/azhura_web/app.py TIDAK punya baris 'from provider import'.
+
+SERVICE LAMA: BOT TELEGRAM (otp-reseller-bot)
+  Root Directory: /
+  Build Command: pip install -r requirements.txt
+  Start Command: python main.py
+  Variables: pertahankan semua variabel bot yang sudah berfungsi, termasuk BOT_TOKEN,
+  ADMIN_ID, DATABASE_URL, MIDTRANS_SERVER_KEY, MIDTRANS_CLIENT_KEY, FIVESIM_API_KEY,
+  dan variabel provider lain yang memang dipakai bot. Jangan salin token ke GitHub.
+  Catatan: service bot TIDAK memakai gunicorn.
+
+SERVICE BARU: WEB (diplomatic-intuition)
+  Root Directory: /
+  Build Command: pip install -r azhura_web/requirements.txt
+  Start Command: gunicorn azhura_web.app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 45
+  Variables wajib: BOT_TOKEN (sama dengan bot), BOT_USERNAME (tanpa @),
+  DATABASE_URL (reference ke PostgreSQL yang sama), WEB_SESSION_SECRET (acak >=32 karakter).
+  Variables opsional: PREMOTP_API_KEY (untuk katalog), GOOGLE_CLIENT_ID (login Google),
+  WEB_ORDER_ENABLED=false (JANGAN aktifkan tanpa uji transaksi dan refund).
+  Tidak perlu ADMIN_ID atau MIDTRANS_SERVER_KEY di web: web tidak mengimpor config.py.
+
+Setelah deploy, buat domain HTTPS di service WEB, cek https://DOMAIN/api/health.
+Di BotFather gunakan /setdomain untuk menghubungkan domain login Telegram.
+Di Google Cloud daftarkan domain web sebagai Authorized JavaScript origin untuk login Google.
+
+PENTING: Bot dan web memakai DATABASE_URL yang sama, tetapi HANYA bot melakukan polling
+Telegram. Web menampilkan saldo/riwayat; server 1/2 dan deposit diarahkan ke bot.
+Pembelian web langsung dinonaktifkan secara default; jangan klaim sudah teruji live.
+Perubahan ZIP ini: requirements bot dibuat kompatibel dengan Python 3.13 dan web
+menggunakan app.py tanpa import provider.py. main.py/config.py/database.py tidak diubah.
