@@ -97,7 +97,7 @@ def logout():session.clear();return jsonify(ok=True)
 def me():
     if not uid():return err('Login diperlukan',401)
     rows=query('SELECT telegram_id,username,first_name,balance FROM users WHERE telegram_id=%s',(uid(),))
-    return jsonify(user=rows[0] if rows else None,csrf=session.get('csrf',''))
+    return jsonify(user=rows[0] if rows else None,csrf=session.get('csrf',''),is_admin=web_is_admin())
 @app.get('/api/deposits')
 def web_deposits():
     if not uid():return err('Login diperlukan',401)
@@ -613,6 +613,136 @@ def web_finish_order():
             if not mark_order_completed(oid):return err('Status pesanan berubah. Muat ulang riwayat.',409)
             return jsonify(ok=True,status='COMPLETED',message='Pesanan Selesai.')
         finally:lock_db.execute('SELECT pg_advisory_unlock(hashtext(%s))',(oid,))
+
+
+# --- AZHURA WEB ADMIN: isolated admin endpoints; bot handlers are untouched. ---
+ADMIN_WEB_ID = int(os.getenv('ADMIN_ID', '0') or '0')
+WEB_MAINT_KEYS = {'web': 'azhura_web_maintenance', '1': 'azhura_web_server_1_maintenance',
+                  '2': 'azhura_web_server_2_maintenance', '3': 'azhura_web_server_3_maintenance'}
+
+def web_is_admin():
+    return bool(ADMIN_WEB_ID and uid() and int(uid()) == ADMIN_WEB_ID)
+
+def web_admin_required():
+    if not uid(): return err('Silakan login terlebih dahulu.', 401)
+    if not web_is_admin(): return err('Akses khusus admin.', 403)
+    return None
+
+def web_maintenance_flags():
+    keys=tuple(WEB_MAINT_KEYS.values())
+    with conn() as db:
+        rows=db.execute('SELECT setting_key,setting_value FROM bot_settings WHERE setting_key=ANY(%s)', (list(keys),)).fetchall()
+    values={r['setting_key']:str(r['setting_value']).lower() in ('1','true','on','yes') for r in rows}
+    return {k:values.get(v,False) for k,v in WEB_MAINT_KEYS.items()}
+
+@app.before_request
+def web_maintenance_guard():
+    # Never block existing OTP polling, cancellation/refunds, login, payment status or callbacks.
+    # Block only NEW web orders and NEW deposit invoices while web is in maintenance.
+    path=request.path
+    if request.method!='POST' or path not in ('/api/prem/buy','/api/deposit/manual/create',
+        '/api/deposit/auto/create','/api/deposit/qris/create','/api/server/1/buy',
+        '/api/server/2/buy','/api/server/3/buy'): return None
+    if web_is_admin(): return None
+    try: flags=web_maintenance_flags()
+    except psycopg.Error:
+        app.logger.exception('Maintenance flags unavailable; refusing new transaction')
+        return err('Layanan sementara tidak tersedia. Coba beberapa saat lagi.',503)
+    if flags['web']: return err('Website sedang maintenance. Pesanan aktif tetap bisa dipantau.',503)
+    server=('3' if path=='/api/prem/buy' else path.split('/')[3] if path.startswith('/api/server/') else None)
+    if server and flags.get(server): return err('Server '+server+' sedang maintenance. Pilih server lain.',503)
+
+@app.get('/api/web/status')
+def web_public_status():
+    try:return jsonify(maintenance=web_maintenance_flags(),admin=web_is_admin())
+    except psycopg.Error:return err('Status layanan tidak tersedia.',503)
+
+@app.get('/admin')
+def web_admin_page():
+    if not web_is_admin():return err('Halaman khusus admin. Login sebagai admin terlebih dahulu.',403)
+    return send_from_directory('static','admin.html')
+
+@app.get('/api/admin/overview')
+def web_admin_overview():
+    denied=web_admin_required()
+    if denied:return denied
+    day=request.args.get('date','')
+    if not (len(day)==10 and day[4]=='-' and day[7]=='-' and day.replace('-','').isdigit()):
+        day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    with conn() as db:
+        users=db.execute('SELECT COUNT(*) n,COALESCE(SUM(balance),0) balance FROM users').fetchone()
+        o=db.execute('''SELECT COUNT(*) n,COALESCE(SUM(sell_price),0) gross,
+          COUNT(*) FILTER (WHERE UPPER(status) IN ('PENDING','WAITING','WAITING_OTP','PROCESSING')) pending,
+          COUNT(*) FILTER (WHERE UPPER(status) IN ('SUCCESS','COMPLETED','FINISHED')) success
+          FROM orders WHERE LEFT(created_at,10)=%s''',(day,)).fetchone()
+        d=db.execute('''SELECT COUNT(*) n,COALESCE(SUM(amount) FILTER (WHERE UPPER(status) IN ('SUCCESS','COMPLETED','PAID')),0) paid,
+          COUNT(*) FILTER (WHERE UPPER(status)='PENDING') pending FROM deposits
+          WHERE LEFT(created_at,10)=%s''',(day,)).fetchone()
+    return jsonify(date=day,users=users,orders=o,deposits=d,maintenance=web_maintenance_flags())
+
+@app.get('/api/admin/orders')
+def web_admin_orders():
+    denied=web_admin_required()
+    if denied:return denied
+    day=request.args.get('date','')
+    status=request.args.get('status','').upper().strip()
+    search=request.args.get('q','').strip()[:70]
+    where=['1=1']; args=[]
+    if day:
+        try:datetime.strptime(day,'%Y-%m-%d')
+        except ValueError:return err('Tanggal tidak valid')
+        where.append('LEFT(o.created_at,10)=%s');args.append(day)
+    if status and status!='ALL':where.append('UPPER(o.status)=%s');args.append(status)
+    if search:where.append("(o.order_id ILIKE %s OR CAST(o.telegram_id AS TEXT) ILIKE %s OR COALESCE(o.service_name,o.service,'') ILIKE %s)");args.extend(['%'+search+'%']*3)
+    sql='''SELECT o.order_id,o.telegram_id,u.username,COALESCE(o.service_name,o.service) service,
+      COALESCE(o.country_name,o.country) country,o.provider,o.phone,o.sell_price,o.status,
+      o.refund_status,o.created_at,o.completed_at FROM orders o LEFT JOIN users u ON u.telegram_id=o.telegram_id
+      WHERE '''+' AND '.join(where)+' ORDER BY o.id DESC LIMIT 200'
+    return jsonify(items=query(sql,tuple(args)))
+
+@app.get('/api/admin/deposits')
+def web_admin_deposits():
+    denied=web_admin_required()
+    if denied:return denied
+    day=request.args.get('date',''); status=request.args.get('status','').upper().strip();search=request.args.get('q','').strip()[:70]
+    where=['1=1'];args=[]
+    if day:
+        try:datetime.strptime(day,'%Y-%m-%d')
+        except ValueError:return err('Tanggal tidak valid')
+        where.append('LEFT(d.created_at,10)=%s');args.append(day)
+    if status and status!='ALL':where.append('UPPER(d.status)=%s');args.append(status)
+    if search:where.append("(d.deposit_id ILIKE %s OR CAST(d.telegram_id AS TEXT) ILIKE %s OR COALESCE(u.username,'') ILIKE %s)");args.extend(['%'+search+'%']*3)
+    sql='''SELECT d.deposit_id,d.telegram_id,u.username,d.amount,d.payment_amount,d.payment_method,
+      d.status,d.created_at,d.completed_at,d.confirmed_at FROM deposits d
+      LEFT JOIN users u ON u.telegram_id=d.telegram_id WHERE '''+' AND '.join(where)+' ORDER BY d.id DESC LIMIT 200'
+    return jsonify(items=query(sql,tuple(args)))
+
+@app.get('/api/admin/users')
+def web_admin_users():
+    denied=web_admin_required()
+    if denied:return denied
+    search=request.args.get('q','').strip()[:70]
+    if search:
+        items=query('''SELECT telegram_id,username,first_name,balance,created_at FROM users
+          WHERE CAST(telegram_id AS TEXT) ILIKE %s OR COALESCE(username,'') ILIKE %s OR
+          COALESCE(first_name,'') ILIKE %s ORDER BY id DESC LIMIT 100''',tuple(['%'+search+'%']*3))
+    else:items=query('SELECT telegram_id,username,first_name,balance,created_at FROM users ORDER BY id DESC LIMIT 100')
+    return jsonify(items=items)
+
+@app.post('/api/admin/maintenance')
+def web_admin_maintenance():
+    denied=web_admin_required()
+    if denied:return denied
+    data=request.get_json(silent=True) or {}
+    target=str(data.get('target',''))
+    if target not in WEB_MAINT_KEYS or type(data.get('enabled')) is not bool:return err('Pilihan maintenance tidak valid')
+    key=WEB_MAINT_KEYS[target]
+    with conn() as db:
+        db.execute('''INSERT INTO bot_settings(setting_key,setting_value) VALUES (%s,%s)
+          ON CONFLICT(setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value''',
+          (key,'true' if data['enabled'] else 'false'))
+    app.logger.warning('Web admin %s set maintenance %s=%s',uid(),target,data['enabled'])
+    return jsonify(ok=True,maintenance=web_maintenance_flags())
 
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
