@@ -197,11 +197,21 @@ def web_deposit_cancel():
         if row['payment_method']=='MANUAL_QRIS':
             db.execute('CREATE TABLE IF NOT EXISTS azhura_web_manual_confirmations (deposit_id TEXT PRIMARY KEY,telegram_id BIGINT NOT NULL,confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())')
             if db.execute('SELECT 1 FROM azhura_web_manual_confirmations WHERE deposit_id=%s',(dep,)).fetchone():return err('Konfirmasi sudah dikirim ke admin; hubungi admin untuk pembatalan.',409)
-        elif row['payment_method'] in ('AUTO','PREMOTP_QRIS'):
-            return err('Invoice otomatis tidak dapat dibatalkan dari web karena pembayaran mungkin sedang diproses. Tunggu status atau hubungi admin.',409)
+        elif row['payment_method']=='PREMOTP_QRIS':
+            ref=db.execute('SELECT payment_reference,external_id FROM deposits WHERE deposit_id=%s',(dep,)).fetchone()
+            if not ref or not ref['payment_reference']:return err('Invoice provider belum siap.',409)
+            try:
+                from premotp import get_qris
+                live=get_qris(str(ref['payment_reference']))
+                state=str(live.get('status') or live.get('payment_status') or (live.get('data') or {}).get('status') or '').lower()
+            except Exception:return err('Status provider belum dapat diperiksa. Pembatalan ditunda untuk menghindari kehilangan pembayaran.',503)
+            if state in ('paid','success','settlement','settled','completed'):return err('Pembayaran sudah diterima provider. Tunggu saldo masuk.',409)
+            if state not in ('pending','waiting','unpaid','created','active','expired','cancelled','canceled','failed'):return err('Status pembayaran belum pasti. Coba lagi.',409)
+        elif row['payment_method']=='AUTO':
+            return err('Invoice Midtrans tidak dapat dibatalkan melalui web.',409)
         else:return err('Metode deposit tidak didukung',400)
         db.execute("UPDATE deposits SET status='FAILED',confirmed_at=%s WHERE deposit_id=%s AND telegram_id=%s AND status='PENDING'",(datetime.now().strftime('%Y-%m-%d %H:%M:%S'),dep,uid()))
-    return jsonify(ok=True,status='FAILED',message='Invoice manual dibatalkan.')
+    return jsonify(ok=True,status='FAILED',message='Invoice dibatalkan. Pembayaran yang sudah dikirim tetap perlu diperiksa admin.')
 
 @app.post('/api/deposit/auto/create')
 def web_midtrans_create():
@@ -270,7 +280,7 @@ def web_terms():
 def orders():
     if not uid():return err('Login diperlukan',401)
     rows=query('''SELECT order_id,COALESCE(service_name,service) service,COALESCE(country_name,country) country,
-        provider,sell_price,status,created_at,otp_code,sms_text,phone,expired_at,refund_status
+        provider,sell_price,status,created_at,otp_code,previous_otp_code,sms_text,phone,expired_at,refund_status
         FROM orders WHERE telegram_id=%s ORDER BY id DESC LIMIT 40''',(uid(),))
     return jsonify(orders=rows)
 def normalize(d):
@@ -431,10 +441,10 @@ def server_buy(server):
 def server_order_status(order_id):
     if not uid():return err('Login diperlukan',401)
     if len(order_id)>80:return err('ID tidak valid')
-    rows=query('SELECT order_id,provider,provider_order_id,status,otp_code,created_at,expired_at,refund_status FROM orders WHERE order_id=%s AND telegram_id=%s',(order_id,uid()))
+    rows=query('SELECT order_id,provider,provider_order_id,status,otp_code,previous_otp_code,created_at,expired_at,refund_status FROM orders WHERE order_id=%s AND telegram_id=%s',(order_id,uid()))
     if not rows:return err('Order tidak ditemukan',404)
     o=rows[0]
-    if o['otp_code'] or not o['provider_order_id'] or o['provider'] not in ('5sim','rumahotp','premotp'):return jsonify(order=o)
+    if str(o['status']).upper() in ('COMPLETED','CANCELLED','CANCELED','REFUNDED','FAILED') or o['otp_code'] or not o['provider_order_id'] or o['provider'] not in ('5sim','rumahotp','premotp'):return jsonify(order=o)
     try:
         if o['provider']=='premotp':
             raw=prem_status(o['provider_order_id'])
@@ -442,10 +452,12 @@ def server_order_status(order_id):
             first=messages[0] if isinstance(messages,list) and messages else {}
             data={'otp':raw.get('otp_code') or raw.get('otp') or (first.get('code') if isinstance(first,dict) else None), 'text':raw.get('sms_text') or (first.get('text') if isinstance(first,dict) else None)}
         else:data=web_check_sms(o['provider'],o['provider_order_id'])
-        if data.get('otp'):
-            from database import save_otp_result
+        if data.get('otp') and str(data['otp'])!=str(o.get('previous_otp_code') or ''):
+            from database import save_otp_result, mark_order_success
             save_otp_result(order_id,data['otp'],data.get('text'))
-            o['otp_code']=data['otp']
+            mark_order_success(order_id)
+            with conn() as db:db.execute("UPDATE orders SET status='SUCCESS' WHERE order_id=%s AND telegram_id=%s AND status='WAITING_OTP'",(order_id,uid()))
+            o['otp_code']=data['otp'];o['status']='SUCCESS'
         return jsonify(order=o)
     except Exception:app.logger.exception('OTP poll failed');return jsonify(order=o)
 
@@ -516,6 +528,91 @@ def web_cancel_order():
     except (psycopg.Error,requests.RequestException,RuntimeError,ValueError) as ex:
         app.logger.exception('Web cancel failed %s',oid)
         return err('Pembatalan belum selesai. Saldo belum otomatis dikembalikan; hubungi admin bila berlanjut.',503)
+
+@app.get('/api/deposit/<deposit_id>/status')
+def web_deposit_status(deposit_id):
+    if not uid():return err('Login diperlukan',401)
+    if not deposit_id.startswith('DEP-') or len(deposit_id)>40:return err('ID deposit tidak valid')
+    rows=query('SELECT deposit_id,status,amount,payment_method,created_at FROM deposits WHERE deposit_id=%s AND telegram_id=%s',(deposit_id,uid()))
+    if not rows:return err('Deposit tidak ditemukan',404)
+    # Bot's existing webhook/poller is the only authority that credits payment.
+    return jsonify(deposit=rows[0])
+
+@app.post('/api/order/resend')
+def web_resend_order():
+    if not uid():return err('Login diperlukan',401)
+    if not ENABLE_ORDER:return err('Transaksi web belum diaktifkan',503)
+    oid=str((request.get_json(silent=True) or {}).get('order_id',''))
+    if len(oid)>80:return err('ID tidak valid')
+    with conn() as lock_db:
+        lock_db.execute('SELECT pg_advisory_lock(hashtext(%s))',(oid,))
+        try:
+            with conn() as db:
+                o=db.execute('SELECT provider,provider_order_id,status,otp_code,expired_at FROM orders WHERE order_id=%s AND telegram_id=%s',(oid,uid())).fetchone()
+            if not o:return err('Pesanan tidak ditemukan',404)
+            if str(o['status']).upper()!='SUCCESS' or not o['otp_code']:return err('Resend hanya tersedia setelah OTP pertama diterima.',409)
+            exp=o['expired_at']
+            if exp:
+                if isinstance(exp,str):exp=datetime.fromisoformat(exp)
+                now=datetime.now(exp.tzinfo) if exp.tzinfo else datetime.now()
+                if exp<=now:return err('Nomor sudah kedaluwarsa. Resend OTP tidak tersedia.',409)
+            provider=str(o['provider'] or '').lower();pid=o['provider_order_id']
+            if not pid:return err('ID provider belum tersedia.',409)
+            if provider=='5sim':return err('Provider ini tidak dapat melakukan Kirim Ulang OTP.',409)
+            try:
+                if provider=='rumahotp':
+                    from azhura_web.web_servers import get2
+                    result=get2('v1/orders/set_status',{'order_id':pid,'status':'resend'})
+                    result={'response':'OK'} if result is not None else {'response':'ERROR'}
+                elif provider=='premotp':
+                    from premotp import resend_order
+                    result=resend_order(pid)
+                else:return err('Provider ini tidak dapat melakukan Kirim Ulang OTP.',409)
+            except Exception:
+                app.logger.exception('Resend failed for %s',oid)
+                return err('Provider belum mengonfirmasi permintaan resend. Coba lagi nanti.',503)
+            if not isinstance(result,dict) or str(result.get('response','OK')).upper() not in ('OK','SUCCESS') or result.get('success') is False or result.get('error'):
+                return err('Provider ini tidak dapat melakukan Kirim Ulang OTP: '+str((result or {}).get('error','Permintaan ditolak'))[:120],409)
+            from database import mark_order_waiting_for_otp
+            if not mark_order_waiting_for_otp(oid):return err('Status pesanan berubah. Muat ulang riwayat.',409)
+            return jsonify(ok=True,status='PENDING',message='Resend diterima. Menunggu Kode OTP baru.')
+        finally:lock_db.execute('SELECT pg_advisory_unlock(hashtext(%s))',(oid,))
+
+@app.post('/api/order/finish')
+def web_finish_order():
+    if not uid():return err('Login diperlukan',401)
+    if not ENABLE_ORDER:return err('Transaksi web belum diaktifkan',503)
+    oid=str((request.get_json(silent=True) or {}).get('order_id',''))
+    if len(oid)>80:return err('ID tidak valid')
+    with conn() as lock_db:
+        lock_db.execute('SELECT pg_advisory_lock(hashtext(%s))',(oid,))
+        try:
+            with conn() as db:
+                o=db.execute('SELECT provider,provider_order_id,status,otp_code FROM orders WHERE order_id=%s AND telegram_id=%s',(oid,uid())).fetchone()
+            if not o:return err('Pesanan tidak ditemukan',404)
+            if o['status']=='COMPLETED':return jsonify(ok=True,status='COMPLETED')
+            if o['status']!='SUCCESS' or not o['otp_code']:return err('Pesanan belum siap diselesaikan.',409)
+            provider=str(o['provider'] or '').lower();pid=o['provider_order_id']
+            if not pid and provider!='premotp':return err('ID provider belum tersedia.',409)
+            try:
+                if provider=='5sim':
+                    from azhura_web.web_servers import get5
+                    result=get5('user/finish/'+str(pid),auth=True)
+                    result={'response':'OK'} if str(result.get('status','')).lower() in ('finished','success','completed') else {'response':'ERROR'}
+                elif provider=='rumahotp':
+                    from azhura_web.web_servers import get2
+                    result=get2('v1/orders/set_status',{'order_id':pid,'status':'done'})
+                    result={'response':'OK'} if result is not None else {'response':'ERROR'}
+                elif provider=='premotp':result={'response':'OK'}
+                else:return err('Provider tidak dikenal.',409)
+            except Exception:
+                app.logger.exception('Finish failed for %s',oid)
+                return err('Provider belum mengonfirmasi penyelesaian.',503)
+            if not isinstance(result,dict) or result.get('response')!='OK':return err('Provider belum menyetujui penyelesaian. Coba lagi.',409)
+            from database import mark_order_completed
+            if not mark_order_completed(oid):return err('Status pesanan berubah. Muat ulang riwayat.',409)
+            return jsonify(ok=True,status='COMPLETED',message='Pesanan Selesai.')
+        finally:lock_db.execute('SELECT pg_advisory_unlock(hashtext(%s))',(oid,))
 
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
