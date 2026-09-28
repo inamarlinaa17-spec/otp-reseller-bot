@@ -618,7 +618,8 @@ def web_finish_order():
 # --- AZHURA WEB ADMIN: isolated admin endpoints; bot handlers are untouched. ---
 ADMIN_WEB_ID = int(os.getenv('ADMIN_ID', '0') or '0')
 WEB_MAINT_KEYS = {'web': 'azhura_web_maintenance', '1': 'azhura_web_server_1_maintenance',
-                  '2': 'azhura_web_server_2_maintenance', '3': 'azhura_web_server_3_maintenance'}
+                  '2': 'azhura_web_server_2_maintenance', '3': 'azhura_web_server_3_maintenance',
+                  'manual': 'azhura_web_payment_manual_maintenance', 'auto': 'azhura_web_payment_auto_maintenance'}
 
 def web_is_admin():
     return bool(ADMIN_WEB_ID and uid() and int(uid()) == ADMIN_WEB_ID)
@@ -648,9 +649,11 @@ def web_maintenance_guard():
     except psycopg.Error:
         app.logger.exception('Maintenance flags unavailable; refusing new transaction')
         return err('Layanan sementara tidak tersedia. Coba beberapa saat lagi.',503)
-    if flags['web']: return err('Website sedang maintenance. Pesanan aktif tetap bisa dipantau.',503)
+    if flags['web']: return err('Website sedang dalam perbaikan. Silakan kembali beberapa saat lagi.',503)
+    if path=='/api/deposit/manual/create' and flags['manual']: return err('QRIS Manual sedang tidak aktif. Silakan gunakan QRIS Otomatis.',503)
+    if path=='/api/deposit/qris/create' and flags['auto']: return err('QRIS Otomatis sedang tidak aktif. Silakan gunakan QRIS Manual.',503)
     server=('3' if path=='/api/prem/buy' else path.split('/')[3] if path.startswith('/api/server/') else None)
-    if server and flags.get(server): return err('Server '+server+' sedang maintenance. Pilih server lain.',503)
+    if server and flags.get(server): return err('Server '+server+' sedang maintenance. Silakan pilih server lain yang online.',503)
 
 @app.get('/api/web/status')
 def web_public_status():
@@ -676,9 +679,12 @@ def web_admin_overview():
           COUNT(*) FILTER (WHERE UPPER(status) IN ('SUCCESS','COMPLETED','FINISHED')) success
           FROM orders WHERE LEFT(created_at,10)=%s''',(day,)).fetchone()
         d=db.execute('''SELECT COUNT(*) n,COALESCE(SUM(amount) FILTER (WHERE UPPER(status) IN ('SUCCESS','COMPLETED','PAID')),0) paid,
-          COUNT(*) FILTER (WHERE UPPER(status)='PENDING') pending FROM deposits
+          COUNT(*) FILTER (WHERE UPPER(status) IN ('PENDING','WAITING','WAITING_ADMIN')) pending FROM deposits
           WHERE LEFT(created_at,10)=%s''',(day,)).fetchone()
-    return jsonify(date=day,users=users,orders=o,deposits=d,maintenance=web_maintenance_flags())
+        all_orders=db.execute('SELECT COUNT(*) n FROM orders').fetchone()['n']
+        all_paid=db.execute("SELECT COUNT(*) n,COALESCE(SUM(amount),0) amount FROM deposits WHERE UPPER(status) IN ('SUCCESS','COMPLETED','PAID')").fetchone()
+        all_pending=db.execute("SELECT COUNT(*) n FROM deposits WHERE UPPER(status) IN ('PENDING','WAITING','WAITING_ADMIN')").fetchone()['n']
+    return jsonify(date=day,users=users,orders=o,deposits=d,totals={'orders':all_orders,'paid_deposits':all_paid,'pending_deposits':all_pending},maintenance=web_maintenance_flags(),updated_at=datetime.now(timezone.utc).isoformat())
 
 @app.get('/api/admin/orders')
 def web_admin_orders():
@@ -692,7 +698,9 @@ def web_admin_orders():
         try:datetime.strptime(day,'%Y-%m-%d')
         except ValueError:return err('Tanggal tidak valid')
         where.append('LEFT(o.created_at,10)=%s');args.append(day)
-    if status and status!='ALL':where.append('UPPER(o.status)=%s');args.append(status)
+    if status=='ACTIVE':where.append("UPPER(o.status) IN ('PENDING','WAITING','WAITING_OTP','PROCESSING')")
+    elif status=='DONE':where.append("UPPER(o.status) IN ('SUCCESS','COMPLETED','FINISHED')")
+    elif status and status!='ALL':where.append('UPPER(o.status)=%s');args.append(status)
     if search:where.append("(o.order_id ILIKE %s OR CAST(o.telegram_id AS TEXT) ILIKE %s OR COALESCE(o.service_name,o.service,'') ILIKE %s)");args.extend(['%'+search+'%']*3)
     sql='''SELECT o.order_id,o.telegram_id,u.username,COALESCE(o.service_name,o.service) service,
       COALESCE(o.country_name,o.country) country,o.provider,o.phone,o.sell_price,o.status,
@@ -710,7 +718,10 @@ def web_admin_deposits():
         try:datetime.strptime(day,'%Y-%m-%d')
         except ValueError:return err('Tanggal tidak valid')
         where.append('LEFT(d.created_at,10)=%s');args.append(day)
-    if status and status!='ALL':where.append('UPPER(d.status)=%s');args.append(status)
+    if status=='PAID_GROUP':where.append("UPPER(d.status) IN ('SUCCESS','COMPLETED','PAID')")
+    elif status=='PENDING_GROUP':where.append("UPPER(d.status) IN ('PENDING','WAITING','WAITING_ADMIN')")
+    elif status=='FAILED_GROUP':where.append("UPPER(d.status) IN ('FAILED','CANCELLED','CANCELED','EXPIRED','REJECTED')")
+    elif status and status!='ALL':where.append('UPPER(d.status)=%s');args.append(status)
     if search:where.append("(d.deposit_id ILIKE %s OR CAST(d.telegram_id AS TEXT) ILIKE %s OR COALESCE(u.username,'') ILIKE %s)");args.extend(['%'+search+'%']*3)
     sql='''SELECT d.deposit_id,d.telegram_id,u.username,d.amount,d.payment_amount,d.payment_method,
       d.status,d.created_at,d.completed_at,d.confirmed_at FROM deposits d
