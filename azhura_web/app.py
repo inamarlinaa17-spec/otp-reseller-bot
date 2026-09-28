@@ -150,6 +150,7 @@ def manual_qris_create():
                 enabled=db.execute("SELECT setting_value FROM bot_settings WHERE setting_key='payment_manual_enabled'").fetchone()
                 if not row or not row['setting_value']:return err('QRIS manual belum diatur admin',503)
                 if enabled and str(enabled['setting_value']).lower() not in ('1','true','on','yes'):return err('QRIS manual sedang dinonaktifkan admin',503)
+                if db.execute("SELECT 1 FROM deposits WHERE status='PENDING' AND payment_method='MANUAL_QRIS' AND amount=%s AND unique_code=%s LIMIT 1",(amount,code)).fetchone():continue
                 db.execute("""INSERT INTO deposits(deposit_id,telegram_id,amount,status,payment_reference,created_at,payment_method,payment_amount,unique_code)
                     VALUES(%s,%s,%s,'PENDING',%s,%s,'MANUAL_QRIS',%s,%s)""",
                     (dep,uid(),amount,row['setting_value'],datetime.now().strftime('%Y-%m-%d %H:%M:%S'),total,code))
@@ -430,18 +431,91 @@ def server_buy(server):
 def server_order_status(order_id):
     if not uid():return err('Login diperlukan',401)
     if len(order_id)>80:return err('ID tidak valid')
-    rows=query('SELECT order_id,provider,provider_order_id,status,otp_code FROM orders WHERE order_id=%s AND telegram_id=%s',(order_id,uid()))
+    rows=query('SELECT order_id,provider,provider_order_id,status,otp_code,created_at,expired_at,refund_status FROM orders WHERE order_id=%s AND telegram_id=%s',(order_id,uid()))
     if not rows:return err('Order tidak ditemukan',404)
     o=rows[0]
-    if o['otp_code'] or not o['provider_order_id'] or o['provider'] not in ('5sim','rumahotp'):return jsonify(order=o)
+    if o['otp_code'] or not o['provider_order_id'] or o['provider'] not in ('5sim','rumahotp','premotp'):return jsonify(order=o)
     try:
-        data=web_check_sms(o['provider'],o['provider_order_id'])
+        if o['provider']=='premotp':
+            raw=prem_status(o['provider_order_id'])
+            messages=raw.get('sms') or raw.get('messages') or []
+            first=messages[0] if isinstance(messages,list) and messages else {}
+            data={'otp':raw.get('otp_code') or raw.get('otp') or (first.get('code') if isinstance(first,dict) else None), 'text':raw.get('sms_text') or (first.get('text') if isinstance(first,dict) else None)}
+        else:data=web_check_sms(o['provider'],o['provider_order_id'])
         if data.get('otp'):
             from database import save_otp_result
             save_otp_result(order_id,data['otp'],data.get('text'))
             o['otp_code']=data['otp']
         return jsonify(order=o)
     except Exception:app.logger.exception('OTP poll failed');return jsonify(order=o)
+
+# Web cancellation is opt-in and never credits a user before provider confirmation.
+@app.post('/api/order/cancel')
+def web_cancel_order():
+    if not uid():return err('Login diperlukan',401)
+    if not ENABLE_ORDER:return err('Transaksi web belum diaktifkan',503)
+    oid=str((request.get_json(silent=True) or {}).get('order_id',''))
+    if not oid.startswith('OTP-') or len(oid)>80:return err('ID order tidak valid')
+    try:
+        # A session-level advisory lock prevents two web workers from cancelling
+        # the same order concurrently. The existing refund helper locks DB rows.
+        with conn() as lock_db:
+            lock_db.execute('SELECT pg_advisory_lock(hashtext(%s))',(oid,))
+            try:
+                with conn() as db:
+                    order=db.execute("SELECT order_id,provider,provider_order_id,status,otp_code, created_at,refund_status FROM orders WHERE order_id=%s AND telegram_id=%s",(oid,uid())).fetchone()
+                if not order:return err('Order tidak ditemukan',404)
+                if order['refund_status']=='REFUNDED':return jsonify(status='REFUNDED',message='Saldo sudah dikembalikan.')
+                if order['otp_code'] or order['status'] in ('SUCCESS','COMPLETED'):
+                    return err('OTP sudah diterima. Pembatalan tidak tersedia.',409)
+                if order['status'] not in ('PENDING','WAITING_OTP'):
+                    return err('Status order belum memungkinkan pembatalan.',409)
+                started=order['created_at']
+                if started:
+                    if isinstance(started,str):started=datetime.fromisoformat(started)
+                    now=datetime.now(started.tzinfo) if started.tzinfo else datetime.now()
+                    seconds=(now-started).total_seconds()
+                    if seconds<120:return err('Tunggu '+str(max(1,math.ceil((120-seconds)/60)))+' menit sebelum membatalkan.',409)
+                pid=order['provider_order_id'];provider=str(order['provider'] or '').lower()
+                if not pid:return err('ID provider belum tersedia; admin perlu memeriksa pesanan.',409)
+                verified=False
+                if provider=='5sim':
+                    from azhura_web.web_servers import get5
+                    try:
+                        key=os.getenv('FIVESIM_API_KEY','').strip()
+                        if not key:raise RuntimeError('Kunci 5SIM belum tersedia')
+                        requests.post('https://5sim.net/v1/user/cancel/'+str(pid),headers={'Authorization':'Bearer '+key},timeout=15).raise_for_status()
+                    except (requests.RequestException,RuntimeError):pass
+                    state=get5('user/check/'+str(pid),auth=True)
+                    verified=str(state.get('status','')).lower() in ('canceled','cancelled','expired','timeout')
+                elif provider=='rumahotp':
+                    from azhura_web.web_servers import get2
+                    state=get2('v1/orders/get_status',{'order_id':pid}) or {}
+                    if str(state.get('status','')).lower() not in ('cancel','canceled','cancelled'):
+                        try:get2('v1/orders/set_status',{'order_id':pid,'status':'cancel'})
+                        except (requests.RequestException,RuntimeError):pass
+                        state=get2('v1/orders/get_status',{'order_id':pid}) or {}
+                    verified=str(state.get('status','')).lower() in ('cancel','canceled','cancelled')
+                elif provider=='premotp':
+                    from premotp import cancel_order as prem_cancel
+                    try:prem_cancel(pid)
+                    except (requests.RequestException,RuntimeError):pass
+                    state=prem_status(pid)
+                    verified=str(state.get('status','')).lower() in ('cancel','canceled','cancelled','expired','timeout')
+                else:return err('Provider order tidak dikenal. Hubungi admin.',409)
+                if not verified:return err('Provider belum mengonfirmasi pembatalan. Saldo belum dikembalikan; coba lagi atau hubungi admin.',409)
+                # Recheck OTP after network call; if another worker recorded an OTP,
+                # do not issue a refund.
+                with conn() as db:
+                    latest=db.execute('SELECT otp_code,status FROM orders WHERE order_id=%s AND telegram_id=%s',(oid,uid())).fetchone()
+                if not latest or latest['otp_code'] or latest['status'] in ('SUCCESS','COMPLETED'):
+                    return err('OTP sudah diterima atau order selesai; refund ditahan untuk pemeriksaan.',409)
+                refund=refund_order(oid,'Pembatalan web dikonfirmasi provider')
+                return jsonify(status='REFUNDED',message='Pembatalan disetujui provider. Saldo sudah dikembalikan.',balance=refund.get('balance'))
+            finally:lock_db.execute('SELECT pg_advisory_unlock(hashtext(%s))',(oid,))
+    except (psycopg.Error,requests.RequestException,RuntimeError,ValueError) as ex:
+        app.logger.exception('Web cancel failed %s',oid)
+        return err('Pembatalan belum selesai. Saldo belum otomatis dikembalikan; hubungi admin bila berlanjut.',503)
 
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
