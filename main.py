@@ -31,7 +31,7 @@ from telegram import (
     Update,
     Bot,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup, WebAppInfo
 )
 
 from telegram.ext import (
@@ -497,6 +497,7 @@ def user_menu():
             )
         ],
 
+        [InlineKeyboardButton("📺 Nonton Iklan • Dapat Saldo", callback_data="monetag_ads")],
         [InlineKeyboardButton("📜 Syarat & Ketentuan", callback_data="user_terms")],
 
         [
@@ -1610,6 +1611,18 @@ async def admin_start(
 # =========================================================
 # START
 # =========================================================
+
+async def command_iklan(update, context):
+    web_url = os.getenv("AZHURA_WEB_URL", "").strip().rstrip("/")
+    if not web_url.startswith("https://"):
+        await update.message.reply_text("Fitur iklan belum diaktifkan admin.")
+        return
+    await update.message.reply_text(
+        "🎁 Nonton iklan untuk mendapatkan saldo AZHURA. Reward masuk setelah verifikasi Monetag.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📺 Nonton Iklan", web_app=WebAppInfo(url=web_url + "/rewards"))]
+        ]),
+    )
 
 async def start(
     update,
@@ -5269,6 +5282,26 @@ async def user_callback(
     data = query.data
     if context.user_data.get("premotp_type") in {"regular", "plus"}:
         _PREMOTP_USER_TYPES[user_id] = context.user_data["premotp_type"]
+
+    if data == "monetag_ads":
+        web_url = os.getenv("AZHURA_WEB_URL", "").strip().rstrip("/")
+        if not web_url.startswith("https://"):
+            await query.edit_message_text(
+                "📺 Fitur iklan sedang disiapkan. Admin perlu mengatur AZHURA_WEB_URL.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")]]),
+            )
+            return
+        await query.edit_message_text(
+            "🎁 <b>NONTON IKLAN • DAPAT SALDO</b>\n\n"
+            "Tonton iklan yang tersedia. Reward yang terverifikasi otomatis masuk ke saldo AZHURA dan bisa digunakan untuk Order OTP.\n\n"
+            "Tidak ada batas harian dari AZHURA, tetapi jumlah iklan bergantung pada Monetag.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📺 Buka Iklan", web_app=WebAppInfo(url=web_url + "/rewards"))],
+                [InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")],
+            ]),
+        )
+        return
 
     if data == "user_terms":
         try:
@@ -9884,6 +9917,7 @@ def run():
     application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "rumahotp")))
     application.add_handler(CommandHandler("deposit", command_deposit))
     application.add_handler(CommandHandler("checkin", perform_checkin))
+    application.add_handler(CommandHandler("iklan", command_iklan))
 
     # -----------------------------------------------------
     # CALLBACK
