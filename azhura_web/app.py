@@ -37,7 +37,7 @@ def uid():return session.get('uid')
 def err(msg,status=400):return jsonify(error=msg),status
 @app.before_request
 def csrf():
-    if request.method in ('POST','PUT','DELETE') and uid() and request.path not in ('/api/auth/telegram','/api/auth/google'):
+    if request.method in ('POST','PUT','DELETE') and uid() and request.path not in ('/api/auth/telegram','/api/auth/google','/api/rewards/login'):
         if not hmac.compare_digest(str(request.headers.get('X-CSRF-Token','')),str(session.get('csrf','missing'))):return err('Sesi tidak valid. Muat ulang halaman.',403)
 def login(user):
     session.clear();session.permanent=True;session['uid']=int(user);session['csrf']=secrets.token_urlsafe(32)
@@ -793,3 +793,7 @@ def web_admin_maintenance():
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
 if __name__=='__main__':app.run(port=int(os.getenv('PORT','8080')),debug=os.getenv('WEB_DEV')=='1')
+
+# --- AZHURA Monetag rewards (isolated web module; shared users/ledger) ---
+from azhura_web.monetag_rewards import rewards_bp
+app.register_blueprint(rewards_bp)
