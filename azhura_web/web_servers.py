@@ -43,10 +43,14 @@ def catalog(server,kind,service=None):
                     if isinstance(ops,dict) and any(isinstance(x,dict) and ('cost' in x or 'count' in x) for x in ops.values()):names.add(name)
             return [{'id':x,'name':x.title()} for x in sorted(names)]
         d=get5('guest/prices',params={'product':service})
-        return [{'id':x,'name':x.replace('_',' ').title()} for x,v in d.items() if isinstance(v,dict)]
+        # Filtered 5SIM prices are product -> country -> operator; never treat product as country.
+        countries=d.get(service,{}) if isinstance(d,dict) else {}
+        if not countries and isinstance(d,dict):
+            countries=d if service not in d else {}
+        return [{'id':x,'name':x.replace('_',' ').title()} for x,v in countries.items() if isinstance(v,dict) and any(isinstance(z,dict) for z in v.values())]
     if server==2:
         if kind=='services':
-            return [{'id':str(x.get('id')),'name':str(x.get('name') or x.get('id'))} for x in (get2('v2/services') or []) if isinstance(x,dict) and x.get('id') is not None]
+            return [{'id':str(x.get('service_code') or x.get('id')),'name':str(x.get('service_name') or x.get('name') or x.get('service_code') or x.get('id'))} for x in (get2('v2/services') or []) if isinstance(x,dict) and (x.get('service_code') is not None or x.get('id') is not None)]
         return [{'id':str(x.get('number_id') or x.get('name')),'name':str(x.get('name') or x.get('number_id'))} for x in (get2('v2/countries',{'service_id':service}) or []) if isinstance(x,dict)]
     raise ValueError('Server tidak valid')
 
@@ -72,7 +76,7 @@ def quote_rows(server,service,country):
             try:cost=float(v.get('price') or v.get('rate') or 0);stock=int(float(v.get('stock') or 0))
             except (ValueError,TypeError):continue
             if cost<=0 or stock<=0 or not math.isfinite(cost) or v.get('provider_id') is None:continue
-            rows.append({'stock':stock,'cost_idr':math.ceil(cost),'label':'Pilihan harga','metadata':{'number_id':item.get('number_id'),'provider_id':v['provider_id'],'operator_id':1}})
+            rows.append({'stock':stock,'cost_idr':math.ceil(cost),'label':str(v.get('operator_name') or v.get('provider_name') or v.get('server_name') or 'Pilihan harga'),'metadata':{'number_id':item.get('number_id'),'provider_id':v['provider_id'],'operator_id':1}})
         return rows
     raise ValueError('Server tidak valid')
 

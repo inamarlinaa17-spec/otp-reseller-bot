@@ -359,6 +359,31 @@ def buy():
 # Server 1/2 use independent web adapters so bot-only config is never imported.
 from azhura_web.web_servers import catalog as web_catalog, quote_rows as web_quotes, purchase as web_purchase, check_sms as web_check_sms
 
+@app.get('/api/live-traffic')
+def web_live_traffic():
+    # Shared order history: Telegram and web, public-safe fields only. No phone/OTP/order ID.
+    if not uid():return err('Login diperlukan',401)
+    try:
+        rows=query("""SELECT o.id,o.created_at,COALESCE(NULLIF(u.first_name,''),NULLIF(u.username,''),'Pengguna') display_name,
+            COALESCE(NULLIF(o.service_name,''),NULLIF(o.service,''),'Layanan') service,
+            COALESCE(o.provider,'') provider,o.sell_price
+            FROM orders o LEFT JOIN users u ON u.telegram_id=o.telegram_id
+            WHERE o.created_at IS NOT NULL AND o.sell_price > 0
+              AND UPPER(o.status) NOT IN ('FAILED','REFUNDED','CANCELLED','CANCELED','REVIEW')
+            ORDER BY o.id DESC LIMIT 12""")
+        items=[]
+        for r in rows:
+            name=str(r['display_name'] or 'Pengguna').strip()
+            masked=(name[:2]+'***') if len(name)>2 else 'Pengguna***'
+            provider=str(r['provider'] or '').lower()
+            server='Server 1' if provider in ('5sim','fivesim') else 'Server 2' if 'rumah' in provider else 'Server 3' if 'prem' in provider else 'AZHURA'
+            items.append({'id':r['id'],'at':str(r['created_at']),'user':masked,'service':str(r['service'])[:55],
+                          'server':server,'price':int(r['sell_price'] or 0)})
+        return jsonify(items=items)
+    except Exception:
+        app.logger.exception('Live traffic read failed')
+        return jsonify(items=[])
+
 @app.get('/api/server/<int:server>/services')
 def server_services(server):
     if not uid():return err('Login diperlukan',401)
