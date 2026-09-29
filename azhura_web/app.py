@@ -357,7 +357,7 @@ def buy():
     except psycopg.Error:return err('Database sementara bermasalah',503)
 
 # Server 1/2 use independent web adapters so bot-only config is never imported.
-from azhura_web.web_servers import catalog as web_catalog, quote_rows as web_quotes, purchase as web_purchase, check_sms as web_check_sms
+from azhura_web.web_servers import catalog as web_catalog, quote_rows as web_quotes, purchase as web_purchase, check_sms as web_check_sms, ProviderRejected
 
 @app.get('/api/live-traffic')
 def web_live_traffic():
@@ -456,6 +456,16 @@ def server_buy(server):
             save_provider_order(order_id,str(pid),int(q['cost_idr']),str(phone),result.get('expired_at'))
             with conn() as db:db.execute('UPDATE orders SET status=%s,service_name=%s,country_name=%s WHERE order_id=%s',('WAITING_OTP',q['service'],q['country'],order_id))
             return jsonify(order_id=order_id,phone=phone,price=q['price_idr'])
+        except ProviderRejected:
+            # Only explicit provider rejection is safe to refund immediately.
+            try:
+                refund=refund_order(order_id,'Provider menolak pembelian web')
+                with conn() as db:
+                    db.execute("UPDATE orders SET status='FAILED' WHERE order_id=%s AND refund_status='REFUNDED'",(order_id,))
+                return jsonify(error='Gagal mendapatkan nomor. Saldo sudah dikembalikan.',status='FAILED',balance=refund.get('balance')),409
+            except Exception:
+                app.logger.exception('Explicit rejection refund failed: %s',order_id)
+                return err('Pembelian gagal; pengembalian saldo perlu diperiksa admin.',503)
         except Exception:
             app.logger.exception('Provider order needs reconciliation: %s',order_id)
             with conn() as db:db.execute("UPDATE orders SET status='REVIEW' WHERE order_id=%s AND provider_order_id IS NULL",(order_id,))

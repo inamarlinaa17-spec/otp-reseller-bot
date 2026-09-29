@@ -3,6 +3,9 @@ import os, requests, math, time
 from urllib.parse import quote
 from decimal import Decimal, ROUND_CEILING
 S=requests.Session()
+class ProviderRejected(Exception):
+    """Provider explicitly rejected creation; no provider order was created."""
+
 RATE=None; RATE_AT=0
 
 def usd_rate():
@@ -22,6 +25,8 @@ def get5(path,auth=False,params=None):
         if not key:raise RuntimeError('FIVESIM_API_KEY belum tersedia di web')
         h['Authorization']='Bearer '+key
     r=S.get('https://5sim.net/v1/'+path,headers=h,params=params,timeout=25)
+    if auth and path.startswith('user/buy/') and r.status_code in (400,404,409,422):
+        raise ProviderRejected('Provider menolak pembelian nomor')
     r.raise_for_status();return r.json()
 
 def get2(path,params=None):
@@ -29,7 +34,9 @@ def get2(path,params=None):
     if not key:raise RuntimeError('RUMAHOTP_API_KEY belum tersedia di web')
     r=S.get('https://www.rumahotp.io/api/'+path,headers={'x-apikey':key,'Accept':'application/json'},params=params or {},timeout=25)
     r.raise_for_status();d=r.json()
-    if not d.get('success'):raise RuntimeError('Provider tidak tersedia')
+    if not d.get('success'):
+        if path=='v2/orders':raise ProviderRejected('Provider menolak pembelian nomor')
+        raise RuntimeError('Provider tidak tersedia')
     return d.get('data')
 
 def catalog(server,kind,service=None):
@@ -83,11 +90,18 @@ def quote_rows(server,service,country):
 def purchase(server,service,country,meta):
     if server==1:
         op=str(meta['operator']);d=get5('user/buy/activation/'+quote(country,safe='')+'/'+quote(op,safe='')+'/'+quote(service,safe=''),auth=True)
-        if not d.get('id') or not d.get('phone'):raise RuntimeError('Nomor tidak tersedia')
+        if not d.get('id'):
+            raise ProviderRejected('Nomor tidak tersedia')
+        if not d.get('phone'):
+            # An ID means the provider may have accepted the order. Reconcile.
+            raise RuntimeError('Provider menerima order tetapi nomor belum tersedia')
         return {'id':d['id'],'phone':d['phone'],'expired_at':d.get('expires')}
     if server==2:
         d=get2('v2/orders',{'number_id':meta['number_id'],'provider_id':meta['provider_id'],'operator_id':meta.get('operator_id',1)}) or {}
-        if not d.get('order_id') or not d.get('phone_number'):raise RuntimeError('Nomor tidak tersedia')
+        if not d.get('order_id'):
+            raise ProviderRejected('Nomor tidak tersedia')
+        if not d.get('phone_number'):
+            raise RuntimeError('Provider menerima order tetapi nomor belum tersedia')
         return {'id':d['order_id'],'phone':d['phone_number'],'expired_at':d.get('expired_at')}
     raise ValueError('Server tidak valid')
 
