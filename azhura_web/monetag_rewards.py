@@ -104,7 +104,12 @@ def monetag_postback():
         return jsonify(error='Wrong zone'),400
     event=request.args.get('event','')
     value=request.args.get('value','')
-    if event!='impression' or value!='valued':
+    # Monetag Rewarded Interstitial can send both impression and click postbacks.
+    # Only a monetized/valued event may create a reward. The attempt's PENDING ->
+    # CREDITED transition is locked below, so impression + click cannot pay twice
+    # for the same ymid. Accept both Monetag's documented `valued` value and the
+    # `yes` value shown by some dashboard configurations.
+    if event not in ('impression', 'click') or value not in ('yes', 'valued'):
         return jsonify(ok=True, credited=False)
     try:
         price=Decimal(request.args.get('price','0'))
@@ -117,6 +122,7 @@ def monetag_postback():
     # DB row locks and unique ymid guarantee at most one credit even on simultaneous retries.
     with connection() as db:
         ensure_tables(db)
+        db.execute('INSERT INTO azhura_monetag_events(ymid,event_type,estimated_price) VALUES (%s,%s,%s) ON CONFLICT (ymid) DO NOTHING', (ymid, event, str(price)))
         attempt=db.execute('SELECT * FROM azhura_monetag_attempts WHERE ymid=%s FOR UPDATE',(ymid,)).fetchone()
         if not attempt:return jsonify(error='Unknown event'),404
         if attempt['status']!='PENDING':return jsonify(ok=True,credited=False,duplicate=True)
@@ -129,6 +135,6 @@ def monetag_postback():
         db.execute('UPDATE users SET balance=%s WHERE telegram_id=%s',(after,attempt['telegram_id']))
         db.execute('''INSERT INTO ledger(telegram_id,amount,balance_before,balance_after,transaction_type,reference,description,created_at)
             VALUES(%s,%s,%s,%s,'MONETAG_REWARD',%s,%s,%s)''',
-            (attempt['telegram_id'],amount,before,after,ymid,'Reward Monetag verified impression',time.strftime('%Y-%m-%d %H:%M:%S')))
+            (attempt['telegram_id'],amount,before,after,ymid,'Reward Monetag verified ad event',time.strftime('%Y-%m-%d %H:%M:%S')))
         db.execute("UPDATE azhura_monetag_attempts SET status='CREDITED',reward_idr=%s WHERE ymid=%s",(amount,ymid))
     return jsonify(ok=True,credited=True)
