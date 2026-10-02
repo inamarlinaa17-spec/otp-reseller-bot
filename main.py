@@ -27,6 +27,14 @@ from psycopg.errors import UniqueViolation
 
 from flask import Flask, request, jsonify
 
+from nomorotp import (
+    get_services as get_nomorotp_services, get_countries as get_nomorotp_countries,
+    get_availability as get_nomorotp_availability, buy_number as buy_nomorotp_number,
+    get_status as get_nomorotp_status, cancel_activation as cancel_nomorotp_activation,
+    resend_activation as resend_nomorotp_activation, finish_activation as finish_nomorotp_activation,
+    normalize_status as normalize_nomorotp_status,
+)
+
 from telegram import (
     Update,
     Bot,
@@ -178,7 +186,7 @@ logger = logging.getLogger(__name__)
 # This does not change order logic; it only prevents the Telegram callback from
 # remaining stuck when the provider has already issued the number.
 _RUNTIME_PROVIDER_CACHE = {}
-_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0}
+_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0, "nomorotp": 0.0}
 
 # User cancellation starts a 120-second processing countdown immediately after
 # the button is pressed. Duplicate cancellation requests for the same order
@@ -231,6 +239,7 @@ OTP_SERVERS = {
     "5sim": "⚡ SERVER 1 — HIGH STOCK",
     "rumahotp": "⚡ SERVER 2 — FULL TEXT",
     "premotp": "⚡ SERVER 3 — SERVER ALTERNATIF",
+    "nomorotp": "💠 SERVER 4 — NOMOROTP",
 }
 
 
@@ -1675,66 +1684,47 @@ async def start(
 # PILIH SERVER OTP
 # =========================================================
 
-async def show_server_page(
-    query
-):
-
+async def show_server_page(query):
     keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "Server 1",
-                callback_data="otp_server:5sim"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "Server 2",
-                callback_data="otp_server:rumahotp"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "Server 3",
-                callback_data="otp_server:premotp"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🏠 Menu Utama",
-                callback_data="user_home"
-            )
-        ]
-
+        [InlineKeyboardButton("Server 1", callback_data="otp_server:5sim"), InlineKeyboardButton("Server 3", callback_data="otp_server:premotp")],
+        [InlineKeyboardButton("Server 2", callback_data="otp_server:rumahotp"), InlineKeyboardButton("Server 4 — NomorOTP", callback_data="otp_server:nomorotp")],
+        [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
     ]
-
     await query.edit_message_text(
-        "💻 <b>PILIH SERVER OTP</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚡ <b>SERVER 1 — HIGH STOCK</b>\n"
-        "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
-        "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
-        "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
-        "⚡ <b>SERVER 3 — SERVER ALTERNATIF</b>\n"
-        "Pilihan alternatif dengan katalog layanan dan stok yang diperbarui langsung dari sistem untuk menambah opsi nomor OTP.\n\n"
-        "Silakan pilih server melalui tombol di bawah ini :",
+        "💻 <b>PILIH SERVER OTP</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Pilih server sesuai kebutuhan. Setiap server memiliki stok dan harga sendiri.\n\n"
+        "💠 <b>Server 4 — NomorOTP</b> menyediakan dua jalur: <b>Server Plus</b> dan <b>Server Express</b>.\n\n"
+        "Silakan pilih server melalui tombol di bawah ini:",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def show_nomorotp_type_page(query):
+    await query.edit_message_text(
+        "💠 <b>SERVER 4 — NOMOROTP</b>\n\nPilih jaringan pengiriman yang ingin digunakan.\n\n"
+        "🐷 <b>Server Plus</b>\nTarif kompetitif dengan stok independen.\n\n"
+        "⚡ <b>Server Express</b>\nJalur alternatif untuk membandingkan stok, operator, harga, dan respons.\n\n"
+        "Pilih salah satu untuk melihat katalog layanan live:",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐷 Server Plus", callback_data="otp_nomorotp_type:plus")],
+            [InlineKeyboardButton("⚡ Server Express", callback_data="otp_nomorotp_type:express")],
+            [InlineKeyboardButton("⬅️ Pilih Server", callback_data="order")],
+        ]),
     )
 
 
-# =========================================================
 # PILIH LAYANAN OTP
 # =========================================================
 
 # Jenis katalog Server 3 disimpan per pengguna, bukan secara global untuk semua pengguna.
 _PREMOTP_USER_TYPES = {}
+_NOMOROTP_USER_TYPES = {}
 
 def _premotp_type_for(query):
     return _PREMOTP_USER_TYPES.get(query.from_user.id, "regular")
+
+def _nomorotp_type_for(query):
+    return _NOMOROTP_USER_TYPES.get(query.from_user.id, "plus")
 
 async def show_premotp_type_page(query):
     await query.edit_message_text(
@@ -1849,6 +1839,15 @@ def get_service_catalog(server, premotp_type="regular"):
 
         return catalog
 
+    if server == "nomorotp":
+        catalog = []
+        seen = set()
+        for item in (get_nomorotp_services(str(premotp_type or "plus").lower()) or []):
+            code = str(item.get("code") or "").strip(); label = str(item.get("name") or code).strip()
+            if code and code.lower() not in seen:
+                catalog.append((code, label)); seen.add(code.lower())
+        return catalog or list(OTP_SERVICES)
+
     if server == "premotp":
         catalog = []
         seen = set()
@@ -1920,7 +1919,7 @@ async def show_service_page(
 
     try:
         services = await asyncio.wait_for(
-            asyncio.to_thread(get_service_catalog, server, _premotp_type_for(query)),
+            asyncio.to_thread(get_service_catalog, server, _nomorotp_type_for(query) if server == "nomorotp" else _premotp_type_for(query)),
             timeout=15
         )
     except asyncio.TimeoutError:
@@ -1991,7 +1990,7 @@ async def show_service_page(
         ),
         InlineKeyboardButton(
             "▧ Kembali",
-            callback_data="otp_server:premotp" if server == "premotp" else "order"
+            callback_data=("otp_server:premotp" if server == "premotp" else "otp_server:nomorotp" if server == "nomorotp" else "order")
         )
     ])
 
@@ -2152,6 +2151,8 @@ def get_service_countries(server, service, premotp_type="regular"):
         return _country_items_rumahotp(service)
     if server == "premotp":
         return _country_items_premotp(service, premotp_type)
+    if server == "nomorotp":
+        return [dict(x) for x in (get_nomorotp_countries(str(premotp_type or "plus").lower()) or []) if isinstance(x, dict)]
     return []
 
 
@@ -2166,12 +2167,14 @@ async def show_service_country_page(
         service_label = rumah_service_label(service)
     elif server == "premotp":
         service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
+    elif server == "nomorotp":
+        service_label = next((label for code, label in get_service_catalog("nomorotp", _nomorotp_type_for(query)) if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, service.title())
 
     try:
         items = await asyncio.wait_for(
-            asyncio.to_thread(get_service_countries, server, service, _premotp_type_for(query)),
+            asyncio.to_thread(get_service_countries, server, service, _nomorotp_type_for(query) if server == "nomorotp" else _premotp_type_for(query)),
             timeout=20
         )
     except asyncio.TimeoutError:
@@ -2376,10 +2379,15 @@ async def show_otp_operator_page(query, server, service, country, page=0):
         service_label = rumah_service_label(service)
     elif server == "premotp":
         service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
+    elif server == "nomorotp":
+        service_label = next((label for code, label in get_service_catalog("nomorotp", _nomorotp_type_for(query)) if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
     if server == "premotp":
+        await show_otp_price_page(query, query.from_user.id, server, service, country, "any", 0)
+        return
+    if server == "nomorotp":
         await show_otp_price_page(query, query.from_user.id, server, service, country, "any", 0)
         return
     names = await _get_otp_operator_names(server, country, service)
@@ -2582,6 +2590,30 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
             )
             rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
 
+    elif server == "nomorotp":
+        kind = _nomorotp_type_for(query)
+        try:
+            live = await asyncio.wait_for(asyncio.to_thread(get_nomorotp_availability, kind, service, country), timeout=20)
+        except Exception:
+            logger.exception("NomorOTP availability lookup failed")
+            live = []
+        for item in live or []:
+            try:
+                cost_idr = int(float(item.get("cost_idr") or 0)); stock = int(item.get("stock") or 0)
+            except Exception:
+                continue
+            if cost_idr <= 0 or stock <= 0: continue
+            operator_name = str(item.get("operator") or "any").strip() or "any"
+            sell = hitung_harga_jual_idr(cost_idr)
+            quote_id = "4Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id, telegram_id=user_id, provider="nomorotp",
+                country=str(country), country_name=display_country, service=str(service), operator=operator_name,
+                pool=json.dumps({"nomorotp_server": kind, "operator": operator_name, "cost_idr": cost_idr}, separators=(",", ":")),
+                cost_usd=cost_idr / float(KURS_DOLAR), stock=stock,
+            )
+            rows.append({"_display": (format_rupiah(sell), stock, quote_id, operator_name)})
+
     if not rows:
         await query.edit_message_text(
             "❌ <b>Stok tidak tersedia.</b>\n\n"
@@ -2602,9 +2634,11 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     for i in range(0, len(page_items), 2):
         row = []
         for item in page_items[i:i + 2]:
-            price, stock, quote_id = item["_display"]
+            display = item["_display"]
+            price, stock, quote_id = display[:3]
+            operator_text = f" • {display[3]}" if len(display) > 3 and str(display[3]).strip() and str(display[3]).lower() not in {"any", "auto", "all"} else ""
             row.append(InlineKeyboardButton(
-                f"{price} | Stok {stock}",
+                f"{price} | Stok {stock}{operator_text}",
                 callback_data=f"otp_quote:{quote_id}",
             ))
         keyboard.append(row)
@@ -2618,7 +2652,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     # Server 3 tidak memiliki tahap operator. Tombol Kembali dari
     # harga/stok harus kembali ke daftar negara, bukan memanggil halaman
     # harga lagi (yang sebelumnya membuat navigasi Server 3 berputar/stuck).
-    if server == "premotp":
+    if server in {"premotp", "nomorotp"}:
         back_callback = f"otp_service_countries:{server}:{service}:0"
     else:
         back_callback = f"otp_choose_server:{server}:{service}:{country}"
@@ -3873,29 +3907,33 @@ def _is_server_enabled(server):
         key = "server1_enabled"
     elif server == "rumahotp":
         key = "server2_enabled"
-    else:
+    elif server == "premotp":
         key = "server3_enabled"
+    elif server == "nomorotp":
+        key = "server4_enabled"
+    else:
+        return False
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
 
 
 def _server_maintenance_text(server):
     if server == "5sim":
-        return (
-            "⚠️ Server 1 Sedang Dalam Maintenance\n\n"
-            "Mohon maaf, Server 1 sedang dalam perbaikan sementara.\n"
-            "Silakan gunakan Server 2 atau coba kembali beberapa saat lagi. 🙏"
-        )
+        return ("⚠️ Server 1 Sedang Dalam Maintenance\n\n"
+                "Mohon maaf, Server 1 sedang dalam perbaikan sementara.\n"
+                "Silakan gunakan Server 2, Server 3, atau Server 4, atau coba kembali beberapa saat lagi. 🙏")
     if server == "rumahotp":
-        return (
-            "⚠️ Server 2 Sedang Dalam Maintenance\n\n"
-            "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
-            "Silakan gunakan Server 1 atau Server 3, atau coba kembali beberapa saat lagi. 🙏"
-        )
-    return (
-        "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
-        "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
-        "Silakan gunakan Server 1 atau Server 2, atau coba kembali beberapa saat lagi. 🙏"
-    )
+        return ("⚠️ Server 2 Sedang Dalam Maintenance\n\n"
+                "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
+                "Silakan gunakan Server 1, Server 3, atau Server 4, atau coba kembali beberapa saat lagi. 🙏")
+    if server == "premotp":
+        return ("⚠️ Server 3 Sedang Dalam Maintenance\n\n"
+                "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
+                "Silakan gunakan Server 1, Server 2, atau Server 4, atau coba kembali beberapa saat lagi. 🙏")
+    if server == "nomorotp":
+        return ("⚠️ Server 4 Sedang Dalam Maintenance\n\n"
+                "Mohon maaf, Server 4 (NomorOTP) sedang dalam perbaikan sementara.\n"
+                "Silakan gunakan Server 1, Server 2, atau Server 3, atau coba kembali beberapa saat lagi. 🙏")
+    return "⚠️ Server sedang maintenance."
 
 
 async def command_deposit(update, context):
@@ -4435,6 +4473,12 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
                 "raw": result,
             }
 
+        if provider == "nomorotp":
+            result = await asyncio.to_thread(cancel_nomorotp_activation, provider_order_id)
+            if result and result.get("success") is not False:
+                return {"response": "OK", "raw": result}
+            return {"response": "ERROR", "error": "Pembatalan NomorOTP belum dikonfirmasi.", "raw": result}
+
         result = await asyncio.to_thread(cancel_number, provider_order_id)
         statuses = _provider_status_values(result)
         if any(status in CANCELLED_PROVIDER_STATES for status in statuses):
@@ -4591,10 +4635,14 @@ async def auto_process_pending_orders(application):
                             checker = get_rumahotp_sms
                         elif provider == "premotp":
                             checker = get_premotp_order
+                        elif provider == "nomorotp":
+                            checker = get_nomorotp_status
                         else:
                             checker = get_sms
                         try:
                             data_sms = await asyncio.to_thread(checker, provider_order_id)
+                            if provider == "nomorotp":
+                                data_sms = normalize_nomorotp_status(data_sms)
                             if provider == "premotp":
                                 # PremOTP may return an API envelope or direct data.
                                 # Keep the existing fields and normalize below.
@@ -4644,7 +4692,7 @@ async def auto_process_pending_orders(application):
                             # terminal provider state through the same cancel ->
                             # verify -> refund path. This block is deliberately
                             # limited to PremOTP.
-                            if provider == "premotp" and not data_sms.get("sms"):
+                            if provider in {"premotp", "nomorotp"} and not data_sms.get("sms"):
                                 provider_statuses = _provider_status_values(data_sms)
                                 if any(
                                     status in CANCELLED_PROVIDER_STATES
@@ -4658,8 +4706,9 @@ async def auto_process_pending_orders(application):
                                     )
                                     if expired_resolved:
                                         logger.info(
-                                            "[AUTO EXPIRE] PremOTP terminal order refunded order=%s provider_status=%s",
+                                            "[AUTO EXPIRE] terminal provider order refunded order=%s provider=%s provider_status=%s",
                                             selected["order_id"],
+                                            provider,
                                             provider_statuses,
                                         )
                                         _AUTO_POLL_NEXT[provider] = asyncio.get_running_loop().time() + 1.5
@@ -4885,6 +4934,8 @@ async def process_otp_order(
     """Order OTP dari provider terpilih dengan margin sesuai PROFIT_PERCENT (default 7%)."""
 
     service_label = (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, service))
+    if server == "nomorotp":
+        service_label = next((label for code, label in get_service_catalog("nomorotp", _nomorotp_type_for(query)) if str(code) == str(service)), str(service))
     display_country = country
 
     # -----------------------------------------------------
@@ -5105,6 +5156,20 @@ async def process_otp_order(
         provider_expired_at = (candidate or {}).get("expired_at") or (candidate or {}).get("expires_at") or (candidate or {}).get("expires")
         provider_error = not candidate or not provider_order_id or not phone
         error_reason = "Pembelian nomor Server 3 gagal."
+    elif server == "nomorotp":
+        try: meta = json.loads(quote.get("pool") or "{}") if quote else {}
+        except Exception: meta = {}
+        nomor_kind = str(meta.get("nomorotp_server") or "plus")
+        nomor_operator = str(meta.get("operator") or operator or "any")
+        try:
+            candidate = await asyncio.to_thread(buy_nomorotp_number, nomor_kind, service, country, nomor_operator)
+        except Exception as exc:
+            logger.exception("NomorOTP order failed"); candidate = {"error": str(exc)}
+        provider_order_id = str((candidate or {}).get("id") or "").strip() or None
+        phone = (candidate or {}).get("phone") or (candidate or {}).get("phone_number") or (candidate or {}).get("number")
+        provider_expired_at = (candidate or {}).get("expires_at") or (candidate or {}).get("expired_at") or (candidate or {}).get("expires")
+        provider_error = not candidate or not provider_order_id or not phone
+        error_reason = "Pembelian nomor Server 4 NomorOTP gagal."
     else:
         provider_expired_at = None
         provider_error = True
@@ -5164,7 +5229,7 @@ async def process_otp_order(
         )
         return
 
-    if server == "premotp":
+    if server in {"premotp", "nomorotp"}:
         try:
             provider_cost_rp = int(round(float(json.loads(quote.get("pool") or "{}").get("cost_idr") or provider_cost_usd * KURS_DOLAR)))
         except Exception:
@@ -5282,6 +5347,8 @@ async def user_callback(
     data = query.data
     if context.user_data.get("premotp_type") in {"regular", "plus"}:
         _PREMOTP_USER_TYPES[user_id] = context.user_data["premotp_type"]
+    if context.user_data.get("nomorotp_type") in {"plus", "express"}:
+        _NOMOROTP_USER_TYPES[user_id] = context.user_data["nomorotp_type"]
 
     if data == "monetag_ads":
         web_url = os.getenv("AZHURA_WEB_URL", "").strip().rstrip("/")
@@ -5429,6 +5496,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         if server == "premotp":
             await show_premotp_type_page(query)
             return
+        if server == "nomorotp":
+            await show_nomorotp_type_page(query)
+            return
 
         await show_service_page(
 
@@ -5462,6 +5532,18 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         return
 
     # =====================================================
+    if data.startswith("otp_nomorotp_type:"):
+        kind = data.split(":", 1)[1].strip().lower()
+        if kind not in {"plus", "express"}:
+            await query.answer("Jenis Server NomorOTP tidak valid.", show_alert=True); return
+        if not _is_server_enabled("nomorotp") and not is_admin(user_id):
+            await query.answer(_server_maintenance_text("nomorotp"), show_alert=True); return
+        context.user_data["nomorotp_type"] = kind
+        _NOMOROTP_USER_TYPES[user_id] = kind
+        context.user_data["otp_server"] = "nomorotp"
+        await show_service_page(query, "nomorotp", 0)
+        return
+
     # SERVICE PAGE
     # =====================================================
 
@@ -5535,6 +5617,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         context.user_data["otp_server"] = server
         context.user_data["otp_service"] = service
+        if server == "nomorotp": _NOMOROTP_USER_TYPES[user_id] = context.user_data.get("nomorotp_type", "plus")
 
         await show_service_country_page(
             query,
@@ -5605,6 +5688,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         except Exception:
             page = 0
 
+        if server == "nomorotp": _NOMOROTP_USER_TYPES[user_id] = context.user_data.get("nomorotp_type", "plus")
         await show_service_country_page(
             query,
             server,
@@ -5661,6 +5745,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         context.user_data["otp_server"] = source_server
         context.user_data["otp_service"] = service
         context.user_data["otp_country"] = country
+        if source_server == "nomorotp": _NOMOROTP_USER_TYPES[user_id] = context.user_data.get("nomorotp_type", "plus")
 
         if source_server == "premotp":
             await show_otp_price_page(query, user_id, source_server, service, country, "any", 0)
@@ -5689,6 +5774,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         context.user_data["otp_server"] = server
         context.user_data["otp_service"] = service
         context.user_data["otp_country"] = country
+        if server == "nomorotp": _NOMOROTP_USER_TYPES[user_id] = context.user_data.get("nomorotp_type", "plus")
         await show_otp_price_page(query, user_id, server, service, country, operator, 0)
         return
 
@@ -5721,6 +5807,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             page = int(page_raw)
         except Exception:
             page = 0
+        if server == "nomorotp": _NOMOROTP_USER_TYPES[user_id] = context.user_data.get("nomorotp_type", "plus")
         await show_otp_price_page(query, user_id, server, service, country, operator, page)
         return
 
@@ -6579,7 +6666,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         # expiry time, Resend OTP must no longer contact the provider. History
         # may contain an older inline button, so enforce the same rule at the
         # callback level too.
-        if provider in {"5sim", "rumahotp", "premotp"} and _order_expired(order):
+        if provider in {"5sim", "rumahotp", "premotp", "nomorotp"} and _order_expired(order):
             await query.answer("⏰ Masa aktif order sudah berakhir. Resend OTP tidak tersedia.", show_alert=True)
             return
 
@@ -6718,6 +6805,26 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
+        # Server 4 (NomorOTP): API status=3 requests a new OTP for the same activation.
+        if provider == "nomorotp":
+            try:
+                result = await asyncio.wait_for(asyncio.to_thread(resend_nomorotp_activation, provider_order_id), timeout=12.0)
+            except Exception as exc:
+                await query.answer("Resend OTP gagal: " + str(exc)[:180], show_alert=True); return
+            if not result or result.get("success") is False:
+                await query.answer("NomorOTP tidak mengonfirmasi resend OTP.", show_alert=True); return
+            await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
+            current = get_order(order_id) or order
+            waiting_text = (
+                "⏳ <b>MENUNGGU SMS OTP...</b>\n\n"
+                f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                f"📱 Layanan: <b>{escape(str(current.get('service_name') or current.get('service') or '-'))}</b>\n"
+                f"🌐 Negara: <b>{escape(str(current.get('country_name') or current.get('country') or '-'))}</b>\n"
+                f"📞 Nomor: <code>{escape(str(current.get('phone') or '-'))}</code>\n\n"
+                "Kode OTP baru akan ditampilkan otomatis saat diterima."
+            )
+            await query.edit_message_text(waiting_text, parse_mode="HTML", reply_markup=None); return
+
         # Server 1 (5SIM): there is no official resend operation for an
         # existing activation. Do NOT call /reuse here: /reuse creates a
         # new activation and may charge the provider again; it is not a
@@ -6797,7 +6904,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         # and 3. Once an order has received at least one real OTP and the
         # original activation has expired, present it as completed and hide
         # Resend OTP. The stored database status is not changed here.
-        history_expired = provider in {"5sim", "rumahotp", "premotp"} and _order_expired(order)
+        history_expired = provider in {"5sim", "rumahotp", "premotp", "nomorotp"} and _order_expired(order)
         history_completed = (
             status_upper == "COMPLETED"
             or (history_expired and has_otp)
@@ -6919,6 +7026,12 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 # the correct completion action. This also avoids the previous
                 # unbound `result` bug that left the callback stuck.
                 result = {"response": "OK", "provider_status": "completed_local"}
+            elif provider == "nomorotp":
+                try:
+                    await asyncio.to_thread(finish_nomorotp_activation, provider_order_id)
+                    result = {"response": "OK"}
+                except Exception as exc:
+                    result = {"response": "ERROR", "error": str(exc)}
             else:
                 finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
                 result = await asyncio.wait_for(
@@ -8220,7 +8333,7 @@ async def _admin_user_orders(query, telegram_id):
             f"   🕐 {escape(format_datetime_wib(row.get('created_at')))}\n"
             f"   ⏰ Expired: {escape(format_datetime_wib(row.get('expired_at')))}"
         )
-        if (str(row.get("provider") or "").lower() in {"rumahotp", "5sim"}):
+        if (str(row.get("provider") or "").lower() in {"rumahotp", "5sim", "nomorotp"}):
             if str(row.get("status") or "").upper() == "PENDING":
                 keyboard.append([InlineKeyboardButton(
                     f"🛑 Batalkan & Refund {str(row['order_id'])}",
@@ -8283,6 +8396,9 @@ async def _admin_cancel_order(query, context, order_id):
             cancel_result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
         elif provider == "5sim":
             cancel_result = await asyncio.to_thread(cancel_number, provider_order_id)
+        elif provider == "nomorotp":
+            cancel_result = await asyncio.to_thread(cancel_nomorotp_activation, provider_order_id)
+            cancel_result = {"response":"OK"} if cancel_result and cancel_result.get("success") is not False else {"response":"ERROR","error":"NomorOTP belum mengonfirmasi cancel."}
         else:
             cancel_result = {"response": "ERROR", "error": f"Provider {provider} belum didukung."}
 
@@ -9451,7 +9567,7 @@ async def text_handler(
                     name = data.get("text_en", code) if isinstance(data, dict) else str(data)
                     items.append({"country": str(code), "name": str(name), "cost": 0, "stock": 1})
             else:
-                items = await asyncio.to_thread(get_service_countries, server, service)
+                items = await asyncio.to_thread(get_service_countries, server, service, context.user_data.get("nomorotp_type", "plus") if server == "nomorotp" else context.user_data.get("premotp_type", "regular"))
         except Exception:
             items = []
 
@@ -9488,6 +9604,9 @@ async def text_handler(
                     price = hitung_harga_jual_idr(live_cost) if live_cost > 0 else 0
                     label = f"{country_flag(item.get('iso_code') or name)} {name} | mulai {format_rupiah(price)} | 📦 {stock}"
                     cb = f"otp_choose_server:{server}:{service}:{country}"
+                elif server == "nomorotp":
+                    label = f"{country_flag(item.get('iso_code') or name)} {name}"
+                    cb = f"otp_choose_server:{server}:{service}:{country}"
                 else:
                     label = f"{country_flag(item.get('iso_code') or name)} {name} | 💰 {format_rupiah(price)} | 📦 {stock}"
                     cb = f"otp_choose_server:{server}:{service}:{country}"
@@ -9520,11 +9639,8 @@ async def text_handler(
         )
         keyword = update.message.text.strip().lower()
 
-        services = await asyncio.to_thread(
-            get_service_catalog,
-            server,
-            context.user_data.get("premotp_type", "regular")
-        )
+        catalog_kind = context.user_data.get("nomorotp_type", "plus") if server == "nomorotp" else context.user_data.get("premotp_type", "regular")
+        services = await asyncio.to_thread(get_service_catalog, server, catalog_kind)
 
         matches = [
             (code, name)
