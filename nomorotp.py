@@ -181,6 +181,47 @@ def get_prices(kind="plus", country=None, service=None):
     return _request("getPrices", params=params).get("prices") or {}
 
 
+def _normalize_stock_rows(data):
+    """Normalize provider availability/price payloads into operator rows.
+
+    NomorOTP documents getAvailability as the operator-level source, while
+    getPrices is the aggregate source (cost + count). In practice an
+    aggregator server can return an empty operator matrix even when the
+    aggregate price endpoint has stock. Keep both paths so AZHURA does not
+    incorrectly tell users that stock is empty.
+    """
+    if isinstance(data, dict):
+        # Common shape: {operator: {count, cost}}
+        if all(isinstance(v, dict) for v in data.values()):
+            data = [dict(v, operator=k) for k, v in data.items()]
+        else:
+            data = [data]
+    if not isinstance(data, list):
+        return []
+
+    rows = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        operator = str(
+            item.get("operator")
+            or item.get("operator_name")
+            or item.get("name")
+            or item.get("operatorCode")
+            or "any"
+        ).strip()
+        try:
+            stock = int(float(item.get("count") or item.get("stock") or item.get("available") or item.get("quantity") or 0))
+            cost = float(item.get("cost") or item.get("price") or item.get("amount") or item.get("rate") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cost <= 0 or stock <= 0:
+            continue
+        rows.append({"operator": operator or "any", "stock": stock, "cost_idr": int(round(cost))})
+    rows.sort(key=lambda x: (x["cost_idr"], x["operator"].lower()))
+    return rows
+
+
 def get_availability(kind, service, country):
     code = server_code(kind)
     key = f"availability:{code}:{service}:{country}"
@@ -190,25 +231,38 @@ def get_availability(kind, service, country):
         item = _cache.get(key)
         if item and time.monotonic() - item[0] < 12:
             return list(item[1])
-    data = _request(
-        "getAvailability",
-        params={"server": code, "service": service, "country": int(country) if str(country).isdigit() else country},
-    ).get("availability") or []
-    if isinstance(data, dict):
-        data = list(data.values())
-    rows = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        operator = str(item.get("operator") or item.get("operator_name") or item.get("name") or "any").strip()
+
+    country_value = int(country) if str(country).isdigit() else country
+
+    # Preferred path: operator-level availability.
+    try:
+        availability_payload = _request(
+            "getAvailability",
+            params={"server": code, "service": service, "country": country_value},
+        ).get("availability") or []
+        rows = _normalize_stock_rows(availability_payload)
+    except RuntimeError:
+        # Some provider pools may not expose operator availability even though
+        # their price/stock endpoint is working. Fall through to getPrices.
+        rows = []
+
+    # Important fallback: getPrices is explicitly documented by NomorOTP as
+    # returning cost + count for service/country. This prevents a false
+    # "stock unavailable" result when the Plus/Express aggregator has stock
+    # but no operator matrix.
+    if not rows:
         try:
-            stock = int(float(item.get("count") or item.get("stock") or item.get("available") or 0))
-            cost = float(item.get("cost") or item.get("price") or item.get("amount") or 0)
-        except (TypeError, ValueError):
-            continue
-        if cost <= 0 or stock <= 0:
-            continue
-        rows.append({"operator": operator or "any", "stock": stock, "cost_idr": int(round(cost))})
+            prices = _request(
+                "getPrices",
+                params={"server": code, "country": country_value, "service": service},
+            ).get("prices") or {}
+            target = prices.get(service) if isinstance(prices, dict) else None
+            rows = _normalize_stock_rows(target)
+            if not rows and isinstance(prices, dict):
+                rows = _normalize_stock_rows(prices)
+        except RuntimeError:
+            rows = []
+
     rows.sort(key=lambda x: (x["cost_idr"], x["operator"].lower()))
     return _put(key, rows)
 

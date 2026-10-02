@@ -2471,6 +2471,14 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     else:
         service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
+    if server == "nomorotp":
+        try:
+            country_rows = await asyncio.to_thread(get_nomorotp_countries, _nomorotp_type_for(query))
+            match = next((x for x in country_rows if str(x.get("country") or x.get("id")) == str(country)), None)
+            if match:
+                display_country = str(match.get("name") or match.get("country_name") or country)
+        except Exception:
+            display_country = str(country)
     operator = str(operator or "any")
     rows = []
 
