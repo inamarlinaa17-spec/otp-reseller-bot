@@ -181,45 +181,117 @@ def get_prices(kind="plus", country=None, service=None):
     return _request("getPrices", params=params).get("prices") or {}
 
 
+def _to_number(value, default=0.0):
+    """Parse provider numbers defensively (int/float/strings such as '1,700' or 'Rp 1.700')."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace("Rp", "").replace("IDR", "").strip()
+    if not text:
+        return default
+    # Handle common Indonesian/international separators.
+    try:
+        if "," in text and "." in text:
+            # Assume the last separator is the decimal separator only when the
+            # suffix looks fractional; otherwise treat punctuation as grouping.
+            if len(text.rsplit(",", 1)[-1]) <= 2 and len(text.rsplit(".", 1)[-1]) > 2:
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "").replace(".", "")
+        elif "." in text:
+            # Prices/stocks from Indonesian APIs commonly use 1.700 as 1700.
+            tail = text.rsplit(".", 1)[-1]
+            text = text.replace(".", "") if len(tail) == 3 else text
+        elif "," in text:
+            tail = text.rsplit(",", 1)[-1]
+            text = text.replace(",", "") if len(tail) == 3 else text.replace(",", ".")
+        return float(text)
+    except (TypeError, ValueError):
+        return default
+
+
 def _normalize_stock_rows(data):
-    """Normalize provider availability/price payloads into operator rows.
+    """Normalize all known NomorOTP price/availability shapes.
 
-    NomorOTP documents getAvailability as the operator-level source, while
-    getPrices is the aggregate source (cost + count). In practice an
-    aggregator server can return an empty operator matrix even when the
-    aggregate price endpoint has stock. Keep both paths so AZHURA does not
-    incorrectly tell users that stock is empty.
+    The documented response is a flat object/list, but aggregator pools can
+    expose extra nesting (service -> country -> operator/provider -> quote).
+    Walk nested mappings/lists so a valid count/cost pair is never discarded
+    merely because the response shape differs between Plus/Express pools.
     """
-    if isinstance(data, dict):
-        # Common shape: {operator: {count, cost}}
-        if all(isinstance(v, dict) for v in data.values()):
-            data = [dict(v, operator=k) for k, v in data.items()]
-        else:
-            data = [data]
-    if not isinstance(data, list):
-        return []
-
     rows = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
+
+    def walk(node, inherited_operator="any"):
+        if isinstance(node, list):
+            for item in node:
+                walk(item, inherited_operator)
+            return
+        if not isinstance(node, dict):
+            return
+
         operator = str(
-            item.get("operator")
-            or item.get("operator_name")
-            or item.get("name")
-            or item.get("operatorCode")
+            node.get("operator")
+            or node.get("operator_name")
+            or node.get("operatorCode")
+            or inherited_operator
             or "any"
-        ).strip()
-        try:
-            stock = int(float(item.get("count") or item.get("stock") or item.get("available") or item.get("quantity") or 0))
-            cost = float(item.get("cost") or item.get("price") or item.get("amount") or item.get("rate") or 0)
-        except (TypeError, ValueError):
-            continue
-        if cost <= 0 or stock <= 0:
-            continue
-        rows.append({"operator": operator or "any", "stock": stock, "cost_idr": int(round(cost))})
-    rows.sort(key=lambda x: (x["cost_idr"], x["operator"].lower()))
-    return rows
+        ).strip() or "any"
+
+        stock_raw = (
+            node.get("count") if node.get("count") is not None else
+            node.get("stock") if node.get("stock") is not None else
+            node.get("available") if node.get("available") is not None else
+            node.get("quantity") if node.get("quantity") is not None else
+            node.get("qty")
+        )
+        cost_raw = (
+            node.get("cost") if node.get("cost") is not None else
+            node.get("price") if node.get("price") is not None else
+            node.get("amount") if node.get("amount") is not None else
+            node.get("rate") if node.get("rate") is not None else
+            node.get("price_idr")
+        )
+        stock = int(max(0, round(_to_number(stock_raw, 0))))
+        cost = _to_number(cost_raw, 0)
+        if stock > 0 and cost > 0:
+            rows.append({
+                "operator": operator,
+                "stock": stock,
+                "cost_idr": int(round(cost)),
+            })
+            # A node with its own quote is already represented. Do not descend
+            # into nested metadata and accidentally duplicate the same stock.
+            return
+
+        # No quote at this node: descend and use dictionary keys as a useful
+        # operator/provider hint when available.
+        for key, value in node.items():
+            if key in {
+                "success", "prices", "availability", "service", "services",
+                "country", "countries", "cost", "price", "count", "stock",
+                "available", "quantity", "qty", "amount", "rate", "price_idr",
+                "operator", "operator_name", "operatorCode", "name", "code",
+            }:
+                if key in {"prices", "availability"}:
+                    walk(value, inherited_operator)
+                elif isinstance(value, (dict, list)):
+                    walk(value, inherited_operator)
+                continue
+            if isinstance(value, (dict, list)):
+                child_operator = str(key).strip() or inherited_operator
+                walk(value, child_operator)
+
+    walk(data)
+
+    # Deduplicate identical operator/stock/price rows created by nested
+    # wrappers while retaining separate operator tiers.
+    unique = {}
+    for row in rows:
+        key = (row["operator"].lower(), row["stock"], row["cost_idr"])
+        unique[key] = row
+    result = list(unique.values())
+    result.sort(key=lambda x: (x["cost_idr"], x["operator"].lower()))
+    return result
 
 
 def get_availability(kind, service, country):
@@ -256,8 +328,30 @@ def get_availability(kind, service, country):
                 "getPrices",
                 params={"server": code, "country": country_value, "service": service},
             ).get("prices") or {}
-            target = prices.get(service) if isinstance(prices, dict) else None
-            rows = _normalize_stock_rows(target)
+
+            # Be tolerant if the aggregator ignores one/both filters and
+            # returns service -> country -> quote or country -> service ->
+            # quote instead of the documented service -> quote shape.
+            target = None
+            if isinstance(prices, dict):
+                service_key = next((k for k in prices if str(k).lower() == str(service).lower()), None)
+                country_key = next((k for k in prices if str(k) == str(country_value)), None)
+                if service_key is not None:
+                    service_data = prices.get(service_key)
+                    if isinstance(service_data, dict):
+                        nested_country = next((k for k in service_data if str(k) == str(country_value)), None)
+                        target = service_data.get(nested_country) if nested_country is not None else service_data
+                    else:
+                        target = service_data
+                elif country_key is not None:
+                    country_data = prices.get(country_key)
+                    if isinstance(country_data, dict):
+                        nested_service = next((k for k in country_data if str(k).lower() == str(service).lower()), None)
+                        target = country_data.get(nested_service) if nested_service is not None else country_data
+                    else:
+                        target = country_data
+
+            rows = _normalize_stock_rows(target) if target is not None else []
             if not rows and isinstance(prices, dict):
                 rows = _normalize_stock_rows(prices)
         except RuntimeError:
