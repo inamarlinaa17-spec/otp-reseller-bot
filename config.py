@@ -150,33 +150,6 @@ RUMAHOTP_API_KEY = os.getenv(
 ).strip()
 
 
-# =========================================================
-# NOMOROTP CONFIGURATION (SERVER 4)
-# =========================================================
-
-NOMOROTP_API_KEY = os.getenv(
-    "NOMOROTP_API_KEY",
-    ""
-).strip()
-
-NOMOROTP_BASE_URL = os.getenv(
-    "NOMOROTP_BASE_URL",
-    "https://api.nomorotp.id/"
-).strip()
-
-NOMOROTP_PLUS_SERVER = os.getenv(
-    "NOMOROTP_PLUS_SERVER",
-    "plus"
-).strip()
-
-# Public NomorOTP API currently documents `sh` as its main provider code.
-# Keep the customer-facing label as Server Express and make the provider code configurable.
-NOMOROTP_EXPRESS_SERVER = os.getenv(
-    "NOMOROTP_EXPRESS_SERVER",
-    "sh"
-).strip()
-
-
 
 
 # =========================================================
