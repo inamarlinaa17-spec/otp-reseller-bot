@@ -239,7 +239,7 @@ OTP_SERVERS = {
     "5sim": "⚡ SERVER 1 — HIGH STOCK",
     "rumahotp": "⚡ SERVER 2 — FULL TEXT",
     "premotp": "⚡ SERVER 3 — SERVER ALTERNATIF",
-    "nomorotp": "💠 SERVER 4 — NOMOROTP",
+    "nomorotp": "💠 SERVER 4",
 }
 
 
@@ -1686,27 +1686,45 @@ async def start(
 
 async def show_server_page(query):
     keyboard = [
-        [InlineKeyboardButton("Server 1", callback_data="otp_server:5sim"), InlineKeyboardButton("Server 3", callback_data="otp_server:premotp")],
-        [InlineKeyboardButton("Server 2", callback_data="otp_server:rumahotp"), InlineKeyboardButton("Server 4 — NomorOTP", callback_data="otp_server:nomorotp")],
+        [
+            InlineKeyboardButton("Server 1", callback_data="otp_server:5sim"),
+            InlineKeyboardButton("Server 3", callback_data="otp_server:premotp"),
+        ],
+        [
+            InlineKeyboardButton("Server 2", callback_data="otp_server:rumahotp"),
+            InlineKeyboardButton("Server 4", callback_data="otp_server:nomorotp"),
+        ],
         [InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")],
     ]
+
     await query.edit_message_text(
-        "💻 <b>PILIH SERVER OTP</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Pilih server sesuai kebutuhan. Setiap server memiliki stok dan harga sendiri.\n\n"
-        "💠 <b>Server 4 — NomorOTP</b> menyediakan dua jalur: <b>Server Plus</b> dan <b>Server Express</b>.\n\n"
-        "Silakan pilih server melalui tombol di bawah ini:",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        "💻 <b>PILIH SERVER OTP</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚡ <b>SERVER 1 — HIGH STOCK</b>\n"
+        "Server utama dengan stok nomor dalam jumlah besar dan performa stabil.\n\n"
+        "⚡ <b>SERVER 2 — FULL TEXT</b>\n"
+        "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
+        "⚡ <b>SERVER 3 — SERVER ALTERNATIF</b>\n"
+        "Pilihan alternatif dengan katalog layanan dan stok yang diperbarui langsung dari sistem untuk menambah opsi nomor OTP.\n\n"
+        "💠 <b>SERVER 4</b>\n"
+        "Pilihan tambahan dengan dua jalur pengiriman: Server Plus dan Server Express.\n\n"
+        "Silakan pilih server melalui tombol di bawah ini :",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 async def show_nomorotp_type_page(query):
     await query.edit_message_text(
-        "💠 <b>SERVER 4 — NOMOROTP</b>\n\nPilih jaringan pengiriman yang ingin digunakan.\n\n"
-        "🐷 <b>Server Plus</b>\nTarif kompetitif dengan stok independen.\n\n"
-        "⚡ <b>Server Express</b>\nJalur alternatif untuk membandingkan stok, operator, harga, dan respons.\n\n"
+        "💠 <b>SERVER 4</b>\n\n"
+        "Pilih jaringan pengiriman yang ingin digunakan.\n\n"
+        "📦 <b>Server Plus</b>\n"
+        "Tarif kompetitif dengan stok independen.\n\n"
+        "⚡ <b>Server Express</b>\n"
+        "Jalur alternatif untuk membandingkan stok, operator, harga, dan respons.\n\n"
         "Pilih salah satu untuk melihat katalog layanan live:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🐷 Server Plus", callback_data="otp_nomorotp_type:plus")],
+            [InlineKeyboardButton("📦 Server Plus", callback_data="otp_nomorotp_type:plus")],
             [InlineKeyboardButton("⚡ Server Express", callback_data="otp_nomorotp_type:express")],
             [InlineKeyboardButton("⬅️ Pilih Server", callback_data="order")],
         ]),
@@ -2206,8 +2224,13 @@ async def show_service_country_page(
         )
         return
 
-    # Hanya negara yang benar-benar memiliki stok yang ditampilkan.
-    items = [x for x in items if int(x.get("stock") or 0) > 0]
+    # Server 1/2/3 sudah mengembalikan stock pada tahap negara. Server 4
+    # memakai getCountries untuk katalog negara dan baru mengembalikan
+    # operator/stok/harga secara live setelah negara dipilih melalui
+    # getAvailability. Jangan menyaring negara Server 4 berdasarkan field
+    # stock yang memang tidak dikirim oleh endpoint getCountries.
+    if server != "nomorotp":
+        items = [x for x in items if int(x.get("stock") or 0) > 0]
     items.sort(key=lambda x: (
         0 if str(x.get("name", "")).lower() == "indonesia" else 1,
         str(x.get("name", "")).lower()
@@ -3931,7 +3954,7 @@ def _server_maintenance_text(server):
                 "Silakan gunakan Server 1, Server 2, atau Server 4, atau coba kembali beberapa saat lagi. 🙏")
     if server == "nomorotp":
         return ("⚠️ Server 4 Sedang Dalam Maintenance\n\n"
-                "Mohon maaf, Server 4 (NomorOTP) sedang dalam perbaikan sementara.\n"
+                "Mohon maaf, Server 4 sedang dalam perbaikan sementara.\n"
                 "Silakan gunakan Server 1, Server 2, atau Server 3, atau coba kembali beberapa saat lagi. 🙏")
     return "⚠️ Server sedang maintenance."
 
@@ -4477,7 +4500,7 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
             result = await asyncio.to_thread(cancel_nomorotp_activation, provider_order_id)
             if result and result.get("success") is not False:
                 return {"response": "OK", "raw": result}
-            return {"response": "ERROR", "error": "Pembatalan NomorOTP belum dikonfirmasi.", "raw": result}
+            return {"response": "ERROR", "error": "Pembatalan Server 4 belum dikonfirmasi.", "raw": result}
 
         result = await asyncio.to_thread(cancel_number, provider_order_id)
         statuses = _provider_status_values(result)
@@ -5169,7 +5192,7 @@ async def process_otp_order(
         phone = (candidate or {}).get("phone") or (candidate or {}).get("phone_number") or (candidate or {}).get("number")
         provider_expired_at = (candidate or {}).get("expires_at") or (candidate or {}).get("expired_at") or (candidate or {}).get("expires")
         provider_error = not candidate or not provider_order_id or not phone
-        error_reason = "Pembelian nomor Server 4 NomorOTP gagal."
+        error_reason = "Pembelian nomor Server 4 gagal."
     else:
         provider_expired_at = None
         provider_error = True
@@ -5535,7 +5558,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     if data.startswith("otp_nomorotp_type:"):
         kind = data.split(":", 1)[1].strip().lower()
         if kind not in {"plus", "express"}:
-            await query.answer("Jenis Server NomorOTP tidak valid.", show_alert=True); return
+            await query.answer("Jenis Server 4 tidak valid.", show_alert=True); return
         if not _is_server_enabled("nomorotp") and not is_admin(user_id):
             await query.answer(_server_maintenance_text("nomorotp"), show_alert=True); return
         context.user_data["nomorotp_type"] = kind
@@ -6812,7 +6835,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             except Exception as exc:
                 await query.answer("Resend OTP gagal: " + str(exc)[:180], show_alert=True); return
             if not result or result.get("success") is False:
-                await query.answer("NomorOTP tidak mengonfirmasi resend OTP.", show_alert=True); return
+                await query.answer("Server 4 tidak mengonfirmasi resend OTP.", show_alert=True); return
             await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
             current = get_order(order_id) or order
             waiting_text = (
@@ -8398,7 +8421,7 @@ async def _admin_cancel_order(query, context, order_id):
             cancel_result = await asyncio.to_thread(cancel_number, provider_order_id)
         elif provider == "nomorotp":
             cancel_result = await asyncio.to_thread(cancel_nomorotp_activation, provider_order_id)
-            cancel_result = {"response":"OK"} if cancel_result and cancel_result.get("success") is not False else {"response":"ERROR","error":"NomorOTP belum mengonfirmasi cancel."}
+            cancel_result = {"response":"OK"} if cancel_result and cancel_result.get("success") is not False else {"response":"ERROR","error":"Server 4 belum mengonfirmasi cancel."}
         else:
             cancel_result = {"response": "ERROR", "error": f"Provider {provider} belum didukung."}
 
