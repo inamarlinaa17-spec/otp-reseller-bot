@@ -7,12 +7,16 @@ import os
 import math
 import time
 import threading
+import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from urllib.parse import quote
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.grizzlysms.com"
 HANDLER_URL = f"{BASE_URL}/stubs/handler_api.php"
@@ -544,6 +548,136 @@ def _extract_provider_quotes(data, service, country):
     return rows
 
 
+_PRICE_KEYS = ("price", "cost", "activationCost", "rate", "sum")
+_COUNT_KEYS = ("count", "stock", "available", "quantity", "qty", "total")
+_SKIP_KEYS = {"status", "success", "message", "error"}
+
+
+def _to_float(v):
+    try:
+        if isinstance(v, bool):
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _quote_of(node):
+    """Return (price, count) if the dict itself is a price/stock quote."""
+    price = None
+    for k in _PRICE_KEYS:
+        if k in node:
+            price = _to_float(node.get(k))
+            if price and price > 0:
+                break
+            price = None
+    if price is None:
+        return None
+    count = None
+    for k in _COUNT_KEYS:
+        if k in node:
+            count = _to_float(node.get(k))
+            if count is not None:
+                break
+    if count is None:
+        return None
+    return price, max(0, int(count))
+
+
+def extract_price_tiers(data, service, country):
+    """Ambil SEMUA tier harga/stok untuk satu layanan + negara.
+
+    Format respons Grizzly V2/V3 bisa berbeda-beda (tier bisa berupa daftar,
+    peta provider -> quote, atau peta harga -> jumlah). Fungsi ini menelusuri
+    seluruh JSON, mengenali node negara/layanan lewat kunci ATAU field di
+    dalam node, lalu mengumpulkan setiap quote (harga + stok) yang ditemukan.
+    Quote agregat yang punya anak-anak tier tidak ikut dihitung (anaknya saja).
+    """
+    svc = str(service or "").strip().lower()
+    cty = str(country or "").strip().lower()
+    rows = []
+
+    def ident(node, *names):
+        for n in names:
+            v = node.get(n)
+            if v not in (None, "") and not isinstance(v, (dict, list)):
+                return str(v).strip().lower()
+        return None
+
+    def walk(node, has_c, has_s, pid):
+        """Return tier rows found under node. has_c/has_s: context matched."""
+        out = []
+        if isinstance(node, list):
+            for item in node:
+                out.extend(walk(item, has_c, has_s, pid))
+            return out
+        if not isinstance(node, dict):
+            return out
+
+        c = ident(node, "country", "country_id", "countryId", "countryCode", "country_code")
+        sv = ident(node, "service", "service_code", "serviceId", "product")
+        if c is not None:
+            has_c = has_c or c == cty
+            if c != cty and not has_c:
+                return out
+        if sv is not None:
+            has_s = has_s or sv == svc
+            if sv != svc and not has_s:
+                return out
+        pid = ident(node, "provider_id", "providerId", "providerID", "provider") or pid
+
+        # Peta harga -> jumlah, mis. {"0.62": 1510, "0.5": 327}
+        if has_c and node and all(not isinstance(v, (dict, list)) for v in node.values()):
+            nums = [(_to_float(k), _to_float(v)) for k, v in node.items()]
+            if (len(nums) >= 1 and all(a is not None and a > 0 and b is not None and b >= 0 for a, b in nums)
+                    and not any(k in node for k in _PRICE_KEYS + _COUNT_KEYS)):
+                for (a, b), k in zip(nums, node.keys()):
+                    out.append({"price": float(a), "count": int(b), "provider_id": pid or ""})
+                return out
+
+        # Telusuri anak-anak lebih dulu.
+        child_rows = []
+        for key, value in node.items():
+            ks = str(key).strip()
+            if ks.lower() in _SKIP_KEYS:
+                continue
+            if not isinstance(value, (dict, list)):
+                continue
+            kl = ks.lower()
+            c_ctx, s_ctx, child_pid = has_c, has_s, pid
+            if kl == cty and not has_c:
+                c_ctx = True
+            elif kl == svc and not has_s:
+                s_ctx = True
+            elif ks.isdigit() or kl not in {"providers", "providermap", "providerprices", "provider",
+                                            "operators", "operatormap", "data", "result", "prices",
+                                            "countries", "services", "tiers", "offers", "items", "list"}:
+                # Kunci lain di dalam konteks negara+layanan umumnya id provider / harga.
+                if has_c and (has_s or True):
+                    child_pid = pid or ks
+            child_rows.extend(walk(value, c_ctx, s_ctx, child_pid))
+
+        if child_rows:
+            return child_rows
+        q = _quote_of(node)
+        if q and has_c:
+            out.append({"price": q[0], "count": q[1], "provider_id": pid or ""})
+        return out
+
+    raw = walk(data, False, False, "")
+    final, seen = [], set()
+    for r in raw:
+        if r["price"] <= 0 or r["count"] <= 0:
+            continue
+        key = (round(r["price"], 8), r["count"], r["provider_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        final.append({"country": str(country), "service": str(service), "cost_usd": float(r["price"]),
+                      "stock": int(r["count"]), "provider_id": str(r["provider_id"] or "")})
+    return final
+
+
 def get_prices(country=None, service=None):
     """Return the live price matrix, including every price tier.
 
@@ -556,8 +690,26 @@ def get_prices(country=None, service=None):
     return _cached(cache_key, 20, lambda: _get_prices_live(country, service))
 
 
+_DEBUG_LOGGED = {}
+
+
+def _log_raw_once(action, service, country, data):
+    """Catat respons mentah (dipotong) agar format API bisa diperiksa di log Railway."""
+    key = (action, str(service), str(country))
+    now = time.monotonic()
+    if now - _DEBUG_LOGGED.get(key, 0) < 600:
+        return
+    _DEBUG_LOGGED[key] = now
+    try:
+        snippet = json.dumps(data, ensure_ascii=False)[:2500] if not isinstance(data, str) else data[:2500]
+    except Exception:
+        snippet = str(data)[:2500]
+    logger.warning("GRIZZLY PRICE RAW %s service=%s country=%s: %s", action, service, country, snippet)
+
+
 def _get_prices_live(country=None, service=None):
     service_candidates = _service_candidates(service) if service else [None]
+    # Urutan prioritas: V3 (tier per provider) > V2 > legacy (agregat saja).
     actions = ("getPricesV3", "getPricesV2", "getPrices")
 
     def run(action, svc, filtered):
@@ -568,41 +720,60 @@ def _get_prices_live(country=None, service=None):
             if svc not in (None, ""):
                 params["service"] = svc
         data = _request(action, _timeout=FAST_TIMEOUT, **params)
-        rows = _extract_provider_quotes(data, svc or service or "", country) if country and service else []
+        rows = []
+        if country and service:
+            rows = extract_price_tiers(data, svc or service, country)
+            if not rows:
+                rows = _extract_provider_quotes(data, svc or service or "", country)
         if not rows:
             rows = _price_records(data, wanted_service=svc or service, wanted_country=country)
+        if country and service and len(rows) <= 1:
+            _log_raw_once(action, svc or service, country, data)
         return rows
 
     def collect(jobs):
-        merged, seen, errors = [], set(), []
+        by_action, errors = {}, []
         if not jobs:
-            return merged, errors
+            return by_action, errors
         with ThreadPoolExecutor(max_workers=min(len(jobs), 6)) as pool:
-            futures = [pool.submit(run, *job) for job in jobs]
-            for fut in futures:
+            futures = [(job[0], pool.submit(run, *job)) for job in jobs]
+            for action, fut in futures:
                 try:
                     rows = fut.result()
                 except Exception as exc:
                     errors.append(exc)
                     continue
+                bucket = by_action.setdefault(action, [])
+                seen = {(str(r.get("country")), str(r.get("service") or "").lower(),
+                         str(r.get("provider_id") or ""), round(float(r.get("cost_usd") or 0), 8),
+                         int(r.get("stock") or 0)) for r in bucket}
                 for row in rows:
                     key = (str(row.get("country")), str(row.get("service") or "").lower(),
                            str(row.get("provider_id") or ""), round(float(row.get("cost_usd") or 0), 8),
                            int(row.get("stock") or 0))
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    merged.append(row)
-        return merged, errors
+                    if key not in seen:
+                        seen.add(key)
+                        bucket.append(row)
+        return by_action, errors
+
+    def pick(by_action):
+        best, best_key = [], (-1, 0)
+        for rank, action in enumerate(actions):
+            rows = by_action.get(action) or []
+            if rows and (len(rows), -rank) > best_key:
+                best, best_key = rows, (len(rows), -rank)
+        return best
 
     # Tahap 1: panggilan berfilter (cepat, kecil).
-    merged, errors = collect([(a, svc, True) for a in actions for svc in service_candidates])
+    by_action, errors = collect([(a, svc, True) for a in actions for svc in service_candidates])
+    merged = pick(by_action)
     if not merged:
         # Tahap 2: matriks penuh untuk endpoint yang mengabaikan filter.
         more, more_errors = collect([(a, svc, False) for a in actions for svc in service_candidates[:1]])
-        merged, errors = more, errors + more_errors
+        merged, errors = pick(more), errors + more_errors
 
     if merged:
+        merged.sort(key=lambda r: float(r.get("cost_usd") or 0))
         return merged
     if errors:
         raise errors[-1]
@@ -673,22 +844,35 @@ def get_service_countries(service):
     return out
 
 def get_quotes(service, country):
+    """Semua tier harga + stok untuk satu layanan & negara (sama seperti di web Grizzly)."""
     rows = get_prices(country=country, service=service)
-    # Grizzly does not expose an end-user operator field in the standard price
-    # matrix, so each returned price tier is presented as "Semua Operator".
-    out = []
+    rate = _usd_idr()
+    # Gabungkan baris dengan harga identik (stok dijumlahkan); tier harga berbeda tetap terpisah.
+    merged = {}
     for row in rows:
-        if row["stock"] <= 0:
+        try:
+            stock = int(row.get("stock") or 0)
+            cost_usd = float(row.get("cost_usd") or 0)
+        except (TypeError, ValueError):
             continue
-        cost_idr = int(math.ceil(row["cost_usd"] * _usd_idr()))
+        if stock <= 0 or cost_usd <= 0:
+            continue
+        key = round(cost_usd, 6)
+        if key in merged:
+            merged[key]["stock"] += stock
+        else:
+            merged[key] = {"stock": stock, "cost_usd": cost_usd}
+    out = []
+    for item in merged.values():
+        cost_idr = int(math.ceil(item["cost_usd"] * rate))
         out.append({
-            "stock": int(row["stock"]),
+            "stock": int(item["stock"]),
             "cost_idr": cost_idr,
             "label": "Semua Operator",
             "metadata": {
                 "country": str(country),
                 "service": str(service),
-                "cost_usd": float(row["cost_usd"]),
+                "cost_usd": float(item["cost_usd"]),
             },
         })
     out.sort(key=lambda x: x["cost_idr"])
