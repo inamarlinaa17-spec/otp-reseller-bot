@@ -135,6 +135,7 @@ from grizzlysms import (
     get_catalog as get_grizzly_catalog,
     get_service_countries as get_grizzly_service_countries,
     get_quotes as get_grizzly_quotes,
+    diagnose as diagnose_grizzly,
     get_number as get_grizzly_number,
     get_sms as get_grizzly_sms,
     cancel_number as cancel_grizzly_number,
@@ -1626,6 +1627,22 @@ async def admin_start(
 # =========================================================
 # START
 # =========================================================
+
+async def command_g4test(update, context):
+    """Admin saja: /g4test [kode_layanan] [id_negara] -> diagnosa harga Server 4."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+    args = context.args or []
+    service = args[0] if len(args) > 0 else "wa"
+    country = args[1] if len(args) > 1 else "6"
+    msg = await update.message.reply_text("Menjalankan diagnosa Server 4...")
+    try:
+        report = await asyncio.wait_for(asyncio.to_thread(diagnose_grizzly, service, country), timeout=90)
+    except Exception as exc:
+        report = f"Diagnosa gagal: {type(exc).__name__}: {exc}"
+    await msg.edit_text(report[:3900])
+
 
 async def command_iklan(update, context):
     web_url = os.getenv("AZHURA_WEB_URL", "").strip().rstrip("/")
@@ -10121,6 +10138,7 @@ def run():
     application.add_handler(CommandHandler("deposit", command_deposit))
     application.add_handler(CommandHandler("checkin", perform_checkin))
     application.add_handler(CommandHandler("iklan", command_iklan))
+    application.add_handler(CommandHandler("g4test", command_g4test))
 
     # -----------------------------------------------------
     # CALLBACK

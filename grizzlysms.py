@@ -18,6 +18,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+CODE_VERSION = "g4-tier-v4"
+
 BASE_URL = "https://api.grizzlysms.com"
 HANDLER_URL = f"{BASE_URL}/stubs/handler_api.php"
 TIMEOUT = 25
@@ -1047,3 +1049,32 @@ def verify_cancel(activation_id):
         return status_is_cancelled(get_sms(activation_id))
     except Exception:
         return False
+
+
+def diagnose(service="wa", country="6"):
+    """Laporan teks untuk admin: versi kode + respons mentah V3 + hasil parsing."""
+    lines = [f"Versi kode Server 4: {CODE_VERSION}", f"service={service} country={country}"]
+    try:
+        payload = {"api_key": _api_key(), "action": "getPricesV3", "service": service, "country": country}
+        t0 = time.monotonic()
+        r = SESSION.get(HANDLER_URL, params=payload, headers={"User-Agent": "AZHURA-Server4/1.0"}, timeout=FAST_TIMEOUT)
+        lines.append(f"V3 HTTP {r.status_code} | {round(time.monotonic() - t0, 1)} dtk | content-type={r.headers.get('content-type')} | {len(r.text)} karakter")
+        lines.append("V3 awal respons: " + r.text[:500].replace(chr(10), " "))
+    except Exception as exc:
+        lines.append(f"V3 GAGAL: {type(exc).__name__}: {exc}")
+    for action in ("getPricesV3", "getPricesV2", "getPrices"):
+        try:
+            data = _request(action, _timeout=FAST_TIMEOUT, service=service, country=country)
+            tiers = extract_price_tiers(data, service, country)
+            lines.append(f"{action}: tipe={type(data).__name__} tier_terbaca={len(tiers)}")
+        except Exception as exc:
+            lines.append(f"{action}: GAGAL {type(exc).__name__}: {exc}")
+    try:
+        _CACHE.pop(("prices", str(country), str(service).lower()), None)
+        quotes = get_quotes(service, country)
+        lines.append(f"HASIL AKHIR di bot: {len(quotes)} pilihan harga")
+        for q in quotes[:15]:
+            lines.append(f"  Rp{q['cost_idr']} | stok {q['stock']} | usd {q['metadata']['cost_usd']}")
+    except Exception as exc:
+        lines.append(f"get_quotes GAGAL: {type(exc).__name__}: {exc}")
+    return "\n".join(lines)
