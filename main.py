@@ -1871,18 +1871,22 @@ def get_service_catalog(server, premotp_type="regular"):
         # renaming any live Grizzly service. Search still returns every match.
         priority_terms = [
             ("whatsapp", "whatsapp business", "whatsapp messenger"),
+            ("whatsapp business",),
             ("shopee",),
             ("tiktok", "douyin"),
             ("telegram",),
-            ("google", "gmail", "youtube", "google / gmail / youtube", "google / youtube / gmail"),
-            ("dana",),
-            ("gopay", "go pay"),
+            ("dana", "dana indonesia"),
+            ("gopay", "go pay", "go-pay"),
+            ("google", "gmail", "youtube", "google gmail youtube", "google youtube gmail", "google gmail", "gmail youtube"),
             ("gojek",),
             ("grab",),
+            ("facebook",),
+            ("instagram", "instagram / threads"),
+            ("tokopedia",),
         ]
         def _rank(item):
             code, label = item
-            name = str(label).lower().replace("_", " ").strip()
+            name = " ".join(str(label).lower().replace("_", " ").replace("/", " ").replace("-", " ").split())
             for rank, aliases in enumerate(priority_terms):
                 if any(name == a or name.startswith(a + " ") for a in aliases):
                     return (rank, name)
@@ -2283,7 +2287,7 @@ async def show_service_country_page(
             row.append(InlineKeyboardButton(
                 f"{country_flag(item.get('iso_code') or item.get('name'))} {item['name']}",
                 callback_data=(
-                    f"otp_choose_server:{server}:{service}:{item['country']}"
+                    f"otp_choose_server:{server}:{service}:{item.get('id') or item.get('country')}"
                 )
             ))
         keyboard.append(row)

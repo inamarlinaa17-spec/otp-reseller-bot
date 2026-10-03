@@ -40,7 +40,7 @@ def _api_key():
 def _request(action, **params):
     payload = {"api_key": _api_key(), "action": action}
     payload.update({k: v for k, v in params.items() if v is not None and v != ""})
-    response = SESSION.get(HANDLER_URL, params=payload, timeout=TIMEOUT)
+    response = SESSION.get(HANDLER_URL, params=payload, headers={"User-Agent": "AZHURA-Server4/1.0"}, timeout=TIMEOUT)
     response.raise_for_status()
     data = response.json() if "application/json" in response.headers.get("content-type", "").lower() else response.text
     if isinstance(data, str):
@@ -391,36 +391,66 @@ def _price_records(data, wanted_service=None, wanted_country=None):
 
     return records
 
-def get_prices(country=None, service=None):
-    last_error = None
-    # Grizzly documents three compatible price methods. V3 is the most
-    # current variant, so try it first; older accounts may still expose V2 or
-    # the original getPrices method. The parser accepts all response shapes.
-    for action in ("getPricesV3", "getPricesV2", "getPrices"):
-        try:
-            data = _request(action, country=country, service=service)
-            rows = _price_records(data, wanted_service=service, wanted_country=country)
-            if rows:
-                return rows
-        except Exception as exc:
-            last_error = exc
+def _service_candidates(service):
+    """Return likely Grizzly service codes for a user-facing service value."""
+    raw = str(service or "").strip()
+    if not raw:
+        return []
+    candidates = [raw]
+    try:
+        catalog = get_services() or []
+    except Exception:
+        catalog = []
+    target = " ".join(raw.lower().replace("_", " ").replace("-", " ").split())
+    for item in catalog:
+        code = str(item.get("id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        n = " ".join(name.lower().replace("_", " ").replace("-", " ").split())
+        if code and (code.lower() == raw.lower() or n == target or target in n or n in target):
+            if code not in candidates:
+                candidates.append(code)
+    return candidates
 
-        # Some legacy-compatible deployments reject one of the optional
-        # filters. If a service was requested and the filtered call produced
-        # no usable rows, retry once without filters and filter locally. This
-        # is especially important for the service -> country page.
-        if service or country:
-            try:
-                data = _request(action)
-                rows = _price_records(data, wanted_service=service, wanted_country=country)
-                if rows:
-                    return rows
-            except Exception as exc:
-                last_error = exc
+
+def get_prices(country=None, service=None):
+    """Fetch Grizzly price matrix using the documented SMS-Activate-compatible API.
+
+    Grizzly exposes the original ``getPrices`` plus V2/V3 variants. The original
+    endpoint is intentionally tried first because its country->service matrix is
+    the most broadly compatible response shape. We then try filtered and full
+    matrices and normalise all known shapes locally.
+    """
+    last_error = None
+    actions = ("getPrices", "getPricesV2", "getPricesV3")
+    service_candidates = _service_candidates(service) if service else [None]
+    seen_attempts = set()
+
+    for action in actions:
+        for svc in service_candidates:
+            for filtered in (True, False):
+                params = {}
+                if filtered:
+                    if country not in (None, ""):
+                        params["country"] = country
+                    if svc not in (None, ""):
+                        params["service"] = svc
+                attempt_key = (action, tuple(sorted(params.items())))
+                if attempt_key in seen_attempts:
+                    continue
+                seen_attempts.add(attempt_key)
+                try:
+                    data = _request(action, **params)
+                    rows = _price_records(data, wanted_service=svc or service, wanted_country=country)
+                    if rows:
+                        return rows
+                except Exception as exc:
+                    last_error = exc
+
     if last_error:
+        # Do not hide the real provider error from the caller; the Telegram/Web
+        # layer will turn it into its normal temporary-stock message.
         raise last_error
     return []
-
 
 def _country_lookup():
     try:
@@ -442,35 +472,43 @@ def get_catalog():
 
 
 def get_service_countries(service):
+    """Return live countries with stock for one Grizzly service.
+
+    The selected service page must never depend on the generic country endpoint
+    alone. Grizzly's documented price matrix already contains country + service
+    + count, so derive availability from that live matrix and use getCountries
+    only for names/ISO codes.
+    """
     rows = get_prices(service=service)
     names = _country_lookup()
     grouped = {}
     for row in rows:
-        cid = str(row["country"]).strip()
+        cid = str(row.get("country") or "").strip()
         if not cid:
             continue
-        c = grouped.setdefault(cid, {"id": cid, "name": cid, "iso_code": "", "stock": 0, "cost_usd": 0})
+        try:
+            stock = max(0, int(float(row.get("stock") or 0)))
+            cost = float(row.get("cost_usd") or 0)
+        except (TypeError, ValueError):
+            continue
+        if stock <= 0 or cost <= 0:
+            continue
+        c = grouped.setdefault(cid, {"id": cid, "name": cid, "iso_code": "", "stock": 0, "cost_usd": 0.0})
         if cid in names:
             c["name"] = names[cid].get("name") or c["name"]
             c["iso_code"] = names[cid].get("iso_code") or c["iso_code"]
-        # Some compatible responses use the country name as the key. In that
-        # case the key itself is already the best display name.
-        if c["name"] == cid and not cid.isdigit():
-            c["name"] = cid.replace("_", " ").title()
-        # Official Grizzly country table uses 6 for Indonesia. Keep this
-        # fallback so Indonesia remains correctly named even if the optional
-        # getCountries lookup is temporarily unavailable.
         if cid == "6":
-            c["name"] = "Indonesia"
-            c["iso_code"] = "ID"
-        c["stock"] += max(0, int(row["stock"]))
-        if row["stock"] > 0 and (not c["cost_usd"] or row["cost_usd"] < c["cost_usd"]):
-            c["cost_usd"] = row["cost_usd"]
-    # Only countries with a real stock entry are shown, matching the other servers.
-    out = [x for x in grouped.values() if x["stock"] > 0]
-    out.sort(key=lambda x: (0 if str(x.get("name","")).strip().lower() == "indonesia" else 1, str(x.get("name","")).lower()))
-    return out
+            c["name"], c["iso_code"] = "Indonesia", "ID"
+        elif c["name"] == cid and not cid.isdigit():
+            c["name"] = cid.replace("_", " ").title()
+        c["stock"] += stock
+        if not c["cost_usd"] or cost < c["cost_usd"]:
+            c["cost_usd"] = cost
 
+    out = list(grouped.values())
+    out.sort(key=lambda x: (0 if str(x.get("name", "")).strip().lower() == "indonesia" else 1,
+                            str(x.get("name", "")).lower()))
+    return out
 
 def get_quotes(service, country):
     rows = get_prices(country=country, service=service)
