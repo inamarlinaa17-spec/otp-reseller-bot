@@ -2,6 +2,7 @@
 import os, requests, math, time
 from urllib.parse import quote
 from decimal import Decimal, ROUND_CEILING
+from grizzlysms import get_catalog as g4_catalog, get_service_countries as g4_countries, get_quotes as g4_quotes, get_number as g4_purchase, get_sms as g4_sms, cancel_number as g4_cancel, resend_otp as g4_resend, finish_number as g4_finish
 S=requests.Session()
 class ProviderRejected(Exception):
     """Provider explicitly rejected creation; no provider order was created."""
@@ -55,6 +56,20 @@ def catalog(server,kind,service=None):
         if not countries and isinstance(d,dict):
             countries=d if service not in d else {}
         return [{'id':x,'name':x.replace('_',' ').title()} for x,v in countries.items() if isinstance(v,dict) and any(isinstance(z,dict) for z in v.values())]
+    if server==4:
+        if kind=='services':
+            items=[{'id':str(x.get('id')),'name':str(x.get('name') or x.get('id'))} for x in (g4_catalog() or []) if isinstance(x,dict) and x.get('id')]
+            priority=('whatsapp','whatsapp business','whatsapp messenger','shopee','tiktok','telegram','dana','gopay','go pay','google','gmail','youtube','gojek','grab','facebook','instagram','tokopedia')
+            def rank(x):
+                text=(x['name']+' '+x['id']).lower().replace('_',' ')
+                for i,k in enumerate(priority):
+                    if k in text: return (i,text)
+                return (999,text)
+            items.sort(key=rank)
+            return items
+        if kind=='countries':
+            return [{'id':str(x.get('id')),'name':str(x.get('name') or x.get('id')),'iso_code':str(x.get('iso_code') or ''),'iso':str(x.get('iso_code') or '')} for x in (g4_countries(service) or []) if isinstance(x,dict) and x.get('id')]
+        raise ValueError('Jenis katalog tidak valid')
     if server==2:
         if kind=='services':
             return [{'id':str(x.get('service_code') or x.get('id')),'name':str(x.get('service_name') or x.get('name') or x.get('service_code') or x.get('id'))} for x in (get2('v2/services') or []) if isinstance(x,dict) and (x.get('service_code') is not None or x.get('id') is not None)]
@@ -74,6 +89,8 @@ def quote_rows(server,service,country):
             if cost<=0 or stock<=0 or not math.isfinite(cost):continue
             rows.append({'stock':stock,'cost_idr':math.ceil(cost*usd_rate()),'label':str(op),'metadata':{'operator':op,'cost_usd':cost}})
         return rows
+    if server==4:
+        return g4_quotes(service, country)
     if server==2:
         items=get2('v2/countries',{'service_id':service}) or []
         item=next((x for x in items if str(x.get('number_id') or x.get('name'))==country),None)
@@ -96,6 +113,13 @@ def purchase(server,service,country,meta):
             # An ID means the provider may have accepted the order. Reconcile.
             raise RuntimeError('Provider menerima order tetapi nomor belum tersedia')
         return {'id':d['id'],'phone':d['phone'],'expired_at':d.get('expires')}
+    if server==4:
+        cost_usd=None
+        if isinstance(meta,dict):
+            try: cost_usd=float(meta.get('cost_usd') or 0) or None
+            except (TypeError,ValueError): cost_usd=None
+        d=g4_purchase(service, country, cost_usd)
+        return {'id':d['id'],'phone':d['phone'],'expired_at':d.get('expired_at')}
     if server==2:
         d=get2('v2/orders',{'number_id':meta['number_id'],'provider_id':meta['provider_id'],'operator_id':meta.get('operator_id',1)}) or {}
         if not d.get('order_id'):
@@ -106,6 +130,12 @@ def purchase(server,service,country,meta):
     raise ValueError('Server tidak valid')
 
 def check_sms(provider,provider_id):
+    if provider=='grizzly':
+        d=g4_sms(provider_id)
+        sms=d.get('sms') or [] if isinstance(d,dict) else []
+        first=sms[0] if sms and isinstance(sms[0],dict) else {}
+        return {'otp':str(d.get('otp') or first.get('code')) if isinstance(d,dict) and (d.get('otp') or first.get('code')) else None,
+                'text':(d.get('text') if isinstance(d,dict) else None) or first.get('text')}
     if provider=='5sim':
         d=get5('user/check/'+quote(str(provider_id),safe=''),auth=True)
         sms=d.get('sms') or []

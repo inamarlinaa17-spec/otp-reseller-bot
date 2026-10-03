@@ -376,7 +376,7 @@ def web_live_traffic():
             name=str(r['display_name'] or 'Pengguna').strip()
             masked=(name[:2]+'***') if len(name)>2 else 'Pengguna***'
             provider=str(r['provider'] or '').lower()
-            server='Server 1' if provider in ('5sim','fivesim') else 'Server 2' if 'rumah' in provider else 'Server 3' if 'prem' in provider else 'AZHURA'
+            server='Server 1' if provider in ('5sim','fivesim') else 'Server 2' if 'rumah' in provider else 'Server 3' if 'prem' in provider else 'Server 4' if 'grizzly' in provider else 'AZHURA'
             items.append({'id':r['id'],'at':str(r['created_at']),'user':masked,'service':str(r['service'])[:55],
                           'server':server,'price':int(r['sell_price'] or 0)})
         return jsonify(items=items)
@@ -387,21 +387,21 @@ def web_live_traffic():
 @app.get('/api/server/<int:server>/services')
 def server_services(server):
     if not uid():return err('Login diperlukan',401)
-    if server not in (1,2):return err('Server tidak valid')
+    if server not in (1,2,4):return err('Server tidak valid')
     try:return jsonify(items=web_catalog(server,'services'))
     except Exception:app.logger.exception('Service catalog failed');return err('Katalog sementara tidak tersedia',503)
 
 @app.get('/api/server/<int:server>/countries/<service>')
 def server_countries(server,service):
     if not uid():return err('Login diperlukan',401)
-    if server not in (1,2) or len(service)>100:return err('Pilihan tidak valid')
+    if server not in (1,2,4) or len(service)>100:return err('Pilihan tidak valid')
     try:return jsonify(items=web_catalog(server,'countries',service))
     except Exception:app.logger.exception('Country catalog failed');return err('Negara sementara tidak tersedia',503)
 
 @app.get('/api/server/<int:server>/quotes/<service>/<country>')
 def server_quotes(server,service,country):
     if not uid():return err('Login diperlukan',401)
-    if server not in (1,2) or max(len(service),len(country))>100:return err('Pilihan tidak valid')
+    if server not in (1,2,4) or max(len(service),len(country))>100:return err('Pilihan tidak valid')
     try:
         rows=web_quotes(server,service,country)
         # Never trust a price or provider metadata sent by the browser.
@@ -424,7 +424,7 @@ def server_quotes(server,service,country):
 @app.post('/api/server/<int:server>/buy')
 def server_buy(server):
     if not uid():return err('Login diperlukan',401)
-    if server not in (1,2):return err('Server tidak valid')
+    if server not in (1,2,4):return err('Server tidak valid')
     if not ENABLE_ORDER:return err('Order web belum diaktifkan',503)
     d=request.get_json(silent=True) or {};qid=str(d.get('quote_id',''));key=str(d.get('request_id',''))
     if not qid or not key or len(qid)>100 or len(key)>100:return err('Pilihan tidak valid')
@@ -444,7 +444,7 @@ def server_buy(server):
             db.execute('DELETE FROM azhura_web_quotes WHERE quote_id=%s',(qid,))
             order_id='OTP-'+uuid.uuid4().hex[:12].upper()
             db.execute('INSERT INTO azhura_web_requests VALUES(%s,%s,%s)',(uid(),key,order_id))
-        try:create_pending_order(uid(),order_id,q['country'],q['service'],q['price_idr'],'5sim' if server==1 else 'rumahotp')
+        try:create_pending_order(uid(),order_id,q['country'],q['service'],q['price_idr'],'5sim' if server==1 else 'rumahotp' if server==2 else 'grizzly')
         except ValueError as exc:
             with conn() as db:db.execute('DELETE FROM azhura_web_requests WHERE telegram_id=%s AND request_id=%s',(uid(),key))
             return err(str(exc),409)
@@ -479,7 +479,7 @@ def server_order_status(order_id):
     rows=query('SELECT order_id,provider,provider_order_id,status,otp_code,previous_otp_code,created_at,expired_at,refund_status FROM orders WHERE order_id=%s AND telegram_id=%s',(order_id,uid()))
     if not rows:return err('Order tidak ditemukan',404)
     o=rows[0]
-    if str(o['status']).upper() in ('COMPLETED','CANCELLED','CANCELED','REFUNDED','FAILED') or o['otp_code'] or not o['provider_order_id'] or o['provider'] not in ('5sim','rumahotp','premotp'):return jsonify(order=o)
+    if str(o['status']).upper() in ('COMPLETED','CANCELLED','CANCELED','REFUNDED','FAILED') or o['otp_code'] or not o['provider_order_id'] or o['provider'] not in ('5sim','rumahotp','premotp','grizzly'):return jsonify(order=o)
     try:
         if o['provider']=='premotp':
             raw=prem_status(o['provider_order_id'])
@@ -549,6 +549,13 @@ def web_cancel_order():
                     except (requests.RequestException,RuntimeError):pass
                     state=prem_status(pid)
                     verified=str(state.get('status','')).lower() in ('cancel','canceled','cancelled','expired','timeout')
+                elif provider=='grizzly':
+                    from grizzlysms import cancel_number as g4_cancel, get_sms as g4_status
+                    try:g4_cancel(pid)
+                    except Exception:pass
+                    state=g4_status(pid)
+                    status_values=[str(state.get('status','')).lower()] if isinstance(state,dict) else []
+                    verified=any(x in ('cancel','canceled','cancelled','access_cancel','status_cancel') for x in status_values)
                 else:return err('Provider order tidak dikenal. Hubungi admin.',409)
                 if not verified:return err('Provider belum mengonfirmasi pembatalan. Saldo belum dikembalikan; coba lagi atau hubungi admin.',409)
                 # Recheck OTP after network call; if another worker recorded an OTP,
@@ -602,6 +609,9 @@ def web_resend_order():
                 elif provider=='premotp':
                     from premotp import resend_order
                     result=resend_order(pid)
+                elif provider=='grizzly':
+                    from grizzlysms import resend_otp as g4_resend
+                    result=g4_resend(pid)
                 else:return err('Provider ini tidak dapat melakukan Kirim Ulang OTP.',409)
             except Exception:
                 app.logger.exception('Resend failed for %s',oid)
@@ -639,6 +649,9 @@ def web_finish_order():
                     result=get2('v1/orders/set_status',{'order_id':pid,'status':'done'})
                     result={'response':'OK'} if result is not None else {'response':'ERROR'}
                 elif provider=='premotp':result={'response':'OK'}
+                elif provider=='grizzly':
+                    from grizzlysms import finish_number as g4_finish
+                    result=g4_finish(pid)
                 else:return err('Provider tidak dikenal.',409)
             except Exception:
                 app.logger.exception('Finish failed for %s',oid)
@@ -653,7 +666,7 @@ def web_finish_order():
 # --- AZHURA WEB ADMIN: isolated admin endpoints; bot handlers are untouched. ---
 ADMIN_WEB_ID = int(os.getenv('ADMIN_ID', '0') or '0')
 WEB_MAINT_KEYS = {'web': 'azhura_web_maintenance', '1': 'azhura_web_server_1_maintenance',
-                  '2': 'azhura_web_server_2_maintenance', '3': 'azhura_web_server_3_maintenance',
+                  '2': 'azhura_web_server_2_maintenance', '3': 'azhura_web_server_3_maintenance', '4': 'azhura_web_server_4_maintenance',
                   'manual': 'azhura_web_payment_manual_maintenance', 'auto': 'azhura_web_payment_auto_maintenance'}
 
 def web_is_admin():
@@ -678,7 +691,7 @@ def web_maintenance_guard():
     path=request.path
     if request.method!='POST' or path not in ('/api/prem/buy','/api/deposit/manual/create',
         '/api/deposit/auto/create','/api/deposit/qris/create','/api/server/1/buy',
-        '/api/server/2/buy','/api/server/3/buy'): return None
+        '/api/server/2/buy','/api/server/3/buy','/api/server/4/buy'): return None
     if web_is_admin(): return None
     try: flags=web_maintenance_flags()
     except psycopg.Error:
