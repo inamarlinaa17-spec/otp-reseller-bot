@@ -129,6 +129,20 @@ from rumahotp import (
 )
 
 
+from grizzlysms import (
+    check_api as check_grizzly_api,
+    get_balance as get_grizzly_balance,
+    get_catalog as get_grizzly_catalog,
+    get_service_countries as get_grizzly_service_countries,
+    get_quotes as get_grizzly_quotes,
+    get_number as get_grizzly_number,
+    get_sms as get_grizzly_sms,
+    cancel_number as cancel_grizzly_number,
+    finish_number as finish_grizzly_number,
+    resend_otp as resend_grizzly_otp,
+)
+
+
 from premotp import (
     get_services as get_premotp_services,
     get_countries as get_premotp_countries,
@@ -178,7 +192,7 @@ logger = logging.getLogger(__name__)
 # This does not change order logic; it only prevents the Telegram callback from
 # remaining stuck when the provider has already issued the number.
 _RUNTIME_PROVIDER_CACHE = {}
-_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0}
+_AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0, "grizzly": 0.0}
 
 # User cancellation starts a 120-second processing countdown immediately after
 # the button is pressed. Duplicate cancellation requests for the same order
@@ -231,6 +245,7 @@ OTP_SERVERS = {
     "5sim": "⚡ SERVER 1 — HIGH STOCK",
     "rumahotp": "⚡ SERVER 2 — FULL TEXT",
     "premotp": "⚡ SERVER 3 — SERVER ALTERNATIF",
+    "grizzly": "⚡ SERVER 4 — ALTERNATIF 2",
 }
 
 
@@ -1704,6 +1719,13 @@ async def show_server_page(
 
         [
             InlineKeyboardButton(
+                "Server 4",
+                callback_data="otp_server:grizzly"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
                 "🏠 Menu Utama",
                 callback_data="user_home"
             )
@@ -1720,6 +1742,8 @@ async def show_server_page(
         "Server khusus yang menampilkan isi pesan SMS secara utuh tanpa filter kode.\n\n"
         "⚡ <b>SERVER 3 — SERVER ALTERNATIF</b>\n"
         "Pilihan alternatif dengan katalog layanan dan stok yang diperbarui langsung dari sistem untuk menambah opsi nomor OTP.\n\n"
+        "⚡ <b>SERVER 4 — ALTERNATIF 2</b>\n"
+        "Server global dengan pilihan negara lengkap dan stok alternatif.\n\n"
         "Silakan pilih server melalui tombol di bawah ini :",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1847,6 +1871,24 @@ def get_service_catalog(server, premotp_type="regular"):
         if not catalog:
             return list(OTP_SERVICES)
 
+        return catalog
+
+    if server == "grizzly":
+        catalog = []
+        seen = set()
+        try:
+            data = get_grizzly_catalog() or []
+        except Exception:
+            logger.exception("Grizzly service catalog failed")
+            data = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("id") or item.get("service_code") or "").strip()
+            label = str(item.get("name") or item.get("service_name") or code).strip()
+            if code and code.lower() not in seen:
+                catalog.append((code, label))
+                seen.add(code.lower())
         return catalog
 
     if server == "premotp":
@@ -2152,6 +2194,8 @@ def get_service_countries(server, service, premotp_type="regular"):
         return _country_items_rumahotp(service)
     if server == "premotp":
         return _country_items_premotp(service, premotp_type)
+    if server == "grizzly":
+        return get_grizzly_service_countries(service)
     return []
 
 
@@ -2166,6 +2210,8 @@ async def show_service_country_page(
         service_label = rumah_service_label(service)
     elif server == "premotp":
         service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
+    elif server == "grizzly":
+        service_label = next((label for code, label in get_service_catalog("grizzly") if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, service.title())
 
@@ -2376,10 +2422,12 @@ async def show_otp_operator_page(query, server, service, country, page=0):
         service_label = rumah_service_label(service)
     elif server == "premotp":
         service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
+    elif server == "grizzly":
+        service_label = next((label for code, label in get_service_catalog("grizzly") if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
-    if server == "premotp":
+    if server in {"premotp", "grizzly"}:
         await show_otp_price_page(query, query.from_user.id, server, service, country, "any", 0)
         return
     names = await _get_otp_operator_names(server, country, service)
@@ -2437,6 +2485,8 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
         service_label = rumah_service_label(service)
     elif server == "premotp":
         service_label = next((label for code, label in get_service_catalog("premotp", _premotp_type_for(query)) if str(code) == str(service)), str(service).title())
+    elif server == "grizzly":
+        service_label = next((label for code, label in get_service_catalog("grizzly") if str(code) == str(service)), str(service).title())
     else:
         service_label = dict(OTP_SERVICES).get(service, str(service).title())
     display_country = str(country)
@@ -2545,6 +2595,40 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
                 )
                 rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
 
+    elif server == "grizzly":
+        try:
+            live = await asyncio.wait_for(
+                asyncio.to_thread(get_grizzly_quotes, service, country),
+                timeout=25,
+            )
+        except Exception:
+            logger.exception("Grizzly price lookup failed")
+            live = []
+        rows = []
+        for q in live or []:
+            try:
+                stock = int(q.get("stock") or 0)
+                cost_idr = float(q.get("cost_idr") or 0)
+            except Exception:
+                continue
+            if stock <= 0 or cost_idr <= 0:
+                continue
+            sell = hitung_harga_jual_idr(cost_idr)
+            quote_id = "4Q-" + uuid.uuid4().hex[:12].upper()
+            save_otp_quote(
+                quote_id=quote_id,
+                telegram_id=user_id,
+                provider="grizzly",
+                country=country,
+                country_name=display_country,
+                service=service,
+                operator="any",
+                pool=json.dumps(q.get("metadata") or {}, separators=(",", ":")),
+                cost_usd=cost_idr / float(KURS_DOLAR),
+                stock=stock,
+            )
+            rows.append({"_display": (format_rupiah(sell), stock, quote_id)})
+
     elif server == "premotp":
         try:
             offers_data = await asyncio.wait_for(
@@ -2618,7 +2702,7 @@ async def show_otp_price_page(query, user_id, server, service, country, operator
     # Server 3 tidak memiliki tahap operator. Tombol Kembali dari
     # harga/stok harus kembali ke daftar negara, bukan memanggil halaman
     # harga lagi (yang sebelumnya membuat navigasi Server 3 berputar/stuck).
-    if server == "premotp":
+    if server in {"premotp", "grizzly"}:
         back_callback = f"otp_service_countries:{server}:{service}:0"
     else:
         back_callback = f"otp_choose_server:{server}:{service}:{country}"
@@ -3873,6 +3957,10 @@ def _is_server_enabled(server):
         key = "server1_enabled"
     elif server == "rumahotp":
         key = "server2_enabled"
+    elif server == "premotp":
+        key = "server3_enabled"
+    elif server == "grizzly":
+        key = "server4_enabled"
     else:
         key = "server3_enabled"
     return str(get_bot_setting(key, "1")).strip().lower() in {"1", "true", "on", "yes"}
@@ -3889,12 +3977,18 @@ def _server_maintenance_text(server):
         return (
             "⚠️ Server 2 Sedang Dalam Maintenance\n\n"
             "Mohon maaf, Server 2 sedang dalam perbaikan sementara.\n"
-            "Silakan gunakan Server 1 atau Server 3, atau coba kembali beberapa saat lagi. 🙏"
+            "Silakan gunakan Server 1, Server 3, atau Server 4, atau coba kembali beberapa saat lagi. 🙏"
+        )
+    if server == "premotp":
+        return (
+            "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
+            "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
+            "Silakan gunakan Server 1, Server 2, atau Server 4, atau coba kembali beberapa saat lagi. 🙏"
         )
     return (
-        "⚠️ Server 3 Sedang Dalam Maintenance\n\n"
-        "Mohon maaf, Server 3 sedang dalam perbaikan sementara.\n"
-        "Silakan gunakan Server 1 atau Server 2, atau coba kembali beberapa saat lagi. 🙏"
+        "⚠️ Server 4 Sedang Dalam Maintenance\n\n"
+        "Mohon maaf, Server 4 sedang dalam perbaikan sementara.\n"
+        "Silakan gunakan Server 1, Server 2, atau Server 3, atau coba kembali beberapa saat lagi. 🙏"
     )
 
 
@@ -4435,6 +4529,12 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
                 "raw": result,
             }
 
+        if provider == "grizzly":
+            result = await asyncio.to_thread(cancel_grizzly_number, provider_order_id)
+            if result and result.get("response") == "OK":
+                return result
+            return result or {"response": "ERROR", "error": "Pembatalan Server 4 belum dikonfirmasi provider."}
+
         result = await asyncio.to_thread(cancel_number, provider_order_id)
         statuses = _provider_status_values(result)
         if any(status in CANCELLED_PROVIDER_STATES for status in statuses):
@@ -4591,6 +4691,8 @@ async def auto_process_pending_orders(application):
                             checker = get_rumahotp_sms
                         elif provider == "premotp":
                             checker = get_premotp_order
+                        elif provider == "grizzly":
+                            checker = get_grizzly_sms
                         else:
                             checker = get_sms
                         try:
@@ -4636,6 +4738,17 @@ async def auto_process_pending_orders(application):
                                         or premotp_data.get("text")
                                         or ""
                                     ) if isinstance(premotp_data, dict) else "",
+                                }
+                            if provider == "grizzly":
+                                gd = data_sms or {}
+                                data_sms = {
+                                    "response": "OK",
+                                    "status": gd.get("status") if isinstance(gd, dict) else None,
+                                    "phone": gd.get("phone") if isinstance(gd, dict) else None,
+                                    "otp": gd.get("otp") if isinstance(gd, dict) else None,
+                                    "expired_at": gd.get("expired_at") if isinstance(gd, dict) else None,
+                                    "sms": gd.get("sms") if isinstance(gd, dict) and isinstance(gd.get("sms"), list) else [],
+                                    "sms_text": gd.get("text") if isinstance(gd, dict) else "",
                                 }
                             data_sms = _normalize_otp_response(data_sms)
 
@@ -4885,6 +4998,8 @@ async def process_otp_order(
     """Order OTP dari provider terpilih dengan margin sesuai PROFIT_PERCENT (default 7%)."""
 
     service_label = (rumah_service_label(service) if server == "rumahotp" else dict(OTP_SERVICES).get(service, service))
+    if server == "grizzly":
+        service_label = next((label for code, label in get_service_catalog("grizzly") if str(code) == str(service)), str(service).title())
     display_country = country
 
     # -----------------------------------------------------
@@ -5081,6 +5196,22 @@ async def process_otp_order(
             not result or result.get("response") == "ERROR"
         )
         error_reason = "Pembelian nomor Server 2 gagal."
+    elif server == "grizzly":
+        try:
+            meta = json.loads(quote.get("pool") or "{}") if quote else {}
+        except Exception:
+            meta = {}
+        try:
+            max_price = float(meta.get("cost_usd") or provider_cost_usd or 0) or None
+            candidate = await asyncio.to_thread(get_grizzly_number, service, country, max_price)
+        except Exception as exc:
+            logger.exception("Grizzly order failed")
+            candidate = {"error": str(exc)}
+        provider_order_id = str((candidate or {}).get("id") or "").strip() or None
+        phone = (candidate or {}).get("phone") or (candidate or {}).get("number")
+        provider_expired_at = (candidate or {}).get("expired_at")
+        provider_error = not candidate or not provider_order_id or not phone
+        error_reason = "Pembelian nomor Server 4 gagal."
     elif server == "premotp":
         try:
             meta = json.loads(quote.get("pool") or "{}") if quote else {}
@@ -5164,9 +5295,10 @@ async def process_otp_order(
         )
         return
 
-    if server == "premotp":
+    if server in {"premotp", "grizzly"}:
         try:
-            provider_cost_rp = int(round(float(json.loads(quote.get("pool") or "{}").get("cost_idr") or provider_cost_usd * KURS_DOLAR)))
+            pool_data = json.loads(quote.get("pool") or "{}") if quote else {}
+            provider_cost_rp = int(round(float(pool_data.get("cost_idr") or provider_cost_usd * KURS_DOLAR)))
         except Exception:
             provider_cost_rp = int(round(provider_cost_usd * KURS_DOLAR))
     else:
@@ -6476,6 +6608,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         if provider == "rumahotp":
             sms_checker = get_rumahotp_sms
+        elif provider == "premotp":
+            sms_checker = get_premotp_order
+        elif provider == "grizzly":
+            sms_checker = get_grizzly_sms
         else:
             sms_checker = get_sms
 
@@ -6501,10 +6637,19 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             return
 
-        sms_list = data_sms.get(
-            "sms",
-            []
-        )
+        if provider == "premotp":
+            raw = data_sms or {}
+            if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
+                raw = raw.get("data") or raw
+            sms_list = raw.get("sms") if isinstance(raw, dict) and isinstance(raw.get("sms"), list) else []
+            if not sms_list and isinstance(raw, dict) and (raw.get("otp_code") or raw.get("otp") or raw.get("code")):
+                sms_list = [{"code": raw.get("otp_code") or raw.get("otp") or raw.get("code"), "text": raw.get("sms_text") or raw.get("message") or raw.get("text") or ""}]
+        elif provider == "grizzly":
+            sms_list = (data_sms or {}).get("sms") or []
+            if not sms_list and isinstance(data_sms, dict) and data_sms.get("otp"):
+                sms_list = [{"code": data_sms.get("otp"), "text": data_sms.get("text") or ""}]
+        else:
+            sms_list = data_sms.get("sms", [])
 
         if sms_list:
 
@@ -6579,7 +6724,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         # expiry time, Resend OTP must no longer contact the provider. History
         # may contain an older inline button, so enforce the same rule at the
         # callback level too.
-        if provider in {"5sim", "rumahotp", "premotp"} and _order_expired(order):
+        if provider in {"5sim", "rumahotp", "premotp", "grizzly"} and _order_expired(order):
             await query.answer("⏰ Masa aktif order sudah berakhir. Resend OTP tidak tersedia.", show_alert=True)
             return
 
@@ -6718,6 +6863,36 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             )
             return
 
+        if provider == "grizzly":
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(resend_grizzly_otp, provider_order_id),
+                    timeout=12.0,
+                )
+            except Exception:
+                await query.answer("Server 4 belum mengonfirmasi resend OTP. Coba lagi nanti.", show_alert=True)
+                return
+            if not result or result.get("response") != "OK":
+                await query.answer(str((result or {}).get("error") or "Resend OTP tidak tersedia."), show_alert=True)
+                return
+            changed = await asyncio.to_thread(mark_order_waiting_for_otp, order_id)
+            if not changed:
+                await query.answer("Status order berubah. Muat ulang riwayat.", show_alert=True)
+                return
+            current = get_order(order_id) or order
+            await query.edit_message_text(
+                "⏳ <b>MENUNGGU SMS OTP...</b>\n\n"
+                f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                f"📞 Nomor: <code>{escape(str(current.get('phone') or '-'))}</code>\n\n"
+                "Kode OTP baru akan ditampilkan otomatis saat diterima.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                    [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                ]),
+            )
+            return
+
         # Server 1 (5SIM): there is no official resend operation for an
         # existing activation. Do NOT call /reuse here: /reuse creates a
         # new activation and may charge the provider again; it is not a
@@ -6797,7 +6972,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         # and 3. Once an order has received at least one real OTP and the
         # original activation has expired, present it as completed and hide
         # Resend OTP. The stored database status is not changed here.
-        history_expired = provider in {"5sim", "rumahotp", "premotp"} and _order_expired(order)
+        history_expired = provider in {"5sim", "rumahotp", "premotp", "grizzly"} and _order_expired(order)
         history_completed = (
             status_upper == "COMPLETED"
             or (history_expired and has_otp)
@@ -6920,7 +7095,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 # unbound `result` bug that left the callback stuck.
                 result = {"response": "OK", "provider_status": "completed_local"}
             else:
-                finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
+                if provider == "grizzly":
+                    finisher = finish_grizzly_number
+                else:
+                    finisher = complete_rumahotp_number if provider == "rumahotp" else finish_number
                 result = await asyncio.wait_for(
                     asyncio.to_thread(finisher, provider_order_id),
                     timeout=12.0,
@@ -8092,6 +8270,7 @@ ADMIN_PAGE_SIZE = 8
 ADMIN_PROVIDER_NAMES = {
     "5sim": "5SIM",
     "rumahotp": "RUMAHOTP",
+    "grizzly": "SERVER 4",
 }
 ADMIN_SEARCH_USERS = set()
 ADMIN_SEARCH_DEPOSITS = set()
@@ -8283,6 +8462,8 @@ async def _admin_cancel_order(query, context, order_id):
             cancel_result = await asyncio.to_thread(cancel_rumahotp_number, provider_order_id)
         elif provider == "5sim":
             cancel_result = await asyncio.to_thread(cancel_number, provider_order_id)
+        elif provider == "grizzly":
+            cancel_result = await asyncio.to_thread(cancel_grizzly_number, provider_order_id)
         else:
             cancel_result = {"response": "ERROR", "error": f"Provider {provider} belum didukung."}
 
@@ -8688,31 +8869,35 @@ async def admin_callback(
         server1_enabled = _is_server_enabled("5sim")
         server2_enabled = _is_server_enabled("rumahotp")
         server3_enabled = _is_server_enabled("premotp")
+        server4_enabled = _is_server_enabled("grizzly")
         server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
         server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
         server3_label = "🟢 ON" if server3_enabled else "🔴 OFF"
+        server4_label = "🟢 ON" if server4_enabled else "🔴 OFF"
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
+            "Atur maintenance Server 1, Server 2, Server 3, dan Server 4 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
             f"⚡ Server 1: <b>{server1_label}</b>\n"
             f"⚡ Server 2: <b>{server2_label}</b>\n"
-            f"⚡ Server 3: <b>{server3_label}</b>",
+            f"⚡ Server 3: <b>{server3_label}</b>\n"
+            f"⚡ Server 4: <b>{server4_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
                 [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
                 [InlineKeyboardButton(f"⚡ Server 3 — {server3_label}", callback_data="admin_server_toggle:premotp")],
+                [InlineKeyboardButton(f"⚡ Server 4 — {server4_label}", callback_data="admin_server_toggle:grizzly")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
 
     elif query.data.startswith("admin_server_toggle:"):
         server = query.data.split(":", 1)[1].strip().lower()
-        if server not in {"5sim", "rumahotp", "premotp"}:
+        if server not in {"5sim", "rumahotp", "premotp", "grizzly"}:
             await query.answer("Server tidak valid.", show_alert=True)
             return
-        key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "premotp": "server3_enabled"}[server]
+        key = {"5sim": "server1_enabled", "rumahotp": "server2_enabled", "premotp": "server3_enabled", "grizzly": "server4_enabled"}[server]
         current = _is_server_enabled(server)
         set_bot_setting(key, "0" if current else "1")
         await query.answer(
@@ -8722,21 +8907,25 @@ async def admin_callback(
         server1_enabled = _is_server_enabled("5sim")
         server2_enabled = _is_server_enabled("rumahotp")
         server3_enabled = _is_server_enabled("premotp")
+        server4_enabled = _is_server_enabled("grizzly")
         server1_label = "🟢 ON" if server1_enabled else "🔴 OFF"
         server2_label = "🟢 ON" if server2_enabled else "🔴 OFF"
         server3_label = "🟢 ON" if server3_enabled else "🔴 OFF"
+        server4_label = "🟢 ON" if server4_enabled else "🔴 OFF"
         await query.edit_message_text(
             "🖥 <b>SERVER OTP MAINTENANCE</b>\n\n"
-            "Atur maintenance Server 1, Server 2, dan Server 3 secara terpisah.\n"
+            "Atur maintenance Server 1, Server 2, Server 3, dan Server 4 secara terpisah.\n"
             "Jika suatu server dimatikan, user tetap dapat melihat server tersebut tetapi saat diklik akan mendapat pemberitahuan bahwa server sedang maintenance.\n\n"
             f"⚡ Server 1: <b>{server1_label}</b>\n"
             f"⚡ Server 2: <b>{server2_label}</b>\n"
-            f"⚡ Server 3: <b>{server3_label}</b>",
+            f"⚡ Server 3: <b>{server3_label}</b>\n"
+            f"⚡ Server 4: <b>{server4_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
                 [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
                 [InlineKeyboardButton(f"⚡ Server 3 — {server3_label}", callback_data="admin_server_toggle:premotp")],
+                [InlineKeyboardButton(f"⚡ Server 4 — {server4_label}", callback_data="admin_server_toggle:grizzly")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
@@ -8980,11 +9169,13 @@ async def admin_callback(
         checks = await asyncio.gather(
             asyncio.to_thread(check_5sim_api),
             asyncio.to_thread(check_rumahotp_api),
+            asyncio.to_thread(check_grizzly_api),
             return_exceptions=True,
         )
         balances = await asyncio.gather(
             asyncio.to_thread(get_5sim_balance),
             asyncio.to_thread(get_rumahotp_balance),
+            asyncio.to_thread(get_grizzly_balance),
             return_exceptions=True,
         )
 
@@ -8997,14 +9188,16 @@ async def admin_callback(
             except Exception:
                 return 0.0
 
-        b1, b2 = [money(x) for x in balances]
+        b1, b2, b4 = [money(x) for x in balances]
         s1 = "🟢 CONNECTED" if ok(checks[0]) else "🔴 OFFLINE"
         s2 = "🟢 CONNECTED" if ok(checks[1]) else "🔴 OFFLINE"
+        s4 = "🟢 CONNECTED" if ok(checks[2]) else "🔴 OFFLINE"
 
         await query.edit_message_text(
             "💰 <b>PROVIDER STATUS</b>\n\n"
             f"⚡ <b>Server 1 — {ADMIN_PROVIDER_NAMES['5sim']}</b>\n{s1}\n💵 Saldo: <b>${b1:.2f}</b>\n\n"
             f"⚡ <b>Server 2 — {ADMIN_PROVIDER_NAMES['rumahotp']}</b>\n{s2}\n💵 Saldo: <b>${b2:.2f}</b>\n\n"
+            f"⚡ <b>Server 4 — {ADMIN_PROVIDER_NAMES['grizzly']}</b>\n{s4}\n💵 Saldo: <b>${b4:.2f}</b>\n\n"
             f"💱 Kurs otomatis: <b>Rp{KURS_DOLAR:,.2f} / USD</b>\n"
             f"💵 Kurs jual + margin: <b>Rp{KURS_DOLAR * (1 + PROFIT_PERCENT / 100):,.2f} / USD</b>\n"
             f"📈 Margin: <b>{PROFIT_PERCENT:g}%</b>",
