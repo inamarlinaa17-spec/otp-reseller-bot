@@ -73,7 +73,22 @@ def _request(action, _timeout=None, **params):
     payload.update({k: v for k, v in params.items() if v is not None and v != ""})
     response = SESSION.get(HANDLER_URL, params=payload, headers={"User-Agent": "AZHURA-Server4/1.0"}, timeout=_timeout or TIMEOUT)
     response.raise_for_status()
-    data = response.json() if "application/json" in response.headers.get("content-type", "").lower() else response.text
+    if "application/json" in response.headers.get("content-type", "").lower():
+        try:
+            data = response.json()
+        except ValueError:
+            data = response.text
+    else:
+        data = response.text
+    # Grizzly kadang mengirim JSON dengan content-type text/html. Jangan biarkan
+    # respons seperti itu terbaca sebagai teks biasa (itu membuat semua tier harga hilang).
+    if isinstance(data, str):
+        stripped = data.strip().lstrip("\ufeff")
+        if stripped[:1] in ("{", "["):
+            try:
+                data = json.loads(stripped)
+            except ValueError:
+                pass
     if isinstance(data, str):
         marker = data.strip()
         if marker.startswith(("BAD_", "NO_", "ERROR_", "WRONG_", "SERVICE_UNAVAILABLE_", "USERS_IP_")):
@@ -754,6 +769,7 @@ def _get_prices_live(country=None, service=None):
                     rows = fut.result()
                 except Exception as exc:
                     errors.append(exc)
+                    logger.warning("GRIZZLY %s gagal service=%s country=%s: %s", action, service, country, exc)
                     continue
                 bucket = by_action.setdefault(action, [])
                 seen = {(str(r.get("country")), str(r.get("service") or "").lower(),
@@ -783,7 +799,13 @@ def _get_prices_live(country=None, service=None):
         # Tahap 2: matriks penuh untuk endpoint yang mengabaikan filter.
         more, more_errors = collect([(a, svc, False) for a in actions for svc in service_candidates[:1]])
         merged, errors = pick(more), errors + more_errors
+        by_action = more
 
+    if country and service:
+        logger.warning(
+            "GRIZZLY PRICES service=%s country=%s tier_per_action=%s dipakai=%s",
+            service, country, {k: len(v) for k, v in by_action.items()}, len(merged),
+        )
     if merged:
         merged.sort(key=lambda r: float(r.get("cost_usd") or 0))
         return merged
