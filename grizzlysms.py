@@ -182,135 +182,241 @@ def get_countries():
 
 
 def _price_records(data, wanted_service=None, wanted_country=None):
-    """Flatten Grizzly/SMS-Activate compatible price responses.
+    """Normalize Grizzly's SMS-Activate-compatible price matrices.
 
-    Grizzly follows the SMS-Activate-compatible JSON shape, but the service
-    endpoint has had several response variants over time. Keep parsing
-    tolerant so a service can always resolve to its countries and quotes.
+    Grizzly currently exposes several compatible price response shapes. In
+    particular, when ``service`` is supplied the selected service may be
+    returned as ``country -> quote`` instead of ``country -> service -> quote``.
+    The previous parser only understood the latter, which made the service
+    page load correctly but left the country page empty. This parser accepts
+    both forms, plus provider/operator layers and list-based variants.
     """
     records = []
     seen = set()
+    wanted = str(wanted_service).strip().lower() if wanted_service is not None else ""
+    wanted_country_s = str(wanted_country).strip().lower() if wanted_country is not None else ""
 
-    def add(country, service, info):
-        if not isinstance(info, dict):
-            return
+    def _num(v, default=0.0):
         try:
-            cost = float(info.get("cost") or info.get("price") or info.get("rate") or info.get("activationCost") or 0)
-            stock = int(float(info.get("count") if info.get("count") is not None else
-                              info.get("stock") if info.get("stock") is not None else
-                              info.get("available") if info.get("available") is not None else 0))
+            return float(v)
         except (TypeError, ValueError):
+            return default
+
+    def _stock(info):
+        if not isinstance(info, dict):
+            return 0
+        for k in ("count", "stock", "available", "quantity", "qty", "total", "amount"):
+            if k in info and info.get(k) is not None:
+                try:
+                    return max(0, int(float(info.get(k))))
+                except (TypeError, ValueError):
+                    pass
+        return 0
+
+    def _cost(info):
+        if not isinstance(info, dict):
+            return 0.0
+        for k in ("cost", "price", "rate", "activationCost", "amount", "sum"):
+            if info.get(k) is not None:
+                value = _num(info.get(k), 0.0)
+                if value > 0:
+                    return value
+        return 0.0
+
+    def _is_quote(info):
+        return isinstance(info, dict) and _cost(info) > 0
+
+    def add(country, service, info, inherited_stock=None):
+        if not _is_quote(info):
             return
-        if not math.isfinite(cost) or cost <= 0:
+        country = str(country or "").strip()
+        service = str(service or wanted_service or "").strip()
+        if not country or not service:
             return
-        key = (str(country), str(service), round(cost, 8), max(stock, 0))
+        if wanted and service.lower() != wanted:
+            return
+        if wanted_country_s and country.lower() != wanted_country_s:
+            return
+        cost = _cost(info)
+        stock = _stock(info)
+        if inherited_stock is not None and stock <= 0:
+            try:
+                stock = max(0, int(float(inherited_stock)))
+            except (TypeError, ValueError):
+                pass
+        key = (country, service.lower(), round(cost, 8), stock)
         if key in seen:
             return
         seen.add(key)
         records.append({
-            "country": str(country),
-            "service": str(service),
+            "country": country,
+            "service": service,
             "cost_usd": cost,
-            "stock": max(stock, 0),
+            "stock": stock,
         })
 
-    def looks_like_quote(info):
+    def walk_provider_layer(country, service, info):
+        # Provider/operator-specific quote map, e.g.
+        # {"providers": {"1": {"cost":..., "count":...}}}
         if not isinstance(info, dict):
             return False
-        return any(k in info for k in ("cost", "price", "rate", "activationCost")) and any(
-            k in info for k in ("count", "stock", "available", "quantity", "qty")
-        )
+        provider_keys = ("providers", "providerMap", "providerPrices", "provider", "operators", "operatorMap")
+        found = False
+        for pk in provider_keys:
+            node = info.get(pk)
+            if isinstance(node, dict):
+                for payload in node.values():
+                    if isinstance(payload, dict) and _is_quote(payload):
+                        add(country, service, payload)
+                        found = True
+            elif isinstance(node, list):
+                for payload in node:
+                    if isinstance(payload, dict) and _is_quote(payload):
+                        add(country, service, payload)
+                        found = True
+        return found
 
-    def walk_nested(obj):
-        """Handle both {country:{service:quote}} and {service:{country:quote}}."""
+    def walk_matrix(obj, context_country=None, context_service=None):
+        if isinstance(obj, list):
+            for item in obj:
+                if not isinstance(item, dict):
+                    continue
+                country = item.get("country") or item.get("country_id") or item.get("countryCode") or item.get("country_code") or context_country
+                service = item.get("service") or item.get("service_code") or item.get("product") or item.get("serviceId") or context_service or wanted_service
+                if _is_quote(item) and country and service:
+                    add(country, service, item)
+                # Some list entries contain a nested quote/matrix.
+                for key in ("data", "result", "prices", "countries", "services"):
+                    nested = item.get(key)
+                    if isinstance(nested, (dict, list)):
+                        walk_matrix(nested, country, service)
+            return
+
         if not isinstance(obj, dict):
             return
-        wanted = str(wanted_service).strip().lower() if wanted_service is not None else ""
-        for outer, outer_data in obj.items():
-            if not isinstance(outer_data, dict):
-                continue
-            for inner, info in outer_data.items():
-                if looks_like_quote(info):
-                    outer_s = str(outer).strip()
-                    inner_s = str(inner).strip()
-                    ol = outer_s.lower()
-                    il = inner_s.lower()
-                    if wanted and ol == wanted:
-                        add(inner_s, outer_s, info)
-                    elif wanted and il == wanted:
-                        add(outer_s, inner_s, info)
-                    elif str(outer).isdigit() and not str(inner).isdigit():
-                        add(outer_s, inner_s, info)
-                    elif str(inner).isdigit() and not str(outer).isdigit():
-                        add(inner_s, outer_s, info)
-                    else:
-                        # Default to the canonical country-first shape.
-                        add(outer_s, inner_s, info)
-                elif isinstance(info, dict):
-                    # Optional operator/provider layer.
-                    for nested in info.values():
-                        if not looks_like_quote(nested):
-                            continue
-                        outer_s = str(outer).strip()
-                        inner_s = str(inner).strip()
-                        ol = outer_s.lower()
-                        il = inner_s.lower()
-                        if wanted and ol == wanted:
-                            add(inner_s, outer_s, nested)
-                        elif wanted and il == wanted:
-                            add(outer_s, inner_s, nested)
-                        elif str(outer).isdigit() and not str(inner).isdigit():
-                            add(outer_s, inner_s, nested)
-                        elif str(inner).isdigit() and not str(outer).isdigit():
-                            add(inner_s, outer_s, nested)
-                        else:
-                            add(outer_s, inner_s, nested)
 
-    def walk_list(obj):
-        # Variant: [{country,service,cost,count}, ...]
-        if not isinstance(obj, list):
+        # Direct quote: country/service are inherited from the matrix path.
+        if _is_quote(obj) and context_country and context_service:
+            add(context_country, context_service, obj)
             return
-        for item in obj:
-            if not isinstance(item, dict):
+
+        for outer, value in obj.items():
+            ol = str(outer).strip()
+            if ol.lower() in {"status", "success", "message", "error"}:
                 continue
-            country = item.get("country") or item.get("country_id") or item.get("countryCode") or item.get("country_code")
-            service = item.get("service") or item.get("service_code") or item.get("product") or item.get("code")
-            if country is not None and service is not None and looks_like_quote(item):
-                add(country, service, item)
 
-    # Ignore response envelope fields such as status/success/message.
+            # Country-first / service-first matrix node.
+            if isinstance(value, dict):
+                # If this node itself is a quote, support country -> quote and
+                # service -> quote forms. With a selected service, the former
+                # is the important case used by getPrices(service=...).
+                if _is_quote(value):
+                    if context_country:
+                        add(context_country, context_service or wanted_service or ol, value)
+                    elif ol.isdigit() and wanted_service:
+                        # service-first shape: {service: {country: quote}}
+                        # reaches here with the country key in ``ol``.
+                        add(ol, wanted_service, value)
+                    elif context_service:
+                        # country -> quote when service is inherited from the
+                        # request or an enclosing service node.
+                        add(ol, context_service, value)
+                    elif wanted_service:
+                        add(ol, wanted_service, value)
+                    continue
+
+                # Provider/operator wrapper directly under a country/service.
+                if walk_provider_layer(context_country or (ol if ol.isdigit() else None),
+                                       context_service or (ol if not ol.isdigit() else wanted_service), value):
+                    # Keep traversing: a response may contain both aggregate
+                    # and provider-specific price data.
+                    pass
+
+                # Determine which side of the matrix is the service.
+                if wanted and ol.lower() == wanted:
+                    # service -> country -> quote
+                    walk_matrix(value, context_country=None, context_service=ol)
+                    continue
+
+                # Numeric country keys are overwhelmingly the canonical form.
+                if ol.isdigit():
+                    walk_matrix(value, context_country=ol, context_service=context_service or wanted_service)
+                    continue
+
+                # If a named service key is present in the node, walk it as a
+                # country-first structure; otherwise recurse defensively.
+                if wanted and wanted in {str(k).strip().lower() for k in value.keys()}:
+                    node = next((v for k, v in value.items() if str(k).strip().lower() == wanted), None)
+                    if isinstance(node, dict):
+                        if _is_quote(node):
+                            add(ol, wanted, node)
+                        else:
+                            walk_matrix(node, context_country=ol, context_service=wanted)
+                    continue
+
+                # Generic country/service nested structure.
+                walk_matrix(value,
+                            context_country=context_country or (ol if context_country is None and not ol.lower() in {"data", "result", "prices", "countries"} else None),
+                            context_service=context_service or (ol if context_service is None and not ol.isdigit() else wanted_service))
+            elif isinstance(value, list):
+                walk_matrix(value, context_country=context_country, context_service=context_service or (ol if not ol.isdigit() else wanted_service))
+
+    # Unwrap common response envelopes first, but also inspect the full object
+    # because some Grizzly responses put prices beside status/data fields.
     if isinstance(data, dict):
-        clean = {k: v for k, v in data.items() if str(k).lower() not in {"status", "success", "message", "error"}}
-        nested = clean.get("data")
-        if isinstance(nested, dict):
-            walk_nested(nested)
-        elif isinstance(nested, list):
-            walk_list(nested)
-        if not records:
-            walk_nested(clean)
+        for key in ("data", "result", "prices", "countries", "services"):
+            nested = data.get(key)
+            if isinstance(nested, (dict, list)):
+                walk_matrix(nested)
+        walk_matrix({k: v for k, v in data.items() if str(k).lower() not in {"status", "success", "message", "error"}})
     elif isinstance(data, list):
-        walk_list(data)
+        walk_matrix(data)
 
-    if wanted_service is not None:
-        target = str(wanted_service).strip().lower()
-        records = [r for r in records if r["service"].strip().lower() == target]
-    if wanted_country is not None:
-        target = str(wanted_country).strip().lower()
-        records = [r for r in records if r["country"].strip().lower() == target]
+    # A final targeted pass handles the very common {country: {service: quote}}
+    # and {country: quote} forms without relying on numeric country IDs.
+    if isinstance(data, dict):
+        for country, node in data.items():
+            if str(country).lower() in {"status", "success", "message", "error", "data", "result", "prices", "countries"}:
+                continue
+            if not isinstance(node, dict):
+                continue
+            if wanted:
+                direct = node.get(wanted_service)
+                if isinstance(direct, dict) and _is_quote(direct):
+                    add(country, wanted_service, direct)
+                elif _is_quote(node):
+                    add(country, wanted_service, node)
+            elif _is_quote(node):
+                add(country, context_service or "", node)
+
     return records
 
 def get_prices(country=None, service=None):
     last_error = None
-    # Prefer the standard endpoint; fall back to newer variants when an
-    # account/region exposes only one of them.
-    for action in ("getPrices", "getPricesV2", "getPricesV3"):
+    # Grizzly documents three compatible price methods. V3 is the most
+    # current variant, so try it first; older accounts may still expose V2 or
+    # the original getPrices method. The parser accepts all response shapes.
+    for action in ("getPricesV3", "getPricesV2", "getPrices"):
         try:
             data = _request(action, country=country, service=service)
             rows = _price_records(data, wanted_service=service, wanted_country=country)
-            if rows or action == "getPricesV3":
+            if rows:
                 return rows
         except Exception as exc:
             last_error = exc
+
+        # Some legacy-compatible deployments reject one of the optional
+        # filters. If a service was requested and the filtered call produced
+        # no usable rows, retry once without filters and filter locally. This
+        # is especially important for the service -> country page.
+        if service or country:
+            try:
+                data = _request(action)
+                rows = _price_records(data, wanted_service=service, wanted_country=country)
+                if rows:
+                    return rows
+            except Exception as exc:
+                last_error = exc
     if last_error:
         raise last_error
     return []

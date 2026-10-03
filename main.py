@@ -1870,11 +1870,15 @@ def get_service_catalog(server, premotp_type="regular"):
         # Put frequently used services on the first page without removing or
         # renaming any live Grizzly service. Search still returns every match.
         priority_terms = [
-            ("whatsapp", "whatsapp business"),
+            ("whatsapp", "whatsapp business", "whatsapp messenger"),
             ("shopee",),
             ("tiktok", "douyin"),
             ("telegram",),
-            ("google", "gmail", "youtube"),
+            ("google", "gmail", "youtube", "google / gmail / youtube", "google / youtube / gmail"),
+            ("dana",),
+            ("gopay", "go pay"),
+            ("gojek",),
+            ("grab",),
         ]
         def _rank(item):
             code, label = item
@@ -5662,6 +5666,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
         context.user_data["otp_server"] = server
         context.user_data["otp_service"] = service
+
+        # Acknowledge immediately so Telegram does not leave the button in a
+        # loading state while the live provider catalog is being fetched.
+        await query.answer("Memuat negara dan stok…")
 
         await show_service_country_page(
             query,
