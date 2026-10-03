@@ -107,8 +107,22 @@ def _normalise_service(item, key=None):
     return code, name
 
 
+def _unwrap_collection(data, keys):
+    """Unwrap common Grizzly response envelopes without losing legacy shapes."""
+    if isinstance(data, dict):
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, (list, dict)):
+                return value
+        # Some endpoints return the useful object under `data`.
+        value = data.get("data")
+        if isinstance(value, (list, dict)):
+            return value
+    return data
+
+
 def get_services():
-    data = _request("getServicesList")
+    data = _unwrap_collection(_request("getServicesList"), ("services", "serviceList", "service_list"))
     out = []
     seen = set()
     if isinstance(data, dict):
@@ -119,6 +133,9 @@ def get_services():
         iterable = []
     for key, item in iterable:
         code, name = _normalise_service(item, key)
+        # Never expose a response-envelope key such as `status` as a service.
+        if str(code).lower() in {"status", "success", "message", "error", "data"}:
+            continue
         if code and code.lower() not in seen:
             out.append({"id": code, "name": name})
             seen.add(code.lower())
@@ -145,7 +162,7 @@ def _normalise_country(item, key=None):
 
 
 def get_countries():
-    data = _request("getCountries")
+    data = _unwrap_collection(_request("getCountries"), ("countries", "countryList", "country_list"))
     out = []
     seen = set()
     if isinstance(data, dict):
@@ -156,6 +173,8 @@ def get_countries():
         iterable = []
     for key, item in iterable:
         cid, name, iso = _normalise_country(item, key)
+        if str(cid).lower() in {"status", "success", "message", "error", "data"}:
+            continue
         if cid and cid not in seen:
             out.append({"id": cid, "name": name, "iso_code": iso})
             seen.add(cid)

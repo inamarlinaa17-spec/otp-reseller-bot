@@ -1694,43 +1694,20 @@ async def show_server_page(
     query
 ):
 
+    # Dua kolom agar susunan menu persis: Server 1 | Server 3
+    #                                  Server 2 | Server 4
     keyboard = [
-
         [
-            InlineKeyboardButton(
-                "Server 1",
-                callback_data="otp_server:5sim"
-            )
+            InlineKeyboardButton("Server 1", callback_data="otp_server:5sim"),
+            InlineKeyboardButton("Server 3", callback_data="otp_server:premotp"),
         ],
-
         [
-            InlineKeyboardButton(
-                "Server 2",
-                callback_data="otp_server:rumahotp"
-            )
+            InlineKeyboardButton("Server 2", callback_data="otp_server:rumahotp"),
+            InlineKeyboardButton("Server 4", callback_data="otp_server:grizzly"),
         ],
-
         [
-            InlineKeyboardButton(
-                "Server 3",
-                callback_data="otp_server:premotp"
-            )
+            InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
         ],
-
-        [
-            InlineKeyboardButton(
-                "Server 4",
-                callback_data="otp_server:grizzly"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🏠 Menu Utama",
-                callback_data="user_home"
-            )
-        ]
-
     ]
 
     await query.edit_message_text(
