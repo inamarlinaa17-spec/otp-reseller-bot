@@ -1696,14 +1696,17 @@ async def show_server_page(
 
     # Dua kolom agar susunan menu persis: Server 1 | Server 3
     #                                  Server 2 | Server 4
+    def _server_dot(server):
+        return "🟢" if _is_server_enabled(server) else "🔴"
+
     keyboard = [
         [
-            InlineKeyboardButton("Server 1", callback_data="otp_server:5sim"),
-            InlineKeyboardButton("Server 3", callback_data="otp_server:premotp"),
+            InlineKeyboardButton(f"{_server_dot('5sim')} Server 1", callback_data="otp_server:5sim"),
+            InlineKeyboardButton(f"{_server_dot('premotp')} Server 3", callback_data="otp_server:premotp"),
         ],
         [
-            InlineKeyboardButton("Server 2", callback_data="otp_server:rumahotp"),
-            InlineKeyboardButton("Server 4", callback_data="otp_server:grizzly"),
+            InlineKeyboardButton(f"{_server_dot('rumahotp')} Server 2", callback_data="otp_server:rumahotp"),
+            InlineKeyboardButton(f"{_server_dot('grizzly')} Server 4", callback_data="otp_server:grizzly"),
         ],
         [
             InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home"),
@@ -4005,9 +4008,9 @@ async def command_deposit(update, context):
         "🎁 Deposit <b>Rp100.000+</b> mendapat bonus saldo <b>10%</b>.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ Pembayaran Otomatis", callback_data="deposit_method:auto")],
-            [InlineKeyboardButton("📷 QRIS Manual", callback_data="deposit_method:manual")],
-            [InlineKeyboardButton("💳 QRIS Otomatis", callback_data="deposit_method:premotp")],
+            [InlineKeyboardButton(("🟢" if _is_payment_method_enabled("AUTO") else "🔴") + " ⚡ Pembayaran Otomatis", callback_data="deposit_method:auto")],
+            [InlineKeyboardButton(("🟢" if _is_payment_method_enabled("MANUAL") else "🔴") + " 📷 QRIS Manual", callback_data="deposit_method:manual")],
+            [InlineKeyboardButton(("🟢" if _is_payment_method_enabled("PREMOTP_QRIS") else "🔴") + " 💳 QRIS Otomatis", callback_data="deposit_method:premotp")],
             [InlineKeyboardButton("⬅️ Menu Utama", callback_data="user_home")]
         ])
     )
@@ -8891,10 +8894,10 @@ async def admin_callback(
             f"⚡ Server 4: <b>{server4_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
-                [InlineKeyboardButton(f"⚡ Server 3 — {server3_label}", callback_data="admin_server_toggle:premotp")],
-                [InlineKeyboardButton(f"⚡ Server 4 — {server4_label}", callback_data="admin_server_toggle:grizzly")],
+                [InlineKeyboardButton(f"{"🟢" if server1_enabled else "🔴"} Server 1", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"{"🟢" if server2_enabled else "🔴"} Server 2", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"{"🟢" if server3_enabled else "🔴"} Server 3", callback_data="admin_server_toggle:premotp")],
+                [InlineKeyboardButton(f"{"🟢" if server4_enabled else "🔴"} Server 4", callback_data="admin_server_toggle:grizzly")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
@@ -8929,10 +8932,10 @@ async def admin_callback(
             f"⚡ Server 4: <b>{server4_label}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ Server 1 — {server1_label}", callback_data="admin_server_toggle:5sim")],
-                [InlineKeyboardButton(f"⚡ Server 2 — {server2_label}", callback_data="admin_server_toggle:rumahotp")],
-                [InlineKeyboardButton(f"⚡ Server 3 — {server3_label}", callback_data="admin_server_toggle:premotp")],
-                [InlineKeyboardButton(f"⚡ Server 4 — {server4_label}", callback_data="admin_server_toggle:grizzly")],
+                [InlineKeyboardButton(f"{"🟢" if server1_enabled else "🔴"} Server 1", callback_data="admin_server_toggle:5sim")],
+                [InlineKeyboardButton(f"{"🟢" if server2_enabled else "🔴"} Server 2", callback_data="admin_server_toggle:rumahotp")],
+                [InlineKeyboardButton(f"{"🟢" if server3_enabled else "🔴"} Server 3", callback_data="admin_server_toggle:premotp")],
+                [InlineKeyboardButton(f"{"🟢" if server4_enabled else "🔴"} Server 4", callback_data="admin_server_toggle:grizzly")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
@@ -8954,8 +8957,8 @@ async def admin_callback(
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"⚡ Otomatis — {auto_label}", callback_data="admin_payment_toggle:auto")],
-                [InlineKeyboardButton(f"📷 QRIS Manual — {manual_label}", callback_data="admin_payment_toggle:manual")],
-                [InlineKeyboardButton(f"💳 QRIS Otomatis — {premotp_label}", callback_data="admin_payment_toggle:premotp")],
+                [InlineKeyboardButton(f"{"🟢" if manual_enabled else "🔴"} QRIS Manual", callback_data="admin_payment_toggle:manual")],
+                [InlineKeyboardButton(f"{"🟢" if premotp_enabled else "🔴"} QRIS Otomatis", callback_data="admin_payment_toggle:premotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )
@@ -8988,8 +8991,8 @@ async def admin_callback(
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"⚡ Otomatis — {auto_label}", callback_data="admin_payment_toggle:auto")],
-                [InlineKeyboardButton(f"📷 QRIS Manual — {manual_label}", callback_data="admin_payment_toggle:manual")],
-                [InlineKeyboardButton(f"💳 QRIS Otomatis — {premotp_label}", callback_data="admin_payment_toggle:premotp")],
+                [InlineKeyboardButton(f"{"🟢" if manual_enabled else "🔴"} QRIS Manual", callback_data="admin_payment_toggle:manual")],
+                [InlineKeyboardButton(f"{"🟢" if premotp_enabled else "🔴"} QRIS Otomatis", callback_data="admin_payment_toggle:premotp")],
                 [InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")],
             ])
         )

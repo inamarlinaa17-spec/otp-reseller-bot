@@ -412,21 +412,113 @@ def _service_candidates(service):
     return candidates
 
 
-def get_prices(country=None, service=None):
-    """Fetch Grizzly price matrix using the documented SMS-Activate-compatible API.
+def _extract_provider_quotes(data, service, country):
+    """Extract every provider/price tier for one service+country.
 
-    Grizzly exposes the original ``getPrices`` plus V2/V3 variants. The original
-    endpoint is intentionally tried first because its country->service matrix is
-    the most broadly compatible response shape. We then try filtered and full
-    matrices and normalise all known shapes locally.
+    Grizzly's V2/V3 matrices can expose several provider prices for the same
+    country.  The storefront shows those as separate price tiers.  Do not
+    collapse them to the first/cheapest tier.
+    """
+    rows = []
+    seen = set()
+
+    def num(v, default=None):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    def integer(v, default=0):
+        try:
+            return max(0, int(float(v)))
+        except (TypeError, ValueError):
+            return default
+
+    def add(payload, provider_id=None):
+        if not isinstance(payload, dict):
+            return
+        cost = num(payload.get("price") or payload.get("cost") or payload.get("activationCost")
+                   or payload.get("amount") or payload.get("rate") or payload.get("sum"))
+        stock = integer(payload.get("count") or payload.get("qty") or payload.get("available")
+                        or payload.get("stock") or payload.get("quantity") or payload.get("total"))
+        if cost is None or cost <= 0 or stock <= 0:
+            return
+        pid = str(payload.get("provider_id") or payload.get("providerId") or payload.get("providerID")
+                  or payload.get("id") or provider_id or "").strip()
+        key = (str(country), str(service).lower(), pid, round(cost, 8), stock)
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append({"country": str(country), "service": str(service), "cost_usd": float(cost),
+                     "stock": stock, "provider_id": pid})
+
+    def visit(obj, inherited_country=None, inherited_service=None):
+        if isinstance(obj, list):
+            for item in obj:
+                visit(item, inherited_country, inherited_service)
+            return
+        if not isinstance(obj, dict):
+            return
+
+        current_country = obj.get("country") or obj.get("countryId") or obj.get("country_id") or inherited_country
+        current_service = obj.get("service") or obj.get("service_code") or obj.get("product") or inherited_service or service
+        if str(current_country) != str(country):
+            # Still recurse because the requested country may be a nested key.
+            current_country = inherited_country
+
+        # A direct quote row.
+        if str(current_country) == str(country) and (str(current_service).lower() == str(service).lower()):
+            add(obj)
+
+        for pk in ("providers", "providerMap", "providerPrices", "provider", "operators", "operatorMap"):
+            node = obj.get(pk)
+            if isinstance(node, dict):
+                for pid, payload in node.items():
+                    if isinstance(payload, dict):
+                        add(payload, pid)
+                    elif isinstance(payload, (int, float, str)):
+                        add({"cost": payload, "count": obj.get("count") or obj.get("stock")}, pid)
+            elif isinstance(node, list):
+                for payload in node:
+                    add(payload)
+
+        for key, value in obj.items():
+            kl = str(key).strip()
+            if kl.lower() in {"status", "success", "message", "error"}:
+                continue
+            child_country = current_country
+            child_service = current_service
+            if kl.isdigit():
+                # Numeric keys in Grizzly matrices are country IDs.
+                child_country = kl
+            elif kl.lower() == str(service).lower():
+                child_service = kl
+            if isinstance(value, (dict, list)):
+                visit(value, child_country, child_service)
+
+    visit(data)
+    return rows
+
+
+def get_prices(country=None, service=None):
+    """Return the complete live price matrix, including every price tier.
+
+    We intentionally merge V3/V2/legacy responses instead of returning after
+    the first non-empty response. Grizzly's storefront can have several prices
+    for one country/service, and the V3/V2 endpoints can expose different
+    provider tiers. The merged result is deduplicated only when the actual
+    country/service/provider/price/stock tuple is identical.
     """
     last_error = None
-    actions = ("getPrices", "getPricesV2", "getPricesV3")
     service_candidates = _service_candidates(service) if service else [None]
-    seen_attempts = set()
+    merged = []
+    seen = set()
+    actions = ("getPricesV3", "getPricesV2", "getPrices")
 
     for action in actions:
         for svc in service_candidates:
+            # Filtered call first; then the unfiltered matrix for endpoints
+            # which ignore one or both filters.
             for filtered in (True, False):
                 params = {}
                 if filtered:
@@ -434,21 +526,25 @@ def get_prices(country=None, service=None):
                         params["country"] = country
                     if svc not in (None, ""):
                         params["service"] = svc
-                attempt_key = (action, tuple(sorted(params.items())))
-                if attempt_key in seen_attempts:
-                    continue
-                seen_attempts.add(attempt_key)
                 try:
                     data = _request(action, **params)
-                    rows = _price_records(data, wanted_service=svc or service, wanted_country=country)
-                    if rows:
-                        return rows
+                    rows = _extract_provider_quotes(data, svc or service or "", country) if country and service else []
+                    if not rows:
+                        rows = _price_records(data, wanted_service=svc or service, wanted_country=country)
+                    for row in rows:
+                        key = (str(row.get("country")), str(row.get("service") or "").lower(),
+                               str(row.get("provider_id") or ""), round(float(row.get("cost_usd") or 0), 8),
+                               int(row.get("stock") or 0))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        merged.append(row)
                 except Exception as exc:
                     last_error = exc
 
+    if merged:
+        return merged
     if last_error:
-        # Do not hide the real provider error from the caller; the Telegram/Web
-        # layer will turn it into its normal temporary-stock message.
         raise last_error
     return []
 
