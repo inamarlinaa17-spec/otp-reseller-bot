@@ -1866,6 +1866,24 @@ def get_service_catalog(server, premotp_type="regular"):
             if code and code.lower() not in seen:
                 catalog.append((code, label))
                 seen.add(code.lower())
+
+        # Put frequently used services on the first page without removing or
+        # renaming any live Grizzly service. Search still returns every match.
+        priority_terms = [
+            ("whatsapp", "whatsapp business"),
+            ("shopee",),
+            ("tiktok", "douyin"),
+            ("telegram",),
+            ("google", "gmail", "youtube"),
+        ]
+        def _rank(item):
+            code, label = item
+            name = str(label).lower().replace("_", " ").strip()
+            for rank, aliases in enumerate(priority_terms):
+                if any(name == a or name.startswith(a + " ") for a in aliases):
+                    return (rank, name)
+            return (999, name)
+        catalog.sort(key=_rank)
         return catalog
 
     if server == "premotp":

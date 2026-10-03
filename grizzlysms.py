@@ -147,10 +147,10 @@ def _normalise_country(item, key=None):
         cid = str(item.get("country_id") or item.get("id") or item.get("country")
                     or key or item.get("code") or "").strip()
         name = str(item.get("country_name") or item.get("name") or item.get("english")
-                    or item.get("englishName") or item.get("eng_name") or item.get("english_name")
-                    or item.get("label") or cid).strip()
+                    or item.get("eng") or item.get("englishName") or item.get("eng_name")
+                    or item.get("english_name") or item.get("label") or cid).strip()
         iso = str(item.get("iso_code") or item.get("iso") or item.get("country_code")
-                   or item.get("code2") or "").strip().upper()
+                   or item.get("code2") or item.get("iso2") or "").strip().upper()
         if not iso:
             candidate_iso = str(item.get("code") or "").strip().upper()
             iso = candidate_iso if len(candidate_iso) == 2 and candidate_iso.isalpha() else ""
@@ -182,19 +182,31 @@ def get_countries():
 
 
 def _price_records(data, wanted_service=None, wanted_country=None):
-    """Flatten common Grizzly/SMS-Activate price matrix shapes."""
+    """Flatten Grizzly/SMS-Activate compatible price responses.
+
+    Grizzly follows the SMS-Activate-compatible JSON shape, but the service
+    endpoint has had several response variants over time. Keep parsing
+    tolerant so a service can always resolve to its countries and quotes.
+    """
     records = []
+    seen = set()
 
     def add(country, service, info):
         if not isinstance(info, dict):
             return
         try:
-            cost = float(info.get("cost") or info.get("price") or info.get("rate") or 0)
-            stock = int(float(info.get("count") or info.get("stock") or info.get("available") or 0))
+            cost = float(info.get("cost") or info.get("price") or info.get("rate") or info.get("activationCost") or 0)
+            stock = int(float(info.get("count") if info.get("count") is not None else
+                              info.get("stock") if info.get("stock") is not None else
+                              info.get("available") if info.get("available") is not None else 0))
         except (TypeError, ValueError):
             return
         if not math.isfinite(cost) or cost <= 0:
             return
+        key = (str(country), str(service), round(cost, 8), max(stock, 0))
+        if key in seen:
+            return
+        seen.add(key)
         records.append({
             "country": str(country),
             "service": str(service),
@@ -202,31 +214,82 @@ def _price_records(data, wanted_service=None, wanted_country=None):
             "stock": max(stock, 0),
         })
 
-    if not isinstance(data, dict):
-        return records
+    def looks_like_quote(info):
+        if not isinstance(info, dict):
+            return False
+        return any(k in info for k in ("cost", "price", "rate", "activationCost")) and any(
+            k in info for k in ("count", "stock", "available", "quantity", "qty")
+        )
 
-    # Standard: {country: {service: {cost,count}}}
-    for country, country_data in data.items():
-        if not isinstance(country_data, dict):
-            continue
-        for service, info in country_data.items():
-            if isinstance(info, dict) and ("cost" in info or "count" in info or "stock" in info or "price" in info):
-                add(country, service, info)
+    def walk_nested(obj):
+        """Handle both {country:{service:quote}} and {service:{country:quote}}."""
+        if not isinstance(obj, dict):
+            return
+        wanted = str(wanted_service).strip().lower() if wanted_service is not None else ""
+        for outer, outer_data in obj.items():
+            if not isinstance(outer_data, dict):
                 continue
-            # Some responses nest one more provider/operator layer.
-            if isinstance(info, dict):
-                for _, nested in info.items():
-                    if isinstance(nested, dict) and ("cost" in nested or "count" in nested or "stock" in nested or "price" in nested):
-                        add(country, service, nested)
+            for inner, info in outer_data.items():
+                if looks_like_quote(info):
+                    outer_s = str(outer).strip()
+                    inner_s = str(inner).strip()
+                    ol = outer_s.lower()
+                    il = inner_s.lower()
+                    if wanted and ol == wanted:
+                        add(inner_s, outer_s, info)
+                    elif wanted and il == wanted:
+                        add(outer_s, inner_s, info)
+                    elif str(outer).isdigit() and not str(inner).isdigit():
+                        add(outer_s, inner_s, info)
+                    elif str(inner).isdigit() and not str(outer).isdigit():
+                        add(inner_s, outer_s, info)
+                    else:
+                        # Default to the canonical country-first shape.
+                        add(outer_s, inner_s, info)
+                elif isinstance(info, dict):
+                    # Optional operator/provider layer.
+                    for nested in info.values():
+                        if not looks_like_quote(nested):
+                            continue
+                        outer_s = str(outer).strip()
+                        inner_s = str(inner).strip()
+                        ol = outer_s.lower()
+                        il = inner_s.lower()
+                        if wanted and ol == wanted:
+                            add(inner_s, outer_s, nested)
+                        elif wanted and il == wanted:
+                            add(outer_s, inner_s, nested)
+                        elif str(outer).isdigit() and not str(inner).isdigit():
+                            add(outer_s, inner_s, nested)
+                        elif str(inner).isdigit() and not str(outer).isdigit():
+                            add(inner_s, outer_s, nested)
+                        else:
+                            add(outer_s, inner_s, nested)
 
-    # Product/service-first: {service: {country: {cost,count}}}
-    if not records:
-        for service, service_data in data.items():
-            if not isinstance(service_data, dict):
+    def walk_list(obj):
+        # Variant: [{country,service,cost,count}, ...]
+        if not isinstance(obj, list):
+            return
+        for item in obj:
+            if not isinstance(item, dict):
                 continue
-            for country, info in service_data.items():
-                if isinstance(info, dict) and ("cost" in info or "count" in info or "stock" in info or "price" in info):
-                    add(country, service, info)
+            country = item.get("country") or item.get("country_id") or item.get("countryCode") or item.get("country_code")
+            service = item.get("service") or item.get("service_code") or item.get("product") or item.get("code")
+            if country is not None and service is not None and looks_like_quote(item):
+                add(country, service, item)
+
+    # Ignore response envelope fields such as status/success/message.
+    if isinstance(data, dict):
+        clean = {k: v for k, v in data.items() if str(k).lower() not in {"status", "success", "message", "error"}}
+        nested = clean.get("data")
+        if isinstance(nested, dict):
+            walk_nested(nested)
+        elif isinstance(nested, list):
+            walk_list(nested)
+        if not records:
+            walk_nested(clean)
+    elif isinstance(data, list):
+        walk_list(data)
 
     if wanted_service is not None:
         target = str(wanted_service).strip().lower()
@@ -236,10 +299,21 @@ def _price_records(data, wanted_service=None, wanted_country=None):
         records = [r for r in records if r["country"].strip().lower() == target]
     return records
 
-
 def get_prices(country=None, service=None):
-    return _price_records(_request("getPrices", country=country, service=service),
-                          wanted_service=service, wanted_country=country)
+    last_error = None
+    # Prefer the standard endpoint; fall back to newer variants when an
+    # account/region exposes only one of them.
+    for action in ("getPrices", "getPricesV2", "getPricesV3"):
+        try:
+            data = _request(action, country=country, service=service)
+            rows = _price_records(data, wanted_service=service, wanted_country=country)
+            if rows or action == "getPricesV3":
+                return rows
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return []
 
 
 def _country_lookup():
@@ -266,16 +340,30 @@ def get_service_countries(service):
     names = _country_lookup()
     grouped = {}
     for row in rows:
-        cid = str(row["country"])
+        cid = str(row["country"]).strip()
+        if not cid:
+            continue
         c = grouped.setdefault(cid, {"id": cid, "name": cid, "iso_code": "", "stock": 0, "cost_usd": 0})
         if cid in names:
             c["name"] = names[cid].get("name") or c["name"]
             c["iso_code"] = names[cid].get("iso_code") or c["iso_code"]
+        # Some compatible responses use the country name as the key. In that
+        # case the key itself is already the best display name.
+        if c["name"] == cid and not cid.isdigit():
+            c["name"] = cid.replace("_", " ").title()
+        # Official Grizzly country table uses 6 for Indonesia. Keep this
+        # fallback so Indonesia remains correctly named even if the optional
+        # getCountries lookup is temporarily unavailable.
+        if cid == "6":
+            c["name"] = "Indonesia"
+            c["iso_code"] = "ID"
         c["stock"] += max(0, int(row["stock"]))
         if row["stock"] > 0 and (not c["cost_usd"] or row["cost_usd"] < c["cost_usd"]):
             c["cost_usd"] = row["cost_usd"]
     # Only countries with a real stock entry are shown, matching the other servers.
-    return [x for x in grouped.values() if x["stock"] > 0]
+    out = [x for x in grouped.values() if x["stock"] > 0]
+    out.sort(key=lambda x: (0 if str(x.get("name","")).strip().lower() == "indonesia" else 1, str(x.get("name","")).lower()))
+    return out
 
 
 def get_quotes(service, country):
