@@ -2224,7 +2224,7 @@ async def show_service_country_page(
     try:
         items = await asyncio.wait_for(
             asyncio.to_thread(get_service_countries, server, service, _premotp_type_for(query)),
-            timeout=20
+            timeout=(35 if server == "grizzly" else 20)
         )
     except asyncio.TimeoutError:
         logger.warning("OTP stock timeout: server=%s service=%s", server, service)

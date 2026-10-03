@@ -6,6 +6,8 @@ The provider exposes an SMS-Activate-compatible client API.
 import os
 import math
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from urllib.parse import quote
@@ -15,7 +17,32 @@ import requests
 BASE_URL = "https://api.grizzlysms.com"
 HANDLER_URL = f"{BASE_URL}/stubs/handler_api.php"
 TIMEOUT = 25
+# Timeout lebih pendek untuk lookup katalog/harga supaya halaman negara tidak
+# menunggu terlalu lama (bot Telegram hanya menunggu ~20-30 detik).
+FAST_TIMEOUT = (5, 12)
 SESSION = requests.Session()
+
+_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _cached(key, ttl, loader, cache_empty=False):
+    """Cache hasil lookup di memori. Jika API gagal, pakai data lama (stale)."""
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    try:
+        value = loader()
+    except Exception:
+        if hit:
+            return hit[1]
+        raise
+    if value or cache_empty:
+        with _CACHE_LOCK:
+            _CACHE[key] = (time.monotonic(), value)
+    return value
 
 _RATE = None
 _RATE_AT = 0.0
@@ -37,10 +64,10 @@ def _api_key():
     return key
 
 
-def _request(action, **params):
+def _request(action, _timeout=None, **params):
     payload = {"api_key": _api_key(), "action": action}
     payload.update({k: v for k, v in params.items() if v is not None and v != ""})
-    response = SESSION.get(HANDLER_URL, params=payload, headers={"User-Agent": "AZHURA-Server4/1.0"}, timeout=TIMEOUT)
+    response = SESSION.get(HANDLER_URL, params=payload, headers={"User-Agent": "AZHURA-Server4/1.0"}, timeout=_timeout or TIMEOUT)
     response.raise_for_status()
     data = response.json() if "application/json" in response.headers.get("content-type", "").lower() else response.text
     if isinstance(data, str):
@@ -121,8 +148,8 @@ def _unwrap_collection(data, keys):
     return data
 
 
-def get_services():
-    data = _unwrap_collection(_request("getServicesList"), ("services", "serviceList", "service_list"))
+def _get_services_live():
+    data = _unwrap_collection(_request("getServicesList", _timeout=FAST_TIMEOUT), ("services", "serviceList", "service_list"))
     out = []
     seen = set()
     if isinstance(data, dict):
@@ -140,6 +167,10 @@ def get_services():
             out.append({"id": code, "name": name})
             seen.add(code.lower())
     return out
+
+
+def get_services():
+    return _cached("services", 900, _get_services_live)
 
 
 def _normalise_country(item, key=None):
@@ -161,8 +192,8 @@ def _normalise_country(item, key=None):
     return cid, name, iso
 
 
-def get_countries():
-    data = _unwrap_collection(_request("getCountries"), ("countries", "countryList", "country_list"))
+def _get_countries_live():
+    data = _unwrap_collection(_request("getCountries", _timeout=FAST_TIMEOUT), ("countries", "countryList", "country_list"))
     out = []
     seen = set()
     if isinstance(data, dict):
@@ -335,7 +366,7 @@ def _price_records(data, wanted_service=None, wanted_country=None):
                 # Determine which side of the matrix is the service.
                 if wanted and ol.lower() == wanted:
                     # service -> country -> quote
-                    walk_matrix(value, context_country=None, context_service=ol)
+                    walk_matrix(value, context_country=context_country, context_service=ol)
                     continue
 
                 # Numeric country keys are overwhelmingly the canonical form.
@@ -391,24 +422,37 @@ def _price_records(data, wanted_service=None, wanted_country=None):
 
     return records
 
+def get_countries():
+    return _cached("countries", 3600, _get_countries_live)
+
+
 def _service_candidates(service):
-    """Return likely Grizzly service codes for a user-facing service value."""
+    """Return likely Grizzly service codes for a user-facing service value.
+
+    Kode yang persis sama dengan katalog dipakai langsung (cepat, 1 kandidat).
+    Pencocokan nama hanya dipakai jika kode tidak ditemukan, dan dibatasi.
+    """
     raw = str(service or "").strip()
     if not raw:
         return []
-    candidates = [raw]
     try:
         catalog = get_services() or []
     except Exception:
         catalog = []
+    for item in catalog:
+        if str(item.get("id") or "").strip().lower() == raw.lower():
+            return [str(item.get("id")).strip()]
+    candidates = [raw]
     target = " ".join(raw.lower().replace("_", " ").replace("-", " ").split())
     for item in catalog:
         code = str(item.get("id") or "").strip()
         name = str(item.get("name") or "").strip()
         n = " ".join(name.lower().replace("_", " ").replace("-", " ").split())
-        if code and (code.lower() == raw.lower() or n == target or target in n or n in target):
+        if code and n and (n == target or target in n or n in target):
             if code not in candidates:
                 candidates.append(code)
+        if len(candidates) >= 4:
+            break
     return candidates
 
 
@@ -501,52 +545,69 @@ def _extract_provider_quotes(data, service, country):
 
 
 def get_prices(country=None, service=None):
-    """Return the complete live price matrix, including every price tier.
+    """Return the live price matrix, including every price tier.
 
-    We intentionally merge V3/V2/legacy responses instead of returning after
-    the first non-empty response. Grizzly's storefront can have several prices
-    for one country/service, and the V3/V2 endpoints can expose different
-    provider tiers. The merged result is deduplicated only when the actual
-    country/service/provider/price/stock tuple is identical.
+    Semua endpoint (V3/V2/legacy) dipanggil PARALEL dan hasilnya digabung,
+    sehingga semua tier harga tetap terbaca tanpa menunggu satu per satu.
+    Panggilan tanpa filter (matriks besar) hanya dipakai jika panggilan
+    berfilter tidak menghasilkan apa pun. Hasil di-cache singkat.
     """
-    last_error = None
+    cache_key = ("prices", str(country or ""), str(service or "").lower())
+    return _cached(cache_key, 20, lambda: _get_prices_live(country, service))
+
+
+def _get_prices_live(country=None, service=None):
     service_candidates = _service_candidates(service) if service else [None]
-    merged = []
-    seen = set()
     actions = ("getPricesV3", "getPricesV2", "getPrices")
 
-    for action in actions:
-        for svc in service_candidates:
-            # Filtered call first; then the unfiltered matrix for endpoints
-            # which ignore one or both filters.
-            for filtered in (True, False):
-                params = {}
-                if filtered:
-                    if country not in (None, ""):
-                        params["country"] = country
-                    if svc not in (None, ""):
-                        params["service"] = svc
+    def run(action, svc, filtered):
+        params = {}
+        if filtered:
+            if country not in (None, ""):
+                params["country"] = country
+            if svc not in (None, ""):
+                params["service"] = svc
+        data = _request(action, _timeout=FAST_TIMEOUT, **params)
+        rows = _extract_provider_quotes(data, svc or service or "", country) if country and service else []
+        if not rows:
+            rows = _price_records(data, wanted_service=svc or service, wanted_country=country)
+        return rows
+
+    def collect(jobs):
+        merged, seen, errors = [], set(), []
+        if not jobs:
+            return merged, errors
+        with ThreadPoolExecutor(max_workers=min(len(jobs), 6)) as pool:
+            futures = [pool.submit(run, *job) for job in jobs]
+            for fut in futures:
                 try:
-                    data = _request(action, **params)
-                    rows = _extract_provider_quotes(data, svc or service or "", country) if country and service else []
-                    if not rows:
-                        rows = _price_records(data, wanted_service=svc or service, wanted_country=country)
-                    for row in rows:
-                        key = (str(row.get("country")), str(row.get("service") or "").lower(),
-                               str(row.get("provider_id") or ""), round(float(row.get("cost_usd") or 0), 8),
-                               int(row.get("stock") or 0))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        merged.append(row)
+                    rows = fut.result()
                 except Exception as exc:
-                    last_error = exc
+                    errors.append(exc)
+                    continue
+                for row in rows:
+                    key = (str(row.get("country")), str(row.get("service") or "").lower(),
+                           str(row.get("provider_id") or ""), round(float(row.get("cost_usd") or 0), 8),
+                           int(row.get("stock") or 0))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged.append(row)
+        return merged, errors
+
+    # Tahap 1: panggilan berfilter (cepat, kecil).
+    merged, errors = collect([(a, svc, True) for a in actions for svc in service_candidates])
+    if not merged:
+        # Tahap 2: matriks penuh untuk endpoint yang mengabaikan filter.
+        more, more_errors = collect([(a, svc, False) for a in actions for svc in service_candidates[:1]])
+        merged, errors = more, errors + more_errors
 
     if merged:
         return merged
-    if last_error:
-        raise last_error
+    if errors:
+        raise errors[-1]
     return []
+
 
 def _country_lookup():
     try:
@@ -575,8 +636,13 @@ def get_service_countries(service):
     + count, so derive availability from that live matrix and use getCountries
     only for names/ISO codes.
     """
-    rows = get_prices(service=service)
-    names = _country_lookup()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        names_future = pool.submit(_country_lookup)
+        rows = get_prices(service=service)
+        try:
+            names = names_future.result(timeout=15)
+        except Exception:
+            names = {}
     grouped = {}
     for row in rows:
         cid = str(row.get("country") or "").strip()
