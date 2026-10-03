@@ -485,8 +485,8 @@ def _extract_provider_quotes(data, service, country):
     def add(payload, provider_id=None):
         if not isinstance(payload, dict):
             return
-        cost = num(payload.get("price") or payload.get("cost") or payload.get("activationCost")
-                   or payload.get("amount") or payload.get("rate") or payload.get("sum"))
+        _pl = _prices_of(payload)
+        cost = _pl[0] if _pl else num(payload.get("amount"))
         stock = integer(payload.get("count") or payload.get("qty") or payload.get("available")
                         or payload.get("stock") or payload.get("quantity") or payload.get("total"))
         if cost is None or cost <= 0 or stock <= 0:
@@ -562,16 +562,27 @@ def _to_float(v):
         return None
 
 
-def _quote_of(node):
-    """Return (price, count) if the dict itself is a price/stock quote."""
-    price = None
+def _prices_of(node):
+    """Daftar harga dari sebuah node. Grizzly V3 memakai list: "price": [0.14]."""
     for k in _PRICE_KEYS:
-        if k in node:
-            price = _to_float(node.get(k))
-            if price and price > 0:
-                break
-            price = None
-    if price is None:
+        if k not in node:
+            continue
+        v = node.get(k)
+        vals = v if isinstance(v, (list, tuple)) else [v]
+        out = []
+        for x in vals:
+            f = _to_float(x)
+            if f and f > 0:
+                out.append(f)
+        if out:
+            return out
+    return []
+
+
+def _quote_of(node):
+    """Return (list_of_prices, count) if the dict itself is a price/stock quote."""
+    prices = _prices_of(node)
+    if not prices:
         return None
     count = None
     for k in _COUNT_KEYS:
@@ -581,7 +592,7 @@ def _quote_of(node):
                 break
     if count is None:
         return None
-    return price, max(0, int(count))
+    return prices, max(0, int(count))
 
 
 def extract_price_tiers(data, service, country):
@@ -661,7 +672,8 @@ def extract_price_tiers(data, service, country):
             return child_rows
         q = _quote_of(node)
         if q and has_c:
-            out.append({"price": q[0], "count": q[1], "provider_id": pid or ""})
+            for price in q[0]:
+                out.append({"price": price, "count": q[1], "provider_id": pid or ""})
         return out
 
     raw = walk(data, False, False, "")
