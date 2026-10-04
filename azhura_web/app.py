@@ -491,8 +491,18 @@ def server_order_status(order_id):
         if data.get('otp') and str(data['otp'])!=str(o.get('previous_otp_code') or ''):
             from database import save_otp_result, mark_order_success
             save_otp_result(order_id,data['otp'],data.get('text'))
-            mark_order_success(order_id)
-            with conn() as db:db.execute("UPDATE orders SET status='SUCCESS' WHERE order_id=%s AND telegram_id=%s AND status='WAITING_OTP'",(order_id,uid()))
+            changed=bool(mark_order_success(order_id))
+            with conn() as db:
+                moved=db.execute("UPDATE orders SET status='SUCCESS' WHERE order_id=%s AND telegram_id=%s AND status='WAITING_OTP'",(order_id,uid()))
+                changed=changed or moved.rowcount>0
+            if changed:
+                # Bot Telegram yang mengirim pesan OTP ke user + channel traffic (format sama dengan order bot).
+                try:
+                    with conn() as db:
+                        db.execute('''CREATE TABLE IF NOT EXISTS web_otp_notify (order_id TEXT PRIMARY KEY,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),notified BOOLEAN NOT NULL DEFAULT FALSE,attempts INT NOT NULL DEFAULT 0)''')
+                        db.execute('''INSERT INTO web_otp_notify(order_id) VALUES(%s)
+                            ON CONFLICT (order_id) DO UPDATE SET notified=FALSE,attempts=0,created_at=NOW()''',(order_id,))
+                except Exception:app.logger.exception('Antrean notifikasi OTP web gagal: %s',order_id)
             o['otp_code']=data['otp'];o['status']='SUCCESS'
         return jsonify(order=o)
     except Exception:app.logger.exception('OTP poll failed');return jsonify(order=o)
