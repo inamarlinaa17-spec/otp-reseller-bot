@@ -922,8 +922,8 @@ def get_number(service, country, max_price=None):
         raise
     except GrizzlyError:
         raise
-    if not isinstance(data, dict):
-        # V1 compatibility fallback.
+    if not isinstance(data, dict) and not (isinstance(data, str) and data.strip().startswith("ACCESS_NUMBER")):
+        # V1 compatibility fallback (hanya jika V2 belum memberi nomor).
         data = _request("getNumber", service=service, country=country, maxPrice=max_price)
     if isinstance(data, str):
         parts = data.split(":")
@@ -1042,6 +1042,28 @@ def _status_values(value):
     elif value not in (None, ""):
         found.append(str(value).strip().lower())
     return found
+
+
+def confirm_cancelled(activation_id):
+    """True jika Grizzly menyatakan aktivasi sudah dibatalkan.
+
+    Dicek lewat getStatusV2 lalu getStatus (teks "STATUS_CANCEL"). Dipakai web
+    agar pembatalan yang sebenarnya sudah diterima provider tidak dianggap gagal.
+    """
+    try:
+        if status_is_cancelled(get_sms(activation_id)):
+            return True
+    except Exception:
+        pass
+    try:
+        raw = _request("getStatus", id=str(activation_id))
+        if isinstance(raw, str) and raw.strip().upper().startswith(("STATUS_CANCEL", "ACCESS_CANCEL")):
+            return True
+        if isinstance(raw, dict) and status_is_cancelled(raw):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def verify_cancel(activation_id):
