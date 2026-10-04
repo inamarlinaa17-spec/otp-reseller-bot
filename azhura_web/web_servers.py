@@ -2,7 +2,7 @@
 import os, requests, math, time
 from urllib.parse import quote
 from decimal import Decimal, ROUND_CEILING
-from grizzlysms import get_catalog as g4_catalog, get_service_countries as g4_countries, get_quotes as g4_quotes, get_number as g4_purchase, get_sms as g4_sms, cancel_number as g4_cancel, resend_otp as g4_resend, finish_number as g4_finish
+from grizzlysms import GrizzlyError as G4Error, confirm_cancelled as g4_confirm_cancelled, get_catalog as g4_catalog, get_service_countries as g4_countries, get_quotes as g4_quotes, get_number as g4_purchase, get_sms as g4_sms, cancel_number as g4_cancel, resend_otp as g4_resend, finish_number as g4_finish
 S=requests.Session()
 class ProviderRejected(Exception):
     """Provider explicitly rejected creation; no provider order was created."""
@@ -118,7 +118,11 @@ def purchase(server,service,country,meta):
         if isinstance(meta,dict):
             try: cost_usd=float(meta.get('cost_usd') or 0) or None
             except (TypeError,ValueError): cost_usd=None
-        d=g4_purchase(service, country, cost_usd)
+        try:d=g4_purchase(service, country, cost_usd)
+        except G4Error as exc:
+            # Grizzly menjawab dengan kode error (NO_NUMBERS, NO_BALANCE, WRONG_MAX_PRICE, dll):
+            # tidak ada nomor yang dibeli, jadi aman untuk membatalkan order dan refund saldo user.
+            raise ProviderRejected('Server 4: '+str(exc))
         return {'id':d['id'],'phone':d['phone'],'expired_at':d.get('expired_at')}
     if server==2:
         d=get2('v2/orders',{'number_id':meta['number_id'],'provider_id':meta['provider_id'],'operator_id':meta.get('operator_id',1)}) or {}

@@ -456,7 +456,8 @@ def server_buy(server):
             save_provider_order(order_id,str(pid),int(q['cost_idr']),str(phone),result.get('expired_at'))
             with conn() as db:db.execute('UPDATE orders SET status=%s,service_name=%s,country_name=%s WHERE order_id=%s',('WAITING_OTP',q['service'],q['country'],order_id))
             return jsonify(order_id=order_id,phone=phone,price=q['price_idr'])
-        except ProviderRejected:
+        except ProviderRejected as rej:
+            app.logger.warning('Provider menolak pembelian order=%s server=%s: %s',order_id,server,rej)
             # Only explicit provider rejection is safe to refund immediately.
             try:
                 refund=refund_order(order_id,'Provider menolak pembelian web')
@@ -531,8 +532,8 @@ def web_cancel_order():
                     try:
                         key=os.getenv('FIVESIM_API_KEY','').strip()
                         if not key:raise RuntimeError('Kunci 5SIM belum tersedia')
-                        requests.post('https://5sim.net/v1/user/cancel/'+str(pid),headers={'Authorization':'Bearer '+key},timeout=15).raise_for_status()
-                    except (requests.RequestException,RuntimeError):pass
+                        requests.get('https://5sim.net/v1/user/cancel/'+str(pid),headers={'Authorization':'Bearer '+key,'Accept':'application/json'},timeout=20).raise_for_status()
+                    except (requests.RequestException,RuntimeError):app.logger.warning('5SIM cancel request failed order=%s',oid)
                     state=get5('user/check/'+str(pid),auth=True)
                     verified=str(state.get('status','')).lower() in ('canceled','cancelled','expired','timeout')
                 elif provider=='rumahotp':
@@ -550,12 +551,17 @@ def web_cancel_order():
                     state=prem_status(pid)
                     verified=str(state.get('status','')).lower() in ('cancel','canceled','cancelled','expired','timeout')
                 elif provider=='grizzly':
-                    from grizzlysms import cancel_number as g4_cancel, get_sms as g4_status
-                    try:g4_cancel(pid)
-                    except Exception:pass
-                    state=g4_status(pid)
-                    status_values=[str(state.get('status','')).lower()] if isinstance(state,dict) else []
-                    verified=any(x in ('cancel','canceled','cancelled','access_cancel','status_cancel') for x in status_values)
+                    from grizzlysms import cancel_number as g4_cancel
+                    from azhura_web.web_servers import g4_confirm_cancelled
+                    cancel_ok=False
+                    try:
+                        res=g4_cancel(pid)
+                        cancel_ok=isinstance(res,dict) and res.get('response')=='OK'
+                    except Exception as g4ex:
+                        # Pembatalan ulang pada aktivasi yang sudah dibatalkan bisa membalas ACCESS_CANCEL*.
+                        cancel_ok='ACCESS_CANCEL' in str(g4ex).upper()
+                        app.logger.warning('Server 4 cancel reply order=%s: %s',oid,g4ex)
+                    verified=cancel_ok or g4_confirm_cancelled(pid)
                 else:return err('Provider order tidak dikenal. Hubungi admin.',409)
                 if not verified:return err('Provider belum mengonfirmasi pembatalan. Saldo belum dikembalikan; coba lagi atau hubungi admin.',409)
                 # Recheck OTP after network call; if another worker recorded an OTP,
