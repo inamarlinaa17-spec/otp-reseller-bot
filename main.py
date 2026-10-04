@@ -4316,7 +4316,7 @@ def _normalize_otp_response(data):
 async def _send_otp_received_message(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
-    if not order or str(order.get("status") or "").upper() != "PENDING":
+    if not order or str(order.get("status") or "").upper() not in {"PENDING", "WAITING_OTP"}:
         return False
 
     data_sms = _normalize_otp_response(data_sms)
@@ -4593,7 +4593,7 @@ async def _auto_expire_order(application, order, provider_order_id):
     lock = _get_cancel_order_lock(order_id)
     async with lock:
         current = await asyncio.to_thread(get_order, order_id)
-        if not current or str(current.get("status") or "").upper() != "PENDING":
+        if not current or str(current.get("status") or "").upper() not in {"PENDING", "WAITING_OTP"}:
             return False
         if _order_has_received_otp(current):
             return False
@@ -4638,6 +4638,123 @@ async def _auto_expire_order(application, order, provider_order_id):
     return True
 
 
+_WEB_OTP_TABLE_READY = False
+
+
+def _ensure_web_otp_table():
+    global _WEB_OTP_TABLE_READY
+    if _WEB_OTP_TABLE_READY:
+        return
+    with get_db() as db:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS web_otp_notify (
+                order_id TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                notified BOOLEAN NOT NULL DEFAULT FALSE,
+                attempts INT NOT NULL DEFAULT 0
+            )
+            """
+        )
+    _WEB_OTP_TABLE_READY = True
+
+
+def _claim_web_otp_notifications(limit=5):
+    """Ambil antrean notifikasi OTP dari web (aman bila ada beberapa instance)."""
+    _ensure_web_otp_table()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            UPDATE web_otp_notify SET attempts = attempts + 1
+            WHERE order_id IN (
+                SELECT order_id FROM web_otp_notify
+                WHERE notified = FALSE AND attempts < 6
+                  AND created_at > NOW() - INTERVAL '6 hours'
+                ORDER BY created_at ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING order_id
+            """,
+            (int(limit),),
+        ).fetchall()
+    return [r["order_id"] for r in rows]
+
+
+def _mark_web_otp_notified(order_id):
+    with get_db() as db:
+        db.execute("UPDATE web_otp_notify SET notified = TRUE WHERE order_id = %s", (order_id,))
+
+
+async def _notify_web_otp(application, order_id):
+    """Kirim pesan OTP ke akun Telegram user + channel traffic untuk order dari web."""
+    order = await asyncio.to_thread(get_order, order_id)
+    if not order:
+        return True
+    code = str(order.get("otp_code") or "").strip()
+    if not code:
+        return False
+    text = order.get("sms_text") or ""
+    service_name = order.get("service_name") or order.get("service") or "-"
+    country_name = order.get("country_name") or order.get("country") or "-"
+    previous_code = str(order.get("previous_otp_code") or "").strip()
+    otp_lines = (
+        f"🔐 OTP 1: <code>{escape(previous_code)}</code>\n"
+        f"🔐 OTP 2: <code>{escape(code)}</code>"
+        if _is_real_otp_code(previous_code) and code != previous_code
+        else f"🔐 OTP: <code>{escape(code)}</code>"
+    )
+    text_body = (
+        "🎉 <b>OTP DITERIMA</b>\n\n"
+        f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+        f"📱 Layanan: <b>{escape(str(service_name))}</b>\n"
+        f"🌐 Negara: <b>{escape(str(country_name))}</b>\n"
+        f"📞 Nomor: <code>{escape(str(order.get('phone') or '-'))}</code>\n"
+        f"🕐 Transaksi: <b>{escape(format_datetime_wib(order.get('created_at')))}</b>\n"
+        f"⏰ Expired: <b>{escape(format_datetime_wib(order.get('expired_at')))}</b>\n\n"
+        f"{otp_lines}\n\n"
+        f"📨 SMS:\n<code>{escape(str(text))}</code>"
+    )
+    try:
+        await application.bot.send_message(
+            chat_id=int(order["telegram_id"]),
+            text=text_body,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+            ]),
+        )
+    except Exception:
+        logger.exception("[WEB OTP] gagal kirim OTP ke user Telegram order=%s", order_id)
+        return False
+    try:
+        await _send_traffic_otp_notification(application, order, code, text)
+    except Exception:
+        # Pesan ke user sudah terkirim; jangan kirim ulang hanya karena channel gagal.
+        logger.exception("[WEB OTP] gagal kirim notifikasi channel order=%s", order_id)
+    return True
+
+
+async def auto_notify_web_otp(application):
+    """Worker: kirim notifikasi untuk OTP yang masuk lewat Azhura_web."""
+    while True:
+        try:
+            order_ids = await asyncio.to_thread(_claim_web_otp_notifications, 5)
+            for order_id in order_ids:
+                try:
+                    done = await _notify_web_otp(application, order_id)
+                except Exception:
+                    logger.exception("[WEB OTP] notifikasi gagal order=%s", order_id)
+                    done = False
+                if done:
+                    await asyncio.to_thread(_mark_web_otp_notified, order_id)
+        except Exception:
+            logger.exception("[WEB OTP] worker error")
+        await asyncio.sleep(3)
+
+
+
 async def auto_process_pending_orders(application):
     """Poll pending orders automatically and refund unused expired orders.
 
@@ -4652,7 +4769,7 @@ async def auto_process_pending_orders(application):
                 rows = db.execute(
                     """
                     SELECT * FROM orders
-                    WHERE status = 'PENDING'
+                    WHERE status IN ('PENDING', 'WAITING_OTP')
                     ORDER BY created_at ASC
                     LIMIT 100
                     """
@@ -5001,6 +5118,7 @@ async def post_init(application):
     # inconsistencies. It does not touch user balances.
     application.create_task(reconcile_refunded_rumahotp_orders())
     application.create_task(auto_process_pending_orders(application))
+    application.create_task(auto_notify_web_otp(application))
     application.create_task(reconcile_pending_premotp_qris(application))
 
 

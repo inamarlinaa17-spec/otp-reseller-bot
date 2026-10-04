@@ -1088,7 +1088,7 @@ def mark_order_success(
                 status = 'SUCCESS',
                 completed_at = %s
             WHERE order_id = %s
-            AND status = 'PENDING'
+            AND status IN ('PENDING', 'WAITING_OTP')
             """,
             (
                 now(),
