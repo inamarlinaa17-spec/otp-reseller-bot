@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 
 import psycopg
+from reseller_ctx import current_reseller, split_margin
 from psycopg.rows import dict_row
 
 
@@ -192,6 +193,8 @@ def init_database():
             ALTER COLUMN expired_at TYPE TEXT
             USING expired_at::text
         """)
+
+        init_reseller_tables(db)
 
 
 # =========================================================
@@ -781,6 +784,12 @@ def create_pending_order(
     provider="5sim"
 ):
 
+    # Order dari bot reseller: catat margin reseller (dibayar saat OTP masuk).
+    _reseller = current_reseller()
+    _reseller_margin = 0
+    if _reseller:
+        _, _reseller_margin = split_margin(sell_price, _reseller["margin_percent"])
+
     with get_db() as db:
 
         user = db.execute(
@@ -880,10 +889,12 @@ def create_pending_order(
                 status,
                 provider_order_id,
                 refund_status,
-                created_at
+                created_at,
+                reseller_bot_id,
+                reseller_margin
             )
             VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 order_id,
@@ -896,7 +907,9 @@ def create_pending_order(
                 "PENDING",
                 None,
                 "NONE",
-                now()
+                now(),
+                _reseller["id"] if _reseller else None,
+                _reseller_margin
             )
         )
 
@@ -1095,6 +1108,9 @@ def mark_order_success(
                 order_id
             )
         )
+
+        if result.rowcount > 0:
+            _credit_reseller_margin(db, order_id)
 
         return (
             result.rowcount > 0
@@ -1308,6 +1324,8 @@ def refund_order(
             )
         )
 
+        _reverse_reseller_margin(db, order_id)
+
         return {
             "refunded":
                 True,
@@ -1442,3 +1460,300 @@ def claim_checkin(telegram_id, reward):
             "total_deposit": int(total or 0),
             "last_checkin_at": now_iso,
         }
+
+
+# =========================================================
+# RESELLER / WHITELABEL BOT
+# =========================================================
+
+def init_reseller_tables(db):
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS reseller_bots (
+            id BIGSERIAL PRIMARY KEY,
+            owner_telegram_id BIGINT UNIQUE NOT NULL,
+            bot_token TEXT UNIQUE NOT NULL,
+            bot_telegram_id BIGINT UNIQUE NOT NULL,
+            bot_username TEXT,
+            bot_name TEXT,
+            margin_percent NUMERIC(6,2) NOT NULL DEFAULT 5,
+            cs_url TEXT,
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            margin_balance BIGINT NOT NULL DEFAULT 0,
+            total_earned BIGINT NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS reseller_buyers (
+            bot_id BIGINT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            first_seen TEXT NOT NULL,
+            PRIMARY KEY (bot_id, telegram_id)
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS reseller_ledger (
+            id BIGSERIAL PRIMARY KEY,
+            bot_id BIGINT NOT NULL,
+            amount BIGINT NOT NULL,
+            balance_after BIGINT NOT NULL,
+            entry_type TEXT NOT NULL,
+            reference TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS reseller_withdrawals (
+            id BIGSERIAL PRIMARY KEY,
+            bot_id BIGINT NOT NULL,
+            owner_telegram_id BIGINT NOT NULL,
+            amount BIGINT NOT NULL,
+            method TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            account_number TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            admin_note TEXT,
+            created_at TEXT NOT NULL,
+            processed_at TEXT
+        )
+    """)
+    db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS reseller_bot_id BIGINT")
+    db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS reseller_margin BIGINT NOT NULL DEFAULT 0")
+    db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS reseller_margin_status TEXT NOT NULL DEFAULT 'NONE'")
+    db.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS reseller_bot_id BIGINT")
+    db.execute("CREATE INDEX IF NOT EXISTS orders_reseller_idx ON orders (reseller_bot_id) WHERE reseller_bot_id IS NOT NULL")
+
+
+def _reseller_ledger(db, bot_id, amount, balance_after, entry_type, reference):
+    db.execute(
+        """INSERT INTO reseller_ledger (bot_id, amount, balance_after, entry_type, reference, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s)""",
+        (bot_id, amount, balance_after, entry_type, reference, now()),
+    )
+
+
+def _credit_reseller_margin(db, order_id):
+    """Kreditkan margin reseller sekali saja saat OTP pertama kali sukses."""
+    row = db.execute(
+        """SELECT reseller_bot_id, reseller_margin, reseller_margin_status
+           FROM orders WHERE order_id = %s FOR UPDATE""",
+        (order_id,),
+    ).fetchone()
+    if not row or not row["reseller_bot_id"]:
+        return
+    margin = int(row["reseller_margin"] or 0)
+    if margin <= 0 or row["reseller_margin_status"] != "NONE":
+        return
+    bot = db.execute(
+        """UPDATE reseller_bots
+           SET margin_balance = margin_balance + %s, total_earned = total_earned + %s
+           WHERE id = %s RETURNING margin_balance""",
+        (margin, margin, row["reseller_bot_id"]),
+    ).fetchone()
+    if not bot:
+        return
+    db.execute("UPDATE orders SET reseller_margin_status = 'CREDITED' WHERE order_id = %s", (order_id,))
+    _reseller_ledger(db, row["reseller_bot_id"], margin, int(bot["margin_balance"]), "MARGIN", order_id)
+
+
+def _reverse_reseller_margin(db, order_id):
+    """Order direfund setelah margin sempat dikreditkan -> tarik kembali."""
+    row = db.execute(
+        """SELECT reseller_bot_id, reseller_margin, reseller_margin_status
+           FROM orders WHERE order_id = %s FOR UPDATE""",
+        (order_id,),
+    ).fetchone()
+    if not row or not row["reseller_bot_id"] or row["reseller_margin_status"] != "CREDITED":
+        return
+    margin = int(row["reseller_margin"] or 0)
+    bot = db.execute(
+        """UPDATE reseller_bots
+           SET margin_balance = margin_balance - %s, total_earned = total_earned - %s
+           WHERE id = %s RETURNING margin_balance""",
+        (margin, margin, row["reseller_bot_id"]),
+    ).fetchone()
+    db.execute("UPDATE orders SET reseller_margin_status = 'REVERSED' WHERE order_id = %s", (order_id,))
+    if bot:
+        _reseller_ledger(db, row["reseller_bot_id"], -margin, int(bot["margin_balance"]), "MARGIN_REVERSAL", order_id)
+
+
+def _reseller_row(row):
+    if not row:
+        return None
+    row = dict(row)
+    row["margin_percent"] = float(row["margin_percent"])
+    return row
+
+
+def get_reseller_by_owner(owner_telegram_id):
+    with get_db() as db:
+        return _reseller_row(db.execute(
+            "SELECT * FROM reseller_bots WHERE owner_telegram_id = %s", (owner_telegram_id,)
+        ).fetchone())
+
+
+def get_reseller_by_id(bot_id):
+    with get_db() as db:
+        return _reseller_row(db.execute(
+            "SELECT * FROM reseller_bots WHERE id = %s", (bot_id,)
+        ).fetchone())
+
+
+def list_runnable_resellers():
+    """Bot reseller yang siap jalan: enabled + Contact CS sudah diatur."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM reseller_bots WHERE enabled = TRUE AND cs_url IS NOT NULL AND cs_url <> '' ORDER BY id"
+        ).fetchall()
+        return [_reseller_row(r) for r in rows]
+
+
+def create_reseller(owner_telegram_id, bot_token, bot_telegram_id, bot_username, bot_name, margin_percent=5):
+    with get_db() as db:
+        if db.execute("SELECT 1 FROM reseller_bots WHERE owner_telegram_id = %s", (owner_telegram_id,)).fetchone():
+            raise ValueError("Anda sudah memiliki bot reseller.")
+        if db.execute(
+            "SELECT 1 FROM reseller_bots WHERE bot_token = %s OR bot_telegram_id = %s",
+            (bot_token, bot_telegram_id),
+        ).fetchone():
+            raise ValueError("Token ini sudah dipakai bot reseller lain.")
+        return _reseller_row(db.execute(
+            """INSERT INTO reseller_bots
+               (owner_telegram_id, bot_token, bot_telegram_id, bot_username, bot_name, margin_percent, enabled, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,TRUE,%s) RETURNING *""",
+            (owner_telegram_id, bot_token, bot_telegram_id, bot_username, bot_name, margin_percent, now()),
+        ).fetchone())
+
+
+def replace_reseller_token(owner_telegram_id, bot_token, bot_telegram_id, bot_username, bot_name):
+    with get_db() as db:
+        if db.execute(
+            """SELECT 1 FROM reseller_bots
+               WHERE (bot_token = %s OR bot_telegram_id = %s) AND owner_telegram_id <> %s""",
+            (bot_token, bot_telegram_id, owner_telegram_id),
+        ).fetchone():
+            raise ValueError("Token ini sudah dipakai bot reseller lain.")
+        return _reseller_row(db.execute(
+            """UPDATE reseller_bots
+               SET bot_token=%s, bot_telegram_id=%s, bot_username=%s, bot_name=%s
+               WHERE owner_telegram_id=%s RETURNING *""",
+            (bot_token, bot_telegram_id, bot_username, bot_name, owner_telegram_id),
+        ).fetchone())
+
+
+_RESELLER_FIELDS = {"margin_percent", "cs_url", "enabled"}
+
+
+def update_reseller(owner_telegram_id, **fields):
+    fields = {k: v for k, v in fields.items() if k in _RESELLER_FIELDS}
+    if not fields:
+        return get_reseller_by_owner(owner_telegram_id)
+    sets = ", ".join(f"{k} = %s" for k in fields)
+    with get_db() as db:
+        return _reseller_row(db.execute(
+            f"UPDATE reseller_bots SET {sets} WHERE owner_telegram_id = %s RETURNING *",
+            (*fields.values(), owner_telegram_id),
+        ).fetchone())
+
+
+def register_reseller_buyer(bot_id, telegram_id):
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO reseller_buyers (bot_id, telegram_id, first_seen)
+               VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (bot_id, telegram_id, now()),
+        )
+
+
+def get_reseller_stats(bot_id):
+    with get_db() as db:
+        buyers = db.execute("SELECT COUNT(*) AS c FROM reseller_buyers WHERE bot_id = %s", (bot_id,)).fetchone()["c"]
+        success = db.execute(
+            """SELECT COUNT(*) AS c FROM orders
+               WHERE reseller_bot_id = %s AND status IN ('SUCCESS','COMPLETED')""",
+            (bot_id,),
+        ).fetchone()["c"]
+        return {"buyers": int(buyers), "success": int(success)}
+
+
+def set_deposit_reseller(deposit_id, bot_id):
+    with get_db() as db:
+        db.execute("UPDATE deposits SET reseller_bot_id = %s WHERE deposit_id = %s", (bot_id, deposit_id))
+
+
+def get_reseller_token(bot_id):
+    if not bot_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT bot_token FROM reseller_bots WHERE id = %s", (bot_id,)).fetchone()
+        return row["bot_token"] if row else None
+
+
+# ---------------- WITHDRAW ----------------
+
+def create_reseller_withdrawal(owner_telegram_id, amount, method, provider_name, account_number, account_name):
+    """Potong saldo margin dan buat permintaan WD (atomic)."""
+    amount = int(amount)
+    with get_db() as db:
+        bot = db.execute(
+            "SELECT id, margin_balance FROM reseller_bots WHERE owner_telegram_id = %s FOR UPDATE",
+            (owner_telegram_id,),
+        ).fetchone()
+        if not bot:
+            raise ValueError("Bot reseller tidak ditemukan.")
+        if db.execute(
+            "SELECT 1 FROM reseller_withdrawals WHERE bot_id = %s AND status = 'PENDING'", (bot["id"],)
+        ).fetchone():
+            raise ValueError("Masih ada penarikan yang menunggu proses admin.")
+        if amount <= 0 or int(bot["margin_balance"]) < amount:
+            raise ValueError("Saldo margin tidak cukup.")
+        after = int(bot["margin_balance"]) - amount
+        db.execute("UPDATE reseller_bots SET margin_balance = %s WHERE id = %s", (after, bot["id"]))
+        wd = db.execute(
+            """INSERT INTO reseller_withdrawals
+               (bot_id, owner_telegram_id, amount, method, provider_name, account_number, account_name, status, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDING',%s) RETURNING *""",
+            (bot["id"], owner_telegram_id, amount, method, provider_name, account_number, account_name, now()),
+        ).fetchone()
+        _reseller_ledger(db, bot["id"], -amount, after, "WITHDRAW", f"WD-{wd['id']}")
+        return dict(wd)
+
+
+def get_reseller_withdrawal(wd_id):
+    with get_db() as db:
+        row = db.execute("SELECT * FROM reseller_withdrawals WHERE id = %s", (wd_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_reseller_withdrawals(owner_telegram_id, limit=10):
+    with get_db() as db:
+        return [dict(r) for r in db.execute(
+            """SELECT * FROM reseller_withdrawals WHERE owner_telegram_id = %s
+               ORDER BY id DESC LIMIT %s""",
+            (owner_telegram_id, limit),
+        ).fetchall()]
+
+
+def process_reseller_withdrawal(wd_id, approve, admin_note=None):
+    """Admin menyetujui (sudah transfer manual) atau menolak (saldo dikembalikan)."""
+    with get_db() as db:
+        wd = db.execute("SELECT * FROM reseller_withdrawals WHERE id = %s FOR UPDATE", (wd_id,)).fetchone()
+        if not wd:
+            raise ValueError("Penarikan tidak ditemukan.")
+        if wd["status"] != "PENDING":
+            raise ValueError("Penarikan sudah diproses.")
+        status = "PAID" if approve else "REJECTED"
+        if not approve:
+            bot = db.execute(
+                "UPDATE reseller_bots SET margin_balance = margin_balance + %s WHERE id = %s RETURNING margin_balance",
+                (wd["amount"], wd["bot_id"]),
+            ).fetchone()
+            if bot:
+                _reseller_ledger(db, wd["bot_id"], int(wd["amount"]), int(bot["margin_balance"]), "WITHDRAW_REFUND", f"WD-{wd_id}")
+        row = db.execute(
+            """UPDATE reseller_withdrawals SET status=%s, admin_note=%s, processed_at=%s
+               WHERE id=%s RETURNING *""",
+            (status, admin_note, now(), wd_id),
+        ).fetchone()
+        return dict(row)

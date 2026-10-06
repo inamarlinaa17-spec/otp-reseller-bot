@@ -25,6 +25,9 @@ from urllib.parse import quote
 
 from psycopg.errors import UniqueViolation
 
+import reseller
+from reseller_ctx import current_reseller
+
 from flask import Flask, request, jsonify
 
 from telegram import (
@@ -59,6 +62,8 @@ from config import (
 )
 
 from database import (
+    get_reseller_token,
+    get_reseller_stats,
     init_database,
     create_user,
     get_balance,
@@ -343,6 +348,13 @@ OTP_SERVICES = [
 # HELPER
 # =========================================================
 
+def reseller_buyer_count(bot_id):
+    try:
+        return get_reseller_stats(bot_id)["buyers"]
+    except Exception:
+        return 0
+
+
 def is_admin(user_id):
 
     return user_id == ADMIN_ID
@@ -468,62 +480,33 @@ def canonical_5sim_service(service):
 
 def user_menu():
 
-    return InlineKeyboardMarkup([
+    is_reseller_bot = current_reseller() is not None
 
+    rows = [
+        [InlineKeyboardButton("📖 Cara Penggunaan", callback_data="cara")],
         [
-            InlineKeyboardButton(
-                "📖 Cara Penggunaan",
-                callback_data="cara"
-            )
+            InlineKeyboardButton("📱 Order OTP", callback_data="order"),
+            InlineKeyboardButton("💳 Deposit", callback_data="user_deposit"),
         ],
-
         [
-            InlineKeyboardButton(
-                "📱 Order OTP",
-                callback_data="order"
-            ),
-
-            InlineKeyboardButton(
-                "💳 Deposit",
-                callback_data="user_deposit"
-            )
+            InlineKeyboardButton("📋 Histori Order", callback_data="user_history_order"),
+            InlineKeyboardButton("📜 Histori Deposit", callback_data="user_history_depo"),
         ],
+    ]
 
-        [
-            InlineKeyboardButton(
-                "📋 Histori Order",
-                callback_data="user_history_order"
-            ),
+    if not is_reseller_bot:
+        # Saldo gratis / iklan / referral hanya di bot utama (biayanya ditanggung bot utama).
+        rows.append([
+            InlineKeyboardButton("👥 Referral", callback_data="referral"),
+            InlineKeyboardButton("🎁 Saldo Gratis", callback_data="checkin"),
+        ])
+        rows.append([InlineKeyboardButton("📺 Nonton Iklan • Dapat Saldo", callback_data="monetag_ads")])
+        rows.append([InlineKeyboardButton("🤝 RESELLER", callback_data="reseller")])
 
-            InlineKeyboardButton(
-                "📜 Histori Deposit",
-                callback_data="user_history_depo"
-            )
-        ],
+    rows.append([InlineKeyboardButton("📜 Syarat & Ketentuan", callback_data="user_terms")])
+    rows.append([InlineKeyboardButton("💬 Contact CS", callback_data="cs")])
 
-        [
-            InlineKeyboardButton(
-                "👥 Referral",
-                callback_data="referral"
-            ),
-
-            InlineKeyboardButton(
-                "🎁 Saldo Gratis",
-                callback_data="checkin"
-            )
-        ],
-
-        [InlineKeyboardButton("📺 Nonton Iklan • Dapat Saldo", callback_data="monetag_ads")],
-        [InlineKeyboardButton("📜 Syarat & Ketentuan", callback_data="user_terms")],
-
-        [
-            InlineKeyboardButton(
-                "💬 Contact CS",
-                callback_data="cs"
-            )
-        ]
-
-    ])
+    return InlineKeyboardMarkup(rows)
 
 
 # Syarat & Ketentuan: Telegraph page is created on first request.
@@ -768,12 +751,13 @@ def cek_status_midtrans(
 def send_telegram_message(
     chat_id,
     text,
-    reply_markup=None
+    reply_markup=None,
+    token=None
 ):
 
     url = (
         "https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
+        f"bot{token or BOT_TOKEN}/sendMessage"
     )
 
     payload = {
@@ -825,7 +809,7 @@ def send_telegram_message(
         )
 
 
-def delete_telegram_message(chat_id, message_id):
+def delete_telegram_message(chat_id, message_id, token=None):
     """Delete a Telegram message synchronously via Bot API.
 
     Used by the PremOTP payment completion path so the QRIS invoice
@@ -833,7 +817,7 @@ def delete_telegram_message(chat_id, message_id):
     """
     if not chat_id or not message_id:
         return False
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
+    url = f"https://api.telegram.org/bot{token or BOT_TOKEN}/deleteMessage"
     payload = {"chat_id": chat_id, "message_id": int(message_id)}
     req = Request(
         url,
@@ -856,7 +840,8 @@ def send_premotp_deposit_success(result):
     old_message_id = result.get("user_message_id")
 
     # Remove the QRIS photo/caption and its Batal button first.
-    delete_telegram_message(chat_id, old_message_id)
+    _token = get_reseller_token(result.get("reseller_bot_id"))
+    delete_telegram_message(chat_id, old_message_id, token=_token)
 
     keyboard = {
         "inline_keyboard": [
@@ -872,7 +857,7 @@ def send_premotp_deposit_success(result):
         f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"
     )
 
-    send_telegram_message(chat_id, text, reply_markup=keyboard)
+    send_telegram_message(chat_id, text, reply_markup=keyboard, token=_token)
 
 
 # =========================================================
@@ -894,7 +879,8 @@ def complete_deposit_payment(
                 telegram_id,
                 amount,
                 status,
-                user_message_id
+                user_message_id,
+                reseller_bot_id
             FROM deposits
             WHERE deposit_id = %s
             FOR UPDATE
@@ -1022,6 +1008,9 @@ def complete_deposit_payment(
 
             "user_message_id":
                 deposit.get("user_message_id"),
+
+            "reseller_bot_id":
+                deposit.get("reseller_bot_id"),
 
             "amount":
                 deposit["amount"],
@@ -1430,7 +1419,9 @@ def midtrans_webhook():
                         f"🧾 ID: "
                         f"<code>{order_id}</code>\n\n"
                         f"💰 Saldo sekarang: "
-                        f"<b>{format_rupiah(result['new_balance'])}</b>"
+                        f"<b>{format_rupiah(result['new_balance'])}</b>",
+
+                        token=get_reseller_token(result.get("reseller_bot_id"))
 
                     )
 
@@ -1548,6 +1539,9 @@ async def user_start(
     )
 
     total_user = get_total_users()
+    _rs = current_reseller()
+    if _rs:
+        total_user = reseller_buyer_count(_rs["id"])
 
     waktu = get_wib_time()
 
@@ -1588,9 +1582,7 @@ async def user_start(
 <b>Bot Stats :</b>
 ├ Total User : {total_user}
 
-<b>Info Promo :</b>
-├ Channel : {promo_channel_display}
-
+{"" if _rs else "<b>Info Promo :</b>" + chr(10) + "├ Channel : " + promo_channel_display + chr(10)}
 <b>Shortcut :</b>
 ├ /start - Mulai Bot
 {maintenance_notice}
@@ -3681,6 +3673,39 @@ async def command_server(update, context, server):
     )
 
 
+def _bot_for_reseller_id(default_bot, bot_id):
+    """Bot Telegram milik reseller (kalau jalan); selain itu bot bawaan."""
+    if bot_id and reseller.MANAGER:
+        bot = reseller.MANAGER.bot_for(bot_id)
+        if bot:
+            return bot
+    return default_bot
+
+
+def _main_bot(context):
+    """Bot utama (untuk kirim ke admin), meski update datang dari bot reseller."""
+    if current_reseller() is not None and _WEBHOOK_APPLICATION is not None:
+        return _WEBHOOK_APPLICATION.bot
+    return context.bot
+
+
+_QRIS_PHOTO_CACHE = {}
+
+
+async def _manual_qris_photo(qris_file_id):
+    """file_id Telegram hanya berlaku untuk bot yang mengunggahnya.
+    Di bot reseller, ambil gambar lewat bot utama lalu kirim sebagai bytes."""
+    if current_reseller() is None or _WEBHOOK_APPLICATION is None:
+        return qris_file_id
+    cached = _QRIS_PHOTO_CACHE.get(qris_file_id)
+    if cached is None:
+        tg_file = await _WEBHOOK_APPLICATION.bot.get_file(qris_file_id)
+        cached = bytes(await tg_file.download_as_bytearray())
+        _QRIS_PHOTO_CACHE.clear()
+        _QRIS_PHOTO_CACHE[qris_file_id] = cached
+    return cached
+
+
 def _manual_admin_url(deposit_id, amount, payment_amount):
     message = (
         f"Konfirmasi QRIS MANUAL AZHURA\n"
@@ -3746,9 +3771,9 @@ async def _send_manual_qris_invoice_to_chat(context, chat_id, user, amount):
         try:
             with get_db() as db:
                 db.execute(
-                    """INSERT INTO deposits (deposit_id,telegram_id,amount,status,payment_reference,created_at,payment_method,payment_amount,unique_code)
-                       VALUES (%s,%s,%s,'PENDING',%s,%s,'MANUAL_QRIS',%s,%s)""",
-                    (deposit_id, user.id, amount, qris_file_id, now(), payment_amount, code)
+                    """INSERT INTO deposits (deposit_id,telegram_id,amount,status,payment_reference,created_at,payment_method,payment_amount,unique_code,reseller_bot_id)
+                       VALUES (%s,%s,%s,'PENDING',%s,%s,'MANUAL_QRIS',%s,%s,%s)""",
+                    (deposit_id, user.id, amount, qris_file_id, now(), payment_amount, code, (current_reseller() or {}).get("id"))
                 )
             inserted = True
             break
@@ -3761,9 +3786,16 @@ async def _send_manual_qris_invoice_to_chat(context, chat_id, user, amount):
         if last_unique_error:
             raise RuntimeError("Kode unik sedang dipakai deposit lain. Silakan coba lagi.") from last_unique_error
         raise RuntimeError("Gagal membuat deposit QRIS manual.")
+    try:
+        qris_photo = await _manual_qris_photo(qris_file_id)
+    except Exception:
+        logger.exception("Gagal menyiapkan gambar QRIS untuk bot reseller")
+        with get_db() as db:
+            db.execute("UPDATE deposits SET status='FAILED' WHERE deposit_id=%s", (deposit_id,))
+        raise RuntimeError("Gagal menampilkan QRIS. Silakan coba metode lain.")
     await context.bot.send_photo(
         chat_id=chat_id,
-        photo=qris_file_id,
+        photo=qris_photo,
         caption=_manual_deposit_message(deposit_id, amount, payment_amount, code),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
@@ -3781,9 +3813,9 @@ async def _create_auto_deposit_invoice(context, chat_id, user, amount, message_i
     deposit_id = "DEP-" + uuid.uuid4().hex[:12].upper()
     with get_db() as db:
         db.execute(
-            """INSERT INTO deposits (deposit_id,telegram_id,amount,status,created_at)
-               VALUES (%s,%s,%s,%s,%s)""",
-            (deposit_id, user.id, amount, "PENDING", now())
+            """INSERT INTO deposits (deposit_id,telegram_id,amount,status,created_at,reseller_bot_id)
+               VALUES (%s,%s,%s,%s,%s,%s)""",
+            (deposit_id, user.id, amount, "PENDING", now(), (current_reseller() or {}).get("id"))
         )
 
     try:
@@ -3856,9 +3888,9 @@ async def _create_premotp_qris_invoice(context, chat_id, user, amount, message_i
     deposit_id = "DEP-" + uuid.uuid4().hex[:12].upper()
     with get_db() as db:
         db.execute(
-            """INSERT INTO deposits (deposit_id,telegram_id,amount,status,created_at,payment_method)
-               VALUES (%s,%s,%s,'PENDING',%s,'PREMOTP_QRIS')""",
-            (deposit_id, user.id, int(amount), now()),
+            """INSERT INTO deposits (deposit_id,telegram_id,amount,status,created_at,payment_method,reseller_bot_id)
+               VALUES (%s,%s,%s,'PENDING',%s,'PREMOTP_QRIS',%s)""",
+            (deposit_id, user.id, int(amount), now(), (current_reseller() or {}).get("id")),
         )
     try:
         data = await asyncio.to_thread(create_premotp_qris, deposit_id, int(amount))
@@ -3918,7 +3950,7 @@ async def _create_premotp_qris_invoice(context, chat_id, user, amount, message_i
 
 def _complete_manual_deposit(deposit_id):
     with get_db() as db:
-        deposit = db.execute("SELECT deposit_id,telegram_id,amount,payment_amount,unique_code,status,payment_method,user_message_id FROM deposits WHERE deposit_id=%s FOR UPDATE", (deposit_id,)).fetchone()
+        deposit = db.execute("SELECT deposit_id,telegram_id,amount,payment_amount,unique_code,status,payment_method,user_message_id,reseller_bot_id FROM deposits WHERE deposit_id=%s FOR UPDATE", (deposit_id,)).fetchone()
         if not deposit:
             raise ValueError("Deposit tidak ditemukan.")
         if deposit["payment_method"] != "MANUAL_QRIS":
@@ -4313,11 +4345,32 @@ def _normalize_otp_response(data):
     return normalized
 
 
+class _BotApp:
+    """Bungkus Application agar .bot menunjuk ke bot reseller milik order."""
+
+    def __init__(self, app, bot):
+        self._app = app
+        self.bot = bot
+
+    def __getattr__(self, name):
+        return getattr(self._app, name)
+
+
+def _app_for_order(application, order):
+    bot_id = (order or {}).get("reseller_bot_id")
+    if bot_id and reseller.MANAGER:
+        bot = reseller.MANAGER.bot_for(bot_id)
+        if bot:
+            return _BotApp(application, bot)
+    return application
+
+
 async def _send_otp_received_message(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
     if not order or str(order.get("status") or "").upper() not in {"PENDING", "WAITING_OTP"}:
         return False
+    application = _app_for_order(application, order)
 
     data_sms = _normalize_otp_response(data_sms)
     sms_list = data_sms.get("sms") or []
@@ -4597,6 +4650,7 @@ async def _auto_expire_order(application, order, provider_order_id):
             return False
         if _order_has_received_otp(current):
             return False
+        application = _app_for_order(application, current)
 
         cancel_result = await _cancel_provider_and_verify(provider, provider_order_id, order_id)
         if not cancel_result or cancel_result.get("response") != "OK":
@@ -5120,6 +5174,8 @@ async def post_init(application):
     application.create_task(auto_process_pending_orders(application))
     application.create_task(auto_notify_web_otp(application))
     application.create_task(reconcile_pending_premotp_qris(application))
+    if reseller.MANAGER:
+        application.create_task(reseller.MANAGER.sync_loop())
 
 
 # =========================================================
@@ -7685,6 +7741,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             "🔔 <b>KONFIRMASI PEMBAYARAN QRIS MANUAL</b>\n\n"
             f"👤 User ID: <code>{user_id}</code>\n"
             + (f"👤 Username: <b>@{escape(username)}</b>\n" if username else "")
+            + (f"🤖 Via bot reseller: <b>@{escape(str(context.bot.username or '-'))}</b>\n" if current_reseller() else "")
             + f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
             + f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n"
             + f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n"
@@ -7696,7 +7753,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             [InlineKeyboardButton("✅ Terima & Tambah Saldo", callback_data=f"admin_manual_approve:{deposit_id}")],
             [InlineKeyboardButton("❌ Tolak", callback_data=f"admin_manual_reject:{deposit_id}")],
         ])
-        await context.bot.send_message(
+        await _main_bot(context).send_message(
             chat_id=ADMIN_ID,
             text=admin_text,
             parse_mode="HTML",
@@ -7705,6 +7762,9 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         admin_url = _manual_admin_url(
             deposit_id, int(deposit["amount"]), int(deposit["payment_amount"])
         )
+        if current_reseller():
+            # Pembeli bot reseller menghubungi CS reseller, bukan admin pusat.
+            admin_url = current_reseller().get("cs_url") or admin_url
         # Setelah user menyatakan sudah membayar, invoice QRIS lama
         # dihapus agar QRIS tidak tetap tampil. Pada tahap ini user
         # hanya boleh melihat tombol untuk menghubungi admin.
@@ -8119,7 +8179,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
     if data == "cs":
 
+        _rs = current_reseller()
         username = str(ADMIN_USERNAME or "").strip().lstrip("@")
+        if _rs:
+            username = str(_rs.get("cs_url") or "").rstrip("/").rsplit("/", 1)[-1]
         if username:
             contact_text = f"Hubungi: <a href=\"https://t.me/{escape(username)}\">@{escape(username)}</a>"
             buttons = [
@@ -9150,11 +9213,12 @@ async def admin_callback(
                     f"💰 Saldo sekarang: <b>{format_rupiah(result['new_balance'])}</b>"
                 )
                 user_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Utama", callback_data="user_home")]])
+                user_bot = _bot_for_reseller_id(context.bot, result.get("reseller_bot_id"))
                 edited_user_message = False
                 user_message_id = result.get("user_message_id")
                 if user_message_id:
                     try:
-                        await context.bot.edit_message_text(
+                        await user_bot.edit_message_text(
                             chat_id=result["telegram_id"],
                             message_id=int(user_message_id),
                             text=approved_text,
@@ -9165,7 +9229,7 @@ async def admin_callback(
                     except Exception:
                         logger.exception("Gagal mengedit pesan konfirmasi user untuk deposit %s", deposit_id)
                 if not edited_user_message:
-                    await context.bot.send_message(
+                    await user_bot.send_message(
                         chat_id=result["telegram_id"],
                         text=approved_text,
                         parse_mode="HTML",
@@ -9204,7 +9268,7 @@ async def admin_callback(
         try:
             with get_db() as db:
                 deposit = db.execute(
-                    "SELECT telegram_id,status,amount,payment_amount,unique_code FROM deposits WHERE deposit_id=%s",
+                    "SELECT telegram_id,status,amount,payment_amount,unique_code,reseller_bot_id FROM deposits WHERE deposit_id=%s",
                     (deposit_id,),
                 ).fetchone()
                 if not deposit or deposit["status"] != "PENDING":
@@ -9215,7 +9279,7 @@ async def admin_callback(
                     (now(), deposit_id),
                 )
             try:
-                await context.bot.send_message(
+                await _bot_for_reseller_id(context.bot, deposit.get("reseller_bot_id")).send_message(
                     chat_id=deposit["telegram_id"],
                     text=(
                         "❌ <b>KONFIRMASI DEPOSIT QRIS MANUAL DITOLAK</b>\n\n"
@@ -9558,6 +9622,18 @@ async def button_handler(
 
         return
 
+    # Menu RESELLER (hanya bot utama) + aksi admin withdraw reseller.
+    if query.data == "reseller" or query.data.startswith("rs:"):
+        try:
+            await reseller.handle_callback(query, context)
+        finally:
+            try:
+                await query.answer()
+            except Exception:
+                pass
+        return
+    context.user_data.pop("rs_state", None)
+
     if is_maintenance_enabled() and not is_admin(user_id):
         blocked_prefixes = (
             "otp_server:", "otp_premotp_type:", "otp_type_services:", "otp_services:", "otp_service:", "otp_country:",
@@ -9652,6 +9728,10 @@ async def text_handler(
 
     if not update.message:
 
+        return
+
+    # Alur menu RESELLER (input token, Contact CS, margin, withdraw).
+    if await reseller.handle_text(update, context):
         return
 
     # Admin manual balance: amount is entered after selecting a user.
@@ -10206,9 +10286,24 @@ def run_flask():
 # RUN BOT
 # =========================================================
 
+def _register_reseller_handlers(application):
+    """Handler untuk bot reseller (subset dari bot utama; tanpa menu admin/gratisan)."""
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("layanan1", lambda u, c: command_server(u, c, "5sim")))
+    application.add_handler(CommandHandler("layanan2", lambda u, c: command_server(u, c, "rumahotp")))
+    application.add_handler(CommandHandler("layanan3", lambda u, c: command_server(u, c, "premotp")))
+    application.add_handler(CommandHandler("server1", lambda u, c: command_server(u, c, "5sim")))
+    application.add_handler(CommandHandler("server2", lambda u, c: command_server(u, c, "rumahotp")))
+    application.add_handler(CommandHandler("deposit", command_deposit))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    application.add_error_handler(error_handler)
+
+
 def run():
 
     init_database()
+    reseller.init_manager(_register_reseller_handlers)
 
     application = (
 

@@ -1,6 +1,7 @@
 import requests
 import time
 import threading
+from reseller_ctx import current_reseller, add_margin
 from decimal import Decimal, ROUND_CEILING
 
 from config import (
@@ -451,7 +452,12 @@ def hitung_harga_jual_idr(
         sell = cost * (Decimal("1") + margin)
         # Round up to the nearest whole rupiah so the configured margin
         # is never lost because of rounding.
-        return int(sell.to_integral_value(rounding=ROUND_CEILING))
+        base_price = int(sell.to_integral_value(rounding=ROUND_CEILING))
+        # Bot reseller: harga jual = harga bot utama + margin reseller.
+        reseller = current_reseller()
+        if reseller:
+            return add_margin(base_price, reseller["margin_percent"])
+        return base_price
     except Exception:
         return 0
 
