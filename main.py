@@ -64,6 +64,10 @@ from config import (
 from database import (
     get_reseller_token,
     get_reseller_stats,
+    admin_list_resellers,
+    admin_get_reseller_detail,
+    admin_set_reseller_block,
+    admin_delete_reseller,
     init_database,
     create_user,
     get_balance,
@@ -608,6 +612,13 @@ def admin_menu():
             InlineKeyboardButton(
                 "📊 Statistik",
                 callback_data="admin_stats"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🤖 RESELLER",
+                callback_data="admin_resellers"
             )
         ],
         [
@@ -8950,6 +8961,76 @@ async def _admin_deposit_search_result(query, telegram_id):
 
 
 # =========================================================
+# ADMIN RESELLER PANEL
+# =========================================================
+
+def _admin_reseller_list_markup(rows):
+    buttons = []
+    for row in rows:
+        bot_name = str(row.get("bot_name") or row.get("bot_username") or f"Bot #{row.get('id')}")[:28]
+        status = "⛔ BLOCK" if row.get("admin_blocked") else ("🟢 ON" if row.get("enabled") else "🔴 OFF")
+        buttons.append([InlineKeyboardButton(
+            f"{status} {bot_name}", callback_data=f"admin_reseller:{int(row['id'])}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _admin_reseller_list(query):
+    rows = admin_list_resellers(limit=100)
+    if not rows:
+        await query.edit_message_text(
+            "🤖 <b>RESELLER</b>\n\nBelum ada bot reseller yang terdaftar.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home")]])
+        )
+        return
+    lines = [f"🤖 <b>RESELLER</b> — {len(rows)} bot\n", "Pilih reseller untuk melihat detail:"]
+    for r in rows[:20]:
+        status = "⛔ BLOCK" if r.get("admin_blocked") else ("🟢 ON" if r.get("enabled") else "🔴 OFF")
+        uname = ("@" + str(r.get("bot_username"))) if r.get("bot_username") else "-"
+        lines.append(f"• <b>{escape(str(r.get('bot_name') or '-'))}</b> {escape(uname)} — {status} — 👥 {r.get('buyers',0)} user — 📦 {r.get('orders',0)} order")
+    if len(rows) > 20:
+        lines.append(f"\nMenampilkan 20 dari {len(rows)} reseller.")
+    await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=_admin_reseller_list_markup(rows[:20]))
+
+
+async def _admin_reseller_detail(query, bot_id):
+    data = admin_get_reseller_detail(bot_id, limit=50)
+    if not data:
+        await query.edit_message_text("❌ Reseller tidak ditemukan.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ RESELLER", callback_data="admin_resellers")]]))
+        return
+    b = data["bot"]
+    o = data.get("owner") or {}
+    status = "⛔ DIBLOKIR" if b.get("admin_blocked") else ("🟢 AKTIF" if b.get("enabled") else "🔴 NONAKTIF")
+    uname = ("@" + str(b.get("bot_username"))) if b.get("bot_username") else "-"
+    owner = ("@" + str(o.get("username"))) if o.get("username") else str(b.get("owner_telegram_id"))
+    text = (
+        "🤖 <b>DETAIL RESELLER</b>\n\n"
+        f"🤖 Bot: <b>{escape(str(b.get('bot_name') or '-'))}</b>\n"
+        f"🔗 Username: {escape(uname)}\n"
+        f"👤 Owner: <code>{escape(owner)}</code>\n"
+        f"📡 Status: <b>{status}</b>\n"
+        f"💵 Margin: <b>{b.get('margin_percent',0):g}%</b>\n"
+        f"💰 Saldo margin: <b>{format_rupiah(b.get('margin_balance',0))}</b>\n"
+        f"🏆 Total earned: <b>{format_rupiah(b.get('total_earned',0))}</b>\n\n"
+        f"👥 Pengguna bot: <b>{len(data.get('buyers',[]))}</b>\n"
+        f"📦 Order: <b>{len(data.get('orders',[]))}</b>\n"
+        f"💳 Deposit: <b>{len(data.get('deposits',[]))}</b>\n"
+        f"🏧 Withdraw: <b>{len(data.get('withdrawals',[]))}</b>\n\n"
+        "Detail histori tersedia di dashboard web pada menu RESELLER."
+    )
+    buttons = []
+    if b.get("admin_blocked"):
+        buttons.append([InlineKeyboardButton("🟢 UNBLOCK BOT", callback_data=f"admin_reseller_unblock:{bot_id}")])
+    else:
+        buttons.append([InlineKeyboardButton("⛔ BLOCK BOT", callback_data=f"admin_reseller_block:{bot_id}")])
+    buttons.append([InlineKeyboardButton("🗑 HAPUS BOT RESELLER", callback_data=f"admin_reseller_delete:{bot_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ Daftar Reseller", callback_data="admin_resellers")])
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+# =========================================================
 # ADMIN CALLBACK
 # =========================================================
 
@@ -8969,7 +9050,34 @@ async def admin_callback(
 
     ]
 
-    if query.data == "admin_users":
+    if query.data == "admin_resellers":
+        await _admin_reseller_list(query)
+
+    elif query.data.startswith("admin_reseller:"):
+        try:
+            bot_id = int(query.data.split(":", 1)[1])
+            await _admin_reseller_detail(query, bot_id)
+        except Exception as e:
+            await query.edit_message_text(f"❌ Gagal membuka reseller: {escape(str(e))}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ RESELLER", callback_data="admin_resellers")]]))
+
+    elif query.data.startswith("admin_reseller_block:") or query.data.startswith("admin_reseller_unblock:"):
+        bot_id = int(query.data.split(":", 1)[1])
+        blocked = query.data.startswith("admin_reseller_block:")
+        try:
+            admin_set_reseller_block(bot_id, blocked)
+            await _admin_reseller_detail(query, bot_id)
+        except Exception as e:
+            await query.answer(str(e)[:180], show_alert=True)
+
+    elif query.data.startswith("admin_reseller_delete:"):
+        bot_id = int(query.data.split(":", 1)[1])
+        try:
+            admin_delete_reseller(bot_id)
+            await query.edit_message_text("✅ <b>Bot reseller dihapus.</b>\n\nHistori transaksi tetap diarsipkan dan dapat dipantau dari dashboard web.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ RESELLER", callback_data="admin_resellers")]]))
+        except Exception as e:
+            await query.answer(str(e)[:180], show_alert=True)
+
+    elif query.data == "admin_users":
         await _admin_users_page(query, 0)
 
     elif query.data.startswith("admin_users_page:"):
@@ -9582,6 +9690,7 @@ async def button_handler(
         "admin_orders",
         "admin_provider",
         "admin_stats",
+        "admin_resellers",
         "admin_maintenance",
         "admin_home"
 
@@ -9608,6 +9717,10 @@ async def button_handler(
         or query.data.startswith("admin_server_toggle:")
         or query.data.startswith("admin_manual_approve:")
         or query.data.startswith("admin_manual_reject:")
+        or query.data.startswith("admin_reseller:")
+        or query.data.startswith("admin_reseller_block:")
+        or query.data.startswith("admin_reseller_unblock:")
+        or query.data.startswith("admin_reseller_delete:")
     )
 
     if is_extended_admin_callback:
