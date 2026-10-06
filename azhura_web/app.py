@@ -805,6 +805,58 @@ def web_admin_users():
     else:items=query('SELECT telegram_id,username,first_name,balance,created_at FROM users ORDER BY id DESC LIMIT 100')
     return jsonify(items=items)
 
+@app.get('/api/admin/resellers')
+def web_admin_resellers():
+    denied=web_admin_required()
+    if denied:return denied
+    search=request.args.get('q','').strip()[:80]
+    archived=request.args.get('archived','0').lower() in ('1','true','yes','on')
+    try:
+        return jsonify(items=rc.db.admin_list_resellers(search, include_archived=archived, limit=500), archived=archived)
+    except psycopg.Error:
+        app.logger.exception('Gagal memuat reseller admin')
+        return err('Data reseller tidak dapat dimuat.',503)
+
+@app.get('/api/admin/resellers/<int:bot_id>')
+def web_admin_reseller_detail(bot_id):
+    denied=web_admin_required()
+    if denied:return denied
+    archived=request.args.get('archived','0').lower() in ('1','true','yes','on')
+    try:
+        data=rc.db.admin_get_reseller_detail(bot_id, archived=archived, limit=200)
+    except psycopg.Error:
+        app.logger.exception('Gagal memuat detail reseller %s',bot_id)
+        return err('Detail reseller tidak dapat dimuat.',503)
+    if not data:return err('Reseller tidak ditemukan.',404)
+    return jsonify(**data)
+
+@app.post('/api/admin/resellers/<int:bot_id>/block')
+def web_admin_reseller_block(bot_id):
+    denied=web_admin_required()
+    if denied:return denied
+    data=request.get_json(silent=True) or {}
+    if type(data.get('blocked')) is not bool:return err('Status block tidak valid')
+    try:
+        bot=rc.db.admin_set_reseller_block(bot_id,data['blocked'])
+    except ValueError as e:return err(str(e),404)
+    except psycopg.Error:
+        app.logger.exception('Gagal mengubah block reseller %s',bot_id)
+        return err('Gagal mengubah status reseller.',503)
+    return jsonify(ok=True,bot=bot)
+
+@app.post('/api/admin/resellers/<int:bot_id>/delete')
+def web_admin_reseller_delete(bot_id):
+    denied=web_admin_required()
+    if denied:return denied
+    try:
+        bot=rc.db.admin_delete_reseller(bot_id)
+    except ValueError as e:return err(str(e),409)
+    except psycopg.Error:
+        app.logger.exception('Gagal menghapus reseller %s',bot_id)
+        return err('Gagal menghapus bot reseller.',503)
+    return jsonify(ok=True,deleted_id=int(bot['id']))
+
+
 @app.post('/api/admin/maintenance')
 def web_admin_maintenance():
     denied=web_admin_required()
