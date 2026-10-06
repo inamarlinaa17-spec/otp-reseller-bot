@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from flask import Flask, request, jsonify, send_from_directory, session, Response
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 from database import create_pending_order, refund_order, save_provider_order
+import reseller_core as rc
 # Web pricing is isolated from bot config: importing provider.py also imports
 # config.py, whose bot-only required variables can crash this web service.
 from decimal import Decimal, ROUND_CEILING
@@ -819,6 +820,68 @@ def web_admin_maintenance():
     app.logger.warning('Web admin %s set maintenance %s=%s',uid(),target,data['enabled'])
     return jsonify(ok=True,maintenance=web_maintenance_flags())
 
+
+# ---------------- RESELLER (panel web) ----------------
+def reseller_payload():
+    data=rc.panel_data(uid())
+    if not data:return {'has_bot':False,'min_margin':rc.MIN_MARGIN,'max_margin':rc.MAX_MARGIN,'min_withdraw':rc.MIN_WITHDRAW}
+    b,st=data['bot'],data['stats']
+    label,active=rc.status_label(b,True)
+    return {'has_bot':True,'min_margin':rc.MIN_MARGIN,'max_margin':rc.MAX_MARGIN,'min_withdraw':rc.MIN_WITHDRAW,
+        'bot':{'name':b['bot_name'],'username':b['bot_username'],'status':label,'active':active,'enabled':b['enabled'],
+        'margin':b['margin_percent'],'cs_url':b['cs_url'],'balance':int(b['margin_balance']),'total_earned':int(b['total_earned']),
+        'buyers':st['buyers'],'success':st['success']}}
+def reseller_call(fn,*a):
+    try:return jsonify(ok=True,**{'reseller':(fn(*a),reseller_payload())[1]})
+    except ValueError as e:return err(str(e))
+    except psycopg.errors.UniqueViolation:return err('Token ini sudah dipakai bot reseller lain.')
+@app.get('/api/reseller')
+def reseller_info():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    return jsonify(ok=True,reseller=reseller_payload())
+@app.post('/api/reseller/create')
+def reseller_create():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    return reseller_call(rc.register_bot,uid(),str((request.get_json(silent=True) or {}).get('token','')).strip())
+@app.post('/api/reseller/token')
+def reseller_token():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    return reseller_call(rc.change_token,uid(),str((request.get_json(silent=True) or {}).get('token','')).strip())
+@app.post('/api/reseller/cs')
+def reseller_cs():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    return reseller_call(rc.set_cs,uid(),(request.get_json(silent=True) or {}).get('cs',''))
+@app.post('/api/reseller/margin')
+def reseller_margin():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    return reseller_call(rc.set_margin,uid(),(request.get_json(silent=True) or {}).get('margin',''))
+@app.post('/api/reseller/toggle')
+def reseller_toggle():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    return reseller_call(rc.set_enabled,uid(),bool((request.get_json(silent=True) or {}).get('enabled')))
+@app.get('/api/reseller/withdrawals')
+def reseller_withdrawals():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    import database as _db
+    rows=_db.list_reseller_withdrawals(uid(),20)
+    return jsonify(ok=True,items=[{'id':r['id'],'amount':int(r['amount']),'provider':r['provider_name'],'number':r['account_number'],'name':r['account_name'],'status':r['status'],'created_at':r['created_at']} for r in rows])
+@app.post('/api/reseller/withdraw')
+def reseller_withdraw():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    d=request.get_json(silent=True) or {}
+    try:
+        amount=rc.parse_amount(d.get('amount'))
+        wd=rc.request_withdrawal(uid(),amount,d.get('provider',''),d.get('number',''),d.get('name',''))
+    except ValueError as e:return err(str(e))
+    admin=os.getenv('ADMIN_ID','').strip()
+    if admin.isdigit():
+        try:
+            bot=rc.db.get_reseller_by_owner(uid()) or {}
+            requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',timeout=10,json={'chat_id':int(admin),'parse_mode':'HTML',
+                'text':f"📤 <b>PERMINTAAN WITHDRAW RESELLER</b> (via web)\n\n🧾 ID: <code>WD-{wd['id']}</code>\n👤 Owner: <code>{uid()}</code>\n🤖 Bot: @{bot.get('bot_username') or '-'}\n💰 Nominal: <b>{rc.rp(wd['amount'])}</b>\n🏦 {wd['method']} • {wd['provider_name']}\n🔢 No: <code>{wd['account_number']}</code>\n📛 a.n. {wd['account_name']}\n\nTransfer manual lalu tekan <b>Sudah Ditransfer</b>.",
+                'reply_markup':{'inline_keyboard':[[{'text':'✅ Sudah Ditransfer','callback_data':f"rs:adm_ok:{wd['id']}"},{'text':'❌ Tolak','callback_data':f"rs:adm_no:{wd['id']}"}]]}})
+        except requests.RequestException:app.logger.exception('Gagal notifikasi admin WD')
+    return jsonify(ok=True,id=wd['id'],reseller=reseller_payload())
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
 if __name__=='__main__':app.run(port=int(os.getenv('PORT','8080')),debug=os.getenv('WEB_DEV')=='1')
