@@ -509,9 +509,10 @@ def user_menu():
     return InlineKeyboardMarkup(rows)
 
 
-# Syarat & Ketentuan: Telegraph page is created on first request.
-# Optional: set AZHURA_TERMS_URL in Railway to reuse an existing Telegraph page.
+# Syarat & Ketentuan: dibuat di Telegraph saat pertama kali diminta.
+# Untuk bot reseller, branding mengikuti bot reseller yang sedang membuka menu.
 _TERMS_URL = os.getenv("AZHURA_TERMS_URL", "").strip()
+_TERMS_URLS = {}
 _TERMS_LOCK = threading.Lock()
 _TERMS_SECTIONS = [
     ("APA ITU NOKOS?", ["Nokos (Nomor Kosong) adalah nomor virtual atau sementara untuk menerima kode OTP dari aplikasi seperti WhatsApp dan Telegram.", "Nomor bukan kartu SIM fisik dan tidak selalu dapat digunakan secara permanen."]),
@@ -519,9 +520,9 @@ _TERMS_SECTIONS = [
     ("KODE OTP & VERIFIKASI", ["Segera gunakan nomor untuk verifikasi dan tunggu OTP melalui bot. Jangan bagikan OTP kepada siapa pun.", "Jika OTP belum masuk, periksa aplikasi dan nomor. Hindari permintaan OTP berulang secara berlebihan."]),
     ("REFUND & PEMBATALAN", ["Pengembalian saldo mengikuti ketentuan dan status transaksi masing-masing server. Gunakan fitur pembatalan jika tersedia ketika OTP tidak diterima.", "Transaksi yang sudah menerima OTP umumnya tidak dapat dibatalkan. Kesalahan memilih aplikasi, negara, atau layanan menjadi tanggung jawab pembeli."]),
     ("RISIKO PENGGUNAAN NOKOS", ["Nomor virtual tidak menjamin verifikasi berhasil. Nomor dapat ditolak, dibatasi, atau diblokir oleh aplikasi tujuan.", "Nomor sementara dapat digunakan kembali oleh penyedia setelah masa sewanya berakhir. Akun dapat kehilangan akses jika nomor tidak tersedia lagi.", "Jangan gunakan nokos untuk akun penting seperti mobile banking, dompet digital, atau akun berisi data dan aset berharga."]),
-    ("LARANGAN PENGGUNAAN", ["Dilarang menggunakan AZHURA [BOT NOKOS] untuk penipuan, spam, penyalahgunaan akun, atau aktivitas yang melanggar hukum dan ketentuan aplikasi tujuan."]),
+    ("LARANGAN PENGGUNAAN", ["Dilarang menggunakan layanan ini untuk penipuan, spam, penyalahgunaan akun, atau aktivitas yang melanggar hukum dan ketentuan aplikasi tujuan."]),
     ("GANGGUAN SERVER", ["Layanan bergantung pada ketersediaan penyedia. Gangguan, keterlambatan OTP, atau stok kosong dapat terjadi sewaktu-waktu.", "Jika ada kendala, hubungi Customer Service dan sertakan ID transaksi serta penjelasan masalah."]),
-    ("PERSETUJUAN PENGGUNA", ["Dengan melakukan pembelian melalui AZHURA [BOT NOKOS], pengguna dianggap telah membaca, memahami, dan menyetujui syarat dan ketentuan ini."]),
+    ("PERSETUJUAN PENGGUNA", ["Dengan melakukan pembelian melalui layanan ini, pengguna dianggap telah membaca, memahami, dan menyetujui syarat dan ketentuan ini."]),
 ]
 
 def _telegraph_api(method, payload):
@@ -534,23 +535,38 @@ def _telegraph_api(method, payload):
         raise RuntimeError("Telegraph API: " + str(result.get("error", "unknown error")))
     return result["result"]
 
+def _terms_brand():
+    reseller_row = current_reseller()
+    if reseller_row:
+        name = str(reseller_row.get("bot_name") or "").strip()
+        username = str(reseller_row.get("bot_username") or "").strip().lstrip("@")
+        if name and username:
+            return f"{name} (@{username})"
+        if name:
+            return name
+        if username:
+            return f"@{username}"
+    return "AZHURA"
+
 def _get_azhura_terms_url():
-    global _TERMS_URL
+    brand = _terms_brand()
+    if brand == "AZHURA" and _TERMS_URL:
+        return _TERMS_URL
     with _TERMS_LOCK:
-        if _TERMS_URL:
-            return _TERMS_URL
-        account = _telegraph_api("createAccount", {"short_name": "AZHURA", "author_name": "AZHURA BOT NOKOS"})
-        nodes = [{"tag": "p", "children": ["Wajib dibaca sebelum melakukan order. Selamat datang di AZHURA [BOT NOKOS]!"]}]
+        if brand in _TERMS_URLS:
+            return _TERMS_URLS[brand]
+        account = _telegraph_api("createAccount", {"short_name": "AZHURA", "author_name": brand})
+        nodes = [{"tag": "p", "children": [f"Wajib dibaca sebelum melakukan order. Selamat datang di {brand}!"]}]
         for heading, paragraphs in _TERMS_SECTIONS:
             nodes.append({"tag": "h3", "children": [heading]})
             nodes.extend({"tag": "p", "children": [paragraph]} for paragraph in paragraphs)
-        nodes.append({"tag": "p", "children": ["Terima kasih. Gunakan layanan dengan bijak dan bertanggung jawab. — AZHURA [BOT NOKOS]"]})
+        nodes.append({"tag": "p", "children": [f"Terima kasih. Gunakan layanan dengan bijak dan bertanggung jawab. — {brand}"]})
         page = _telegraph_api("createPage", {"access_token": account["access_token"],
-                              "title": "Syarat dan Ketentuan AZHURA BOT NOKOS",
-                              "author_name": "AZHURA BOT NOKOS", "content": nodes,
+                              "title": f"Syarat dan Ketentuan {brand}",
+                              "author_name": brand, "content": nodes,
                               "return_content": False})
-        _TERMS_URL = page["url"]
-        return _TERMS_URL
+        _TERMS_URLS[brand] = page["url"]
+        return page["url"]
 
 
 # =========================================================
@@ -5635,8 +5651,9 @@ async def user_callback(
     if data == "user_terms":
         try:
             terms_url = await asyncio.to_thread(_get_azhura_terms_url)
+            brand = _terms_brand()
             await query.edit_message_text(
-                "📜 <b>SYARAT & KETENTUAN AZHURA [BOT NOKOS]</b>\n\n"
+                f"📜 <b>SYARAT & KETENTUAN {escape(brand)}</b>\n\n"
                 "Baca dan pahami ketentuan sebelum melakukan order. 👇",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([

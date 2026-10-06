@@ -1480,7 +1480,9 @@ def init_reseller_tables(db):
             enabled BOOLEAN NOT NULL DEFAULT TRUE,
             margin_balance BIGINT NOT NULL DEFAULT 0,
             total_earned BIGINT NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            admin_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+            admin_blocked_previous_enabled BOOLEAN NOT NULL DEFAULT TRUE
         )
     """)
     db.execute("""
@@ -1516,6 +1518,23 @@ def init_reseller_tables(db):
             admin_note TEXT,
             created_at TEXT NOT NULL,
             processed_at TEXT
+        )
+    """)
+    db.execute("ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS admin_blocked BOOLEAN NOT NULL DEFAULT FALSE")
+    db.execute("ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS admin_blocked_previous_enabled BOOLEAN NOT NULL DEFAULT TRUE")
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS reseller_bot_archive (
+            id BIGINT PRIMARY KEY,
+            owner_telegram_id BIGINT NOT NULL,
+            bot_telegram_id BIGINT,
+            bot_username TEXT,
+            bot_name TEXT,
+            margin_percent NUMERIC(6,2),
+            cs_url TEXT,
+            margin_balance BIGINT,
+            total_earned BIGINT,
+            created_at TEXT,
+            deleted_at TEXT NOT NULL
         )
     """)
     db.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS reseller_bot_id BIGINT")
@@ -1604,7 +1623,7 @@ def list_runnable_resellers():
     """Bot reseller yang siap jalan: enabled + Contact CS sudah diatur."""
     with get_db() as db:
         rows = db.execute(
-            "SELECT * FROM reseller_bots WHERE enabled = TRUE AND cs_url IS NOT NULL AND cs_url <> '' ORDER BY id"
+            "SELECT * FROM reseller_bots WHERE enabled = TRUE AND COALESCE(admin_blocked,FALSE) = FALSE AND cs_url IS NOT NULL AND cs_url <> '' ORDER BY id"
         ).fetchall()
         return [_reseller_row(r) for r in rows]
 
@@ -1675,6 +1694,122 @@ def get_reseller_stats(bot_id):
             (bot_id,),
         ).fetchone()["c"]
         return {"buyers": int(buyers), "success": int(success)}
+
+
+def admin_list_resellers(search="", include_archived=False, limit=500):
+    """Ringkasan seluruh bot reseller untuk dashboard admin."""
+    search = str(search or "").strip()[:80]
+    with get_db() as db:
+        args = []
+        if include_archived:
+            sql = """SELECT a.id,a.owner_telegram_id,a.bot_telegram_id,a.bot_username,a.bot_name,a.margin_percent,
+                            a.cs_url,FALSE AS enabled,TRUE AS admin_blocked,a.margin_balance,a.total_earned,a.created_at,
+                            u.username owner_username,u.first_name owner_first_name,
+                            (SELECT COUNT(*) FROM reseller_buyers b WHERE b.bot_id=a.id) buyers,
+                            (SELECT COUNT(*) FROM orders o WHERE o.reseller_bot_id=a.id) orders,
+                            (SELECT COUNT(*) FROM orders o WHERE o.reseller_bot_id=a.id AND UPPER(o.status) IN ('SUCCESS','COMPLETED','FINISHED')) success_orders,
+                            (SELECT COUNT(*) FROM deposits d WHERE d.reseller_bot_id=a.id) deposits,
+                            (SELECT COALESCE(SUM(d.amount),0) FROM deposits d WHERE d.reseller_bot_id=a.id AND UPPER(d.status) IN ('SUCCESS','COMPLETED','PAID')) deposit_amount,
+                            (SELECT COUNT(*) FROM reseller_withdrawals w WHERE w.bot_id=a.id) withdrawals,
+                            (SELECT COALESCE(SUM(w.amount),0) FROM reseller_withdrawals w WHERE w.bot_id=a.id AND w.status='PAID') withdrawn_amount
+                       FROM reseller_bot_archive a LEFT JOIN users u ON u.telegram_id=a.owner_telegram_id"""
+            alias='a'
+        else:
+            sql = """SELECT r.id,r.owner_telegram_id,r.bot_telegram_id,r.bot_username,r.bot_name,r.margin_percent,
+                            r.cs_url,r.enabled,r.admin_blocked,r.margin_balance,r.total_earned,r.created_at,
+                            u.username owner_username,u.first_name owner_first_name,
+                            (SELECT COUNT(*) FROM reseller_buyers b WHERE b.bot_id=r.id) buyers,
+                            (SELECT COUNT(*) FROM orders o WHERE o.reseller_bot_id=r.id) orders,
+                            (SELECT COUNT(*) FROM orders o WHERE o.reseller_bot_id=r.id AND UPPER(o.status) IN ('SUCCESS','COMPLETED','FINISHED')) success_orders,
+                            (SELECT COUNT(*) FROM deposits d WHERE d.reseller_bot_id=r.id) deposits,
+                            (SELECT COALESCE(SUM(d.amount),0) FROM deposits d WHERE d.reseller_bot_id=r.id AND UPPER(d.status) IN ('SUCCESS','COMPLETED','PAID')) deposit_amount,
+                            (SELECT COUNT(*) FROM reseller_withdrawals w WHERE w.bot_id=r.id) withdrawals,
+                            (SELECT COALESCE(SUM(w.amount),0) FROM reseller_withdrawals w WHERE w.bot_id=r.id AND w.status='PAID') withdrawn_amount
+                       FROM reseller_bots r LEFT JOIN users u ON u.telegram_id=r.owner_telegram_id"""
+            alias='r'
+        if search:
+            sql += " WHERE (CAST(%s.owner_telegram_id AS TEXT) ILIKE %%s OR COALESCE(%s.bot_username,'') ILIKE %%s OR COALESCE(%s.bot_name,'') ILIKE %%s OR COALESCE(u.username,'') ILIKE %%s OR COALESCE(u.first_name,'') ILIKE %%s)" % (alias,alias,alias)
+            args.extend([f"%{search}%"] * 5)
+        sql += ' ORDER BY '+alias+'.id DESC LIMIT %s'
+        args.append(int(limit))
+        rows=[]
+        for r in db.execute(sql, tuple(args)).fetchall():
+            item=dict(r)
+            item['margin_percent']=float(item.get('margin_percent') or 0)
+            for key in ('margin_balance','total_earned','buyers','orders','success_orders','deposits','deposit_amount','withdrawals','withdrawn_amount'):
+                if key in item:item[key]=int(item[key] or 0)
+            rows.append(item)
+        return rows
+
+def admin_get_reseller_detail(bot_id, archived=False, limit=200):
+    bot_id = int(bot_id)
+    with get_db() as db:
+        if archived:
+            bot = db.execute('SELECT *, TRUE AS archived FROM reseller_bot_archive WHERE id=%s',(bot_id,)).fetchone()
+        else:
+            bot = db.execute('SELECT *, FALSE AS archived FROM reseller_bots WHERE id=%s',(bot_id,)).fetchone()
+        if not bot:
+            return None
+        owner = db.execute('SELECT telegram_id,username,first_name,balance,created_at FROM users WHERE telegram_id=%s',(bot['owner_telegram_id'],)).fetchone()
+        buyers = db.execute("""SELECT b.telegram_id,u.username,u.first_name,u.balance,b.first_seen
+                              FROM reseller_buyers b LEFT JOIN users u ON u.telegram_id=b.telegram_id
+                              WHERE b.bot_id=%s ORDER BY b.first_seen DESC LIMIT %s""",(bot_id,limit)).fetchall()
+        orders = db.execute("""SELECT o.order_id,o.telegram_id,u.username,u.first_name,COALESCE(o.service_name,o.service) service,
+                                      COALESCE(o.country_name,o.country) country,o.provider,o.phone,o.sell_price,o.provider_cost,
+                                      o.status,o.refund_status,o.reseller_margin,o.reseller_margin_status,o.created_at,o.completed_at
+                               FROM orders o LEFT JOIN users u ON u.telegram_id=o.telegram_id
+                               WHERE o.reseller_bot_id=%s ORDER BY o.id DESC LIMIT %s""",(bot_id,limit)).fetchall()
+        deposits = db.execute("""SELECT d.deposit_id,d.telegram_id,u.username,u.first_name,d.amount,d.payment_amount,d.payment_total,
+                                        d.payment_method,d.status,d.payment_reference,d.created_at,d.completed_at,d.confirmed_at
+                                 FROM deposits d LEFT JOIN users u ON u.telegram_id=d.telegram_id
+                                 WHERE d.reseller_bot_id=%s ORDER BY d.id DESC LIMIT %s""",(bot_id,limit)).fetchall()
+        withdrawals = db.execute("""SELECT id,owner_telegram_id,amount,method,provider_name,account_number,account_name,status,admin_note,created_at,processed_at
+                                   FROM reseller_withdrawals WHERE bot_id=%s ORDER BY id DESC LIMIT %s""",(bot_id,limit)).fetchall()
+        ledger = db.execute("""SELECT id,amount,balance_after,entry_type,reference,created_at FROM reseller_ledger
+                              WHERE bot_id=%s ORDER BY id DESC LIMIT %s""",(bot_id,limit)).fetchall()
+        bot = dict(bot)
+        bot['margin_percent'] = float(bot.get('margin_percent') or 0)
+        for key in ('margin_balance','total_earned','bot_telegram_id','owner_telegram_id'):
+            if key in bot and bot[key] is not None: bot[key] = int(bot[key])
+        return {'bot':bot,'owner':dict(owner) if owner else None,
+                'buyers':[dict(r) for r in buyers],'orders':[dict(r) for r in orders],
+                'deposits':[dict(r) for r in deposits],'withdrawals':[dict(r) for r in withdrawals],
+                'ledger':[dict(r) for r in ledger]}
+
+
+def admin_set_reseller_block(bot_id, blocked):
+    bot_id=int(bot_id); blocked=bool(blocked)
+    with get_db() as db:
+        row=db.execute('SELECT * FROM reseller_bots WHERE id=%s FOR UPDATE',(bot_id,)).fetchone()
+        if not row: raise ValueError('Bot reseller tidak ditemukan.')
+        if blocked:
+            row=db.execute("""UPDATE reseller_bots SET admin_blocked=TRUE, admin_blocked_previous_enabled=enabled, enabled=FALSE
+                              WHERE id=%s RETURNING *""",(bot_id,)).fetchone()
+        else:
+            restore=bool(row.get('admin_blocked_previous_enabled'))
+            row=db.execute("""UPDATE reseller_bots SET admin_blocked=FALSE, enabled=%s
+                              WHERE id=%s RETURNING *""",(restore,bot_id)).fetchone()
+        return _reseller_row(row)
+
+
+def admin_delete_reseller(bot_id):
+    """Hapus bot dari daftar aktif, tetapi arsipkan metadata agar histori tetap terbaca."""
+    bot_id=int(bot_id)
+    with get_db() as db:
+        row=db.execute('SELECT * FROM reseller_bots WHERE id=%s FOR UPDATE',(bot_id,)).fetchone()
+        if not row: raise ValueError('Bot reseller tidak ditemukan.')
+        pending=db.execute("SELECT 1 FROM reseller_withdrawals WHERE bot_id=%s AND status='PENDING' LIMIT 1",(bot_id,)).fetchone()
+        if pending: raise ValueError('Bot memiliki withdraw PENDING. Proses atau tolak withdraw terlebih dahulu sebelum menghapus bot.')
+        db.execute("""INSERT INTO reseller_bot_archive
+                      (id,owner_telegram_id,bot_telegram_id,bot_username,bot_name,margin_percent,cs_url,margin_balance,total_earned,created_at,deleted_at)
+                      VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                      ON CONFLICT (id) DO UPDATE SET owner_telegram_id=EXCLUDED.owner_telegram_id,bot_telegram_id=EXCLUDED.bot_telegram_id,
+                        bot_username=EXCLUDED.bot_username,bot_name=EXCLUDED.bot_name,margin_percent=EXCLUDED.margin_percent,
+                        cs_url=EXCLUDED.cs_url,margin_balance=EXCLUDED.margin_balance,total_earned=EXCLUDED.total_earned,
+                        created_at=EXCLUDED.created_at,deleted_at=EXCLUDED.deleted_at""",
+                    (row['id'],row['owner_telegram_id'],row['bot_telegram_id'],row['bot_username'],row['bot_name'],row['margin_percent'],row['cs_url'],row['margin_balance'],row['total_earned'],row['created_at'],now()))
+        db.execute('DELETE FROM reseller_bots WHERE id=%s',(bot_id,))
+        return dict(row)
 
 
 def set_deposit_reseller(deposit_id, bot_id):

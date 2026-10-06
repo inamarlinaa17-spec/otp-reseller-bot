@@ -128,6 +128,8 @@ def set_enabled(owner_id, flag):
     row = db.get_reseller_by_owner(owner_id)
     if not row:
         raise ValueError("Anda belum punya bot reseller.")
+    if flag and row.get("admin_blocked"):
+        raise ValueError("Bot reseller sedang diblokir admin.")
     if flag and not row.get("cs_url"):
         raise ValueError("Atur Contact CS dahulu sebelum mengaktifkan bot.")
     return db.update_reseller(owner_id, enabled=bool(flag))
@@ -145,6 +147,8 @@ def request_withdrawal(owner_id, amount, provider_name, account_number, account_
 
 def status_label(row, running=True):
     """(teks status, aktif?)"""
+    if row.get("admin_blocked"):
+        return "⛔ Diblokir Admin", False
     if not row.get("cs_url"):
         return "⚠️ Belum Aktif (Contact CS belum diatur)", False
     if not row.get("enabled"):

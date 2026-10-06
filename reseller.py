@@ -223,17 +223,23 @@ async def handle_callback(query, context):
 
 async def _start_withdraw(query, context, bot):
     balance = int(bot["margin_balance"])
-    if balance < core.MIN_WITHDRAW:
-        await query.answer(
-            f"Saldo margin belum cukup. Minimum penarikan {core.rp(core.MIN_WITHDRAW)}.", show_alert=True
+    minimum = core.MIN_WITHDRAW
+    if balance < minimum:
+        await _edit(
+            query,
+            "📤 <b>WITHDRAW MARGIN</b>\n\n"
+            f"💰 Saldo margin: <b>{core.rp(balance)}</b>\n"
+            f"🔻 Minimum penarikan: <b>{core.rp(minimum)}</b>\n\n"
+            f"Saldo Anda belum mencapai minimum. Tambahkan margin sampai minimal <b>{core.rp(minimum)}</b> untuk dapat melakukan penarikan.",
+            BACK,
         )
         return
     context.user_data["rs_state"] = {"type": "wd_amount"}
     await _edit(
         query,
         "📤 <b>WITHDRAW MARGIN</b>\n\n"
-        f"Saldo margin: <b>{core.rp(balance)}</b>\n"
-        f"Minimum: {core.rp(core.MIN_WITHDRAW)}\n\n"
+        f"💰 Saldo margin: <b>{core.rp(balance)}</b>\n"
+        f"🔻 Minimum penarikan: <b>{core.rp(minimum)}</b>\n\n"
         "Kirim nominal yang ingin ditarik, contoh: <code>50000</code>\n"
         "Kirim <code>semua</code> untuk menarik seluruh saldo.",
         BACK,
@@ -503,7 +509,7 @@ class ResellerManager:
     async def _gate(self, update, context):
         bot_id = context.application.bot_data["reseller_id"]
         row = await self.get_row(bot_id)
-        if not row or not row["enabled"] or not row.get("cs_url"):
+        if not row or row.get("admin_blocked") or not row["enabled"] or not row.get("cs_url"):
             if update.callback_query:
                 try:
                     await update.callback_query.answer("Bot sedang tidak aktif.", show_alert=True)
@@ -581,7 +587,7 @@ class ResellerManager:
 
     async def restart(self, bot_id):
         row = await asyncio.to_thread(db.get_reseller_by_id, bot_id)
-        if not row or not row["enabled"] or not row.get("cs_url"):
+        if not row or row.get("admin_blocked") or not row["enabled"] or not row.get("cs_url"):
             await self.stop_bot(bot_id)
             return False
         return await self.start_bot(row)
