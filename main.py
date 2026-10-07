@@ -4694,6 +4694,7 @@ async def _run_server4_cancel(application, order_id, provider_order_id):
       berulang; refund dijaga lock per-order + refund_status di database.
     """
     loop = asyncio.get_running_loop()
+    logger.info("[S4 CANCEL] mulai order=%s provider_id=%s", order_id, provider_order_id)
     state = _CANCEL_COUNTDOWN_STATE.setdefault(order_id, {"phase": "vendor_wait", "started": loop.time()})
     started = float(state.get("started") or loop.time())
     try:
@@ -4705,6 +4706,10 @@ async def _run_server4_cancel(application, order_id, provider_order_id):
                     return  # OTP masuk / sudah direfund / status berubah
 
                 attempt = await asyncio.to_thread(cancel_grizzly_attempt, provider_order_id)
+                logger.info(
+                    "[S4 CANCEL] order=%s provider_id=%s state=%s vendor_status=%s",
+                    order_id, provider_order_id, attempt.get("state"), attempt.get("provider_status"),
+                )
                 state["attempts"] = int(state.get("attempts") or 0) + 1
                 state["vendor_status"] = str(attempt.get("provider_status") or state.get("vendor_status") or "")
                 vendor_state = attempt.get("state")
@@ -7677,14 +7682,27 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         # realtime; refund otomatis begitu vendor sukses membatalkan.
         # ---------------------------------------------------------------
         if str(order.get("provider") or "").strip().lower() == "grizzly":
-            if order_id in _ACTIVE_CANCEL_COUNTDOWNS:
-                # Klik ganda hampir bersamaan: proses sudah dimulai, jangan buat task kedua.
-                await query.answer(
-                    "⏳ Batal / Refund Server 4 sedang diproses vendor.\n\n"
-                    "Saldo otomatis dikembalikan begitu vendor berhasil membatalkan.",
-                    show_alert=True,
-                )
+            existing_task = _CANCEL_TASKS.get(order_id)
+            if existing_task is not None and not existing_task.done():
+                # Proses batal untuk order ini sudah berjalan: jangan buat task kedua.
+                try:
+                    await query.answer(
+                        "⏳ Batal / Refund Server 4 sedang diproses vendor.\n\n"
+                        "Saldo otomatis dikembalikan begitu vendor berhasil membatalkan.",
+                        show_alert=True,
+                    )
+                except Exception:
+                    logger.warning("[S4 CANCEL] gagal menjawab klik ganda order=%s", order_id)
                 return
+
+            # Tidak ada task hidup. Jika masih ada penanda lama (task mati/gagal dibuat),
+            # bersihkan agar klik ini memulai proses baru, bukan mentok di popup yang sama.
+            _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
+            _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
+
+            # PENTING: buat task SEBELUM menjawab Telegram dan tanpa await di antaranya.
+            # Kalau query.answer() gagal (callback kedaluwarsa/sudah dijawab), proses
+            # batal tetap berjalan dan tidak ada penanda yang tertinggal.
             _ACTIVE_CANCEL_COUNTDOWNS.add(order_id)
             _CANCEL_COUNTDOWN_STATE[order_id] = {
                 "started": loop.time(),
@@ -7694,16 +7712,19 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                 "vendor_status": "menunggu vendor",
                 "attempts": 0,
             }
-            await query.answer(
-                "⏳ Batal / Refund Server 4 dimulai.\n\n"
-                "Bot mengikuti proses vendor secara langsung (tidak ada waktu tetap). "
-                "Begitu vendor berhasil membatalkan, saldo otomatis dikembalikan.\n\n"
-                "Silakan tekan OK. Proses tetap berjalan.",
-                show_alert=True,
-            )
             _CANCEL_TASKS[order_id] = asyncio.create_task(
                 _run_server4_cancel(context.application, order_id, provider_order_id)
             )
+            try:
+                await query.answer(
+                    "⏳ Batal / Refund Server 4 dimulai.\n\n"
+                    "Bot mengikuti proses vendor secara langsung (tidak ada waktu tetap). "
+                    "Begitu vendor berhasil membatalkan, saldo otomatis dikembalikan.\n\n"
+                    "Silakan tekan OK. Proses tetap berjalan.",
+                    show_alert=True,
+                )
+            except Exception:
+                logger.warning("[S4 CANCEL] gagal menjawab popup awal order=%s (proses tetap berjalan)", order_id)
             return
 
         # Reserve this exact order before returning the first popup. The task
