@@ -1158,6 +1158,50 @@ def mark_order_completed(order_id):
 # REFUND ORDER
 # =========================================================
 
+def fail_and_refund_order(order_id, reason="Vendor gagal menyiapkan nomor"):
+    """Order gagal sebelum nomor didapat: kembalikan saldo + tandai FAILED.
+
+    refund_order idempoten (row lock + refund_status), jadi aman dipanggil
+    berulang dan tidak mungkin refund ganda.
+    """
+    refund = refund_order(order_id, reason)
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE orders
+            SET status = 'FAILED'
+            WHERE order_id = %s
+              AND refund_status = 'REFUNDED'
+              AND status = 'REFUNDED'
+            """,
+            (order_id,)
+        )
+    return refund
+
+
+def sweep_review_orders(telegram_id=None):
+    """Order lama berstatus REVIEW yang tidak pernah mendapat nomor dari vendor
+    (provider_order_id kosong) -> refund otomatis + FAILED. Mengembalikan jumlahnya."""
+    with get_db() as db:
+        if telegram_id is None:
+            rows = db.execute(
+                "SELECT order_id FROM orders WHERE status = 'REVIEW' AND provider_order_id IS NULL LIMIT 50"
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT order_id FROM orders WHERE status = 'REVIEW' AND provider_order_id IS NULL AND telegram_id = %s LIMIT 50",
+                (telegram_id,)
+            ).fetchall()
+    done = 0
+    for row in rows:
+        try:
+            fail_and_refund_order(row["order_id"], "Vendor gagal menyiapkan nomor (otomatis)")
+            done += 1
+        except Exception:
+            pass
+    return done
+
+
 def refund_order(
     order_id,
     reason="Refund order OTP"

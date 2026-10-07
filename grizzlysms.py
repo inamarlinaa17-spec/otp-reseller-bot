@@ -1073,6 +1073,57 @@ def verify_cancel(activation_id):
         return False
 
 
+def cancel_attempt(activation_id):
+    """Satu siklus pembatalan Server 4 yang mengikuti jawaban vendor apa adanya.
+
+    Tidak ada batas waktu tetap di sisi kita: vendor yang menentukan kapan
+    pembatalan boleh/selesai (bisa 2, 3, 4 menit atau lebih). Fungsi ini aman
+    dipanggil berulang (polling) dan mengembalikan salah satu state:
+
+      cancelled     - vendor sudah membatalkan (via API kita ATAU dibatalkan
+                      langsung dari web vendor). Aman untuk refund saldo.
+      otp_received  - OTP sudah masuk di vendor; JANGAN batalkan/refund.
+      waiting       - vendor belum menerima/menyelesaikan pembatalan
+                      (mis. EARLY_CANCEL_DENIED). Coba lagi nanti.
+      error         - gangguan jaringan/API sementara. Coba lagi nanti.
+    """
+    aid = str(activation_id)
+
+    # 1) Cek status vendor lebih dulu: kalau sudah batal (mis. dibatalkan dari
+    #    web vendor) langsung kembalikan "cancelled" tanpa mengirim cancel lagi.
+    try:
+        snapshot = get_sms(aid)
+    except Exception:
+        snapshot = None
+    if isinstance(snapshot, dict):
+        if status_is_cancelled(snapshot):
+            return {"state": "cancelled", "provider_status": "STATUS_CANCEL"}
+        if snapshot.get("otp"):
+            return {"state": "otp_received", "provider_status": str(snapshot.get("status") or "OK")}
+
+    # 2) Minta vendor membatalkan.
+    reply = ""
+    try:
+        result = _set_status(aid, 8)
+        reply = str(result.get("status") or "")
+    except GrizzlyError as exc:
+        reply = str(exc)
+    except requests.RequestException as exc:
+        return {"state": "error", "provider_status": str(exc)[:120]}
+    except Exception as exc:
+        return {"state": "error", "provider_status": str(exc)[:120]}
+
+    upper = reply.strip().upper()
+    if upper.startswith("ACCESS_CANCEL") or upper in {"CANCEL", "SUCCESS", "OK"}:
+        return {"state": "cancelled", "provider_status": reply.strip() or "ACCESS_CANCEL"}
+
+    # 3) Jawaban lain (EARLY_CANCEL_DENIED, dll). Verifikasi ulang ke vendor:
+    #    bisa jadi pembatalan sebenarnya sudah selesai di sisi vendor.
+    if confirm_cancelled(aid):
+        return {"state": "cancelled", "provider_status": "STATUS_CANCEL"}
+    return {"state": "waiting", "provider_status": reply.strip() or "WAITING_VENDOR"}
+
+
 def diagnose(service="wa", country="6"):
     """Laporan teks untuk admin: versi kode + respons mentah V3 + hasil parsing."""
     lines = [f"Versi kode Server 4: {CODE_VERSION}", f"service={service} country={country}"]

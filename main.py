@@ -88,6 +88,7 @@ from database import (
     get_order,
     mark_order_success,
     refund_order,
+    fail_and_refund_order,
     save_otp_quote,
     get_otp_quote,
     get_bot_setting,
@@ -148,6 +149,7 @@ from grizzlysms import (
     get_number as get_grizzly_number,
     get_sms as get_grizzly_sms,
     cancel_number as cancel_grizzly_number,
+    cancel_attempt as cancel_grizzly_attempt,
     finish_number as finish_grizzly_number,
     resend_otp as resend_grizzly_otp,
 )
@@ -208,6 +210,12 @@ _AUTO_POLL_NEXT = {"5sim": 0.0, "rumahotp": 0.0, "premotp": 0.0, "grizzly": 0.0}
 # the button is pressed. Duplicate cancellation requests for the same order
 # are blocked while that countdown is running.
 CANCEL_PROCESSING_SECONDS = 120
+# Server 4 (Grizzly) TIDAK memakai countdown tetap. Lama proses batal mengikuti
+# vendor (bisa 2, 3, 4 menit atau lebih), jadi bot mem-polling vendor sampai
+# vendor benar-benar membatalkan, lalu langsung refund. Angka di bawah hanya
+# interval polling dan batas pengaman agar task tidak berjalan selamanya.
+SERVER4_CANCEL_POLL_SECONDS = 5
+SERVER4_CANCEL_MAX_SECONDS = 20 * 60
 _ACTIVE_CANCEL_COUNTDOWNS = set()
 _CANCEL_COUNTDOWN_STATE = {}
 _CANCEL_TASKS = {}
@@ -4633,10 +4641,18 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
             }
 
         if provider == "grizzly":
-            result = await asyncio.to_thread(cancel_grizzly_number, provider_order_id)
-            if result and result.get("response") == "OK":
-                return result
-            return result or {"response": "ERROR", "error": "Pembatalan Server 4 belum dikonfirmasi provider."}
+            # Satu siklus: cek status vendor -> minta batal -> verifikasi ulang.
+            # Refund hanya lanjut jika vendor benar-benar menyatakan batal
+            # (termasuk jika sudah dibatalkan langsung dari web vendor).
+            attempt = await asyncio.to_thread(cancel_grizzly_attempt, provider_order_id)
+            if attempt.get("state") == "cancelled":
+                return {"response": "OK", "provider_status": attempt.get("provider_status")}
+            return {
+                "response": "ERROR",
+                "error": "Pembatalan Server 4 belum dikonfirmasi provider.",
+                "provider_status": attempt.get("provider_status"),
+                "state": attempt.get("state"),
+            }
 
         result = await asyncio.to_thread(cancel_number, provider_order_id)
         statuses = _provider_status_values(result)
@@ -4658,6 +4674,121 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
     except Exception as exc:
         logger.exception("[CANCEL] provider cancel failed order=%s provider=%s", order_id, provider)
         return {"response": "ERROR", "error": str(exc)}
+
+
+def _server4_order_cancellable(order):
+    return bool(
+        order
+        and str(order.get("status") or "").upper() in {"PENDING", "WAITING_OTP"}
+        and not _order_has_received_otp(order)
+    )
+
+
+async def _run_server4_cancel(application, order_id, provider_order_id):
+    """Batal/Refund Server 4 yang mengikuti proses vendor secara realtime.
+
+    - Tidak ada countdown tetap: polling vendor sampai vendor menyatakan batal
+      (juga terdeteksi jika dibatalkan langsung dari web vendor).
+    - Begitu vendor batal -> refund otomatis (idempoten) -> polling berhenti.
+    - Satu task per order (dijaga _CANCEL_TASKS) sehingga countdown tidak
+      berulang; refund dijaga lock per-order + refund_status di database.
+    """
+    loop = asyncio.get_running_loop()
+    state = _CANCEL_COUNTDOWN_STATE.setdefault(order_id, {"phase": "vendor_wait", "started": loop.time()})
+    started = float(state.get("started") or loop.time())
+    try:
+        while True:
+            lock = _get_cancel_order_lock(order_id)
+            async with lock:
+                current = await asyncio.to_thread(get_order, order_id)
+                if not _server4_order_cancellable(current):
+                    return  # OTP masuk / sudah direfund / status berubah
+
+                attempt = await asyncio.to_thread(cancel_grizzly_attempt, provider_order_id)
+                state["attempts"] = int(state.get("attempts") or 0) + 1
+                state["vendor_status"] = str(attempt.get("provider_status") or state.get("vendor_status") or "")
+                vendor_state = attempt.get("state")
+
+                if vendor_state == "otp_received":
+                    # Vendor sudah menerima OTP: jangan batal/refund. Poller OTP
+                    # yang sudah ada akan mengirim kodenya ke user.
+                    logger.info("[S4 CANCEL] OTP already received at vendor order=%s", order_id)
+                    return
+
+                if vendor_state == "cancelled":
+                    state["phase"] = "provider_cancel"
+                    refund = None
+                    for _ in range(3):
+                        try:
+                            refund = await asyncio.to_thread(
+                                refund_order,
+                                order_id,
+                                "User membatalkan order OTP setelah Server 4 mengonfirmasi pembatalan.",
+                            )
+                            break
+                        except Exception:
+                            logger.exception("[S4 CANCEL] refund attempt failed order=%s", order_id)
+                            await asyncio.sleep(2)
+                    if refund is None:
+                        # Vendor sudah batal, saldo belum kembali. Task berhenti;
+                        # klik berikutnya langsung mencoba refund lagi (vendor
+                        # sudah batal, jadi tidak ada countdown baru).
+                        state["phase"] = "refund_failed"
+                        return
+
+                    state["phase"] = "refunded"
+                    state["balance"] = refund.get("balance")
+                    state["refund"] = current.get("sell_price")
+                    if refund.get("already_refunded"):
+                        return
+
+                    try:
+                        message_id = (
+                            current.get("telegram_message_id")
+                            or (_RUNTIME_PROVIDER_CACHE.get(order_id) or {}).get("telegram_message_id")
+                        )
+                        if message_id:
+                            bot_app = _app_for_order(application, current)
+                            refund_amount = refund.get("amount") or current.get("sell_price") or 0
+                            balance_after = refund.get("balance")
+                            await bot_app.bot.edit_message_text(
+                                chat_id=int(current["telegram_id"]),
+                                message_id=int(message_id),
+                                text=(
+                                    "❌ <b>ORDER DIBATALKAN / REFUND</b>\n\n"
+                                    f"🧾 Order: <code>{escape(str(order_id))}</code>\n"
+                                    f"💸 Refund: <b>{format_rupiah(refund_amount)}</b>\n"
+                                    f"💳 Saldo sekarang: <b>{format_rupiah(balance_after) if balance_after is not None else '-'}</b>\n\n"
+                                    "Pesanan telah dibatalkan dan saldo sudah dikembalikan."
+                                ),
+                                parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("📱 ORDER LAGI", callback_data="order")],
+                                    [InlineKeyboardButton("🏠 MENU UTAMA", callback_data="user_home")],
+                                ]),
+                            )
+                    except Exception:
+                        logger.exception("[S4 CANCEL] failed to update order message after refund order=%s", order_id)
+                    return
+
+            # Vendor belum membatalkan (waiting/error): tunggu lalu cek lagi.
+            if loop.time() - started >= SERVER4_CANCEL_MAX_SECONDS:
+                logger.warning("[S4 CANCEL] vendor did not confirm cancel in time order=%s", order_id)
+                state["phase"] = "provider_failed"
+                return
+            await asyncio.sleep(SERVER4_CANCEL_POLL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[S4 CANCEL] background cancellation failed order=%s", order_id)
+        state["phase"] = "error"
+    finally:
+        _ACTIVE_CANCEL_COUNTDOWNS.discard(order_id)
+        # Simpan state sebentar agar klik tepat setelah selesai mendapat popup
+        # akhir, bukan memulai proses baru.
+        await asyncio.sleep(5)
+        _CANCEL_TASKS.pop(order_id, None)
+        _CANCEL_COUNTDOWN_STATE.pop(order_id, None)
 
 
 async def _auto_expire_order(application, order, provider_order_id):
@@ -5372,12 +5503,16 @@ async def process_otp_order(
     # BELI NOMOR
     # -----------------------------------------------------
     if server == "5sim":
-        result = await asyncio.to_thread(
-            buy_number_any_operator,
-            country,
-            service,
-            quote_operators or [operator],
-        )
+        try:
+            result = await asyncio.to_thread(
+                buy_number_any_operator,
+                country,
+                service,
+                quote_operators or [operator],
+            )
+        except Exception:
+            logger.exception("5SIM order failed")
+            result = None
         provider_order_id = result.get("id") if result else None
         phone = result.get("phone") if result else None
         provider_expired_at = result.get("expired_at") if result else None
@@ -5397,13 +5532,17 @@ async def process_otp_order(
             routes = [None]
         result = None
         for metadata in routes:
-            candidate = await asyncio.to_thread(
-                buy_rumahotp_number,
-                country,
-                service,
-                operator,
-                metadata
-            )
+            try:
+                candidate = await asyncio.to_thread(
+                    buy_rumahotp_number,
+                    country,
+                    service,
+                    operator,
+                    metadata
+                )
+            except Exception:
+                logger.exception("RumahOTP order failed")
+                candidate = None
             if candidate and candidate.get("response") != "ERROR" and (candidate.get("order_id") or candidate.get("id")) and (candidate.get("phone") or candidate.get("number")):
                 result = candidate
                 break
@@ -5469,7 +5608,9 @@ async def process_otp_order(
 
     if provider_error:
         try:
-            refund = refund_order(
+            # Vendor gagal menyiapkan nomor: saldo kembali dan status order = FAILED.
+            refund = await asyncio.to_thread(
+                fail_and_refund_order,
                 order_id,
                 error_reason
             )
@@ -5508,7 +5649,8 @@ async def process_otp_order(
         return
 
     if not provider_order_id or not phone:
-        refund_order(
+        await asyncio.to_thread(
+            fail_and_refund_order,
             order_id,
             f"Respons {server} tidak lengkap."
         )
@@ -6559,17 +6701,16 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         # BUY NUMBER
         # -------------------------------------------------
 
-        result = await asyncio.to_thread(
-
-            buy_number,
-
-            country,
-
-            product,
-
-            operator
-
-        )
+        try:
+            result = await asyncio.to_thread(
+                buy_number,
+                country,
+                product,
+                operator
+            )
+        except Exception:
+            logger.exception("Server 1 order failed")
+            result = None
 
         if (
 
@@ -6583,7 +6724,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             try:
 
-                refund = refund_order(
+                refund = fail_and_refund_order(
 
                     order_id,
 
@@ -6666,7 +6807,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             not phone
         ):
 
-            refund_order(
+            fail_and_refund_order(
 
                 order_id,
 
@@ -7432,6 +7573,17 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     "✅ Refund sudah berhasil diproses dan saldo sudah dikembalikan.",
                     show_alert=True,
                 )
+            elif phase == "vendor_wait":
+                elapsed = max(0, int(loop.time() - float(state.get("started", loop.time()))))
+                vendor_status = str(state.get("vendor_status") or "menunggu vendor")
+                await query.answer(
+                    "⏳ Batal / Refund Server 4 masih diproses vendor.\n\n"
+                    f"Berjalan: {elapsed // 60}:{elapsed % 60:02d}\n"
+                    f"Status vendor: {vendor_status}\n\n"
+                    "Saldo otomatis dikembalikan begitu vendor berhasil membatalkan. "
+                    "Tidak perlu menekan tombol lagi.",
+                    show_alert=True,
+                )
             elif phase == "provider_failed":
                 await query.answer(
                     "⚠️ Pembatalan provider belum terkonfirmasi.\n\nSaldo belum dikembalikan. Silakan coba Batal / Refund lagi nanti.",
@@ -7517,6 +7669,40 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             await query.answer(
                 "⚠️ ID pesanan provider belum tersedia.\n\nSaldo belum dikembalikan. Silakan coba lagi beberapa saat.",
                 show_alert=True,
+            )
+            return
+
+        # ---------------------------------------------------------------
+        # SERVER 4: tanpa countdown tetap. Ikuti proses vendor secara
+        # realtime; refund otomatis begitu vendor sukses membatalkan.
+        # ---------------------------------------------------------------
+        if str(order.get("provider") or "").strip().lower() == "grizzly":
+            if order_id in _ACTIVE_CANCEL_COUNTDOWNS:
+                # Klik ganda hampir bersamaan: proses sudah dimulai, jangan buat task kedua.
+                await query.answer(
+                    "⏳ Batal / Refund Server 4 sedang diproses vendor.\n\n"
+                    "Saldo otomatis dikembalikan begitu vendor berhasil membatalkan.",
+                    show_alert=True,
+                )
+                return
+            _ACTIVE_CANCEL_COUNTDOWNS.add(order_id)
+            _CANCEL_COUNTDOWN_STATE[order_id] = {
+                "started": loop.time(),
+                "deadline": loop.time(),
+                "remaining": 0,
+                "phase": "vendor_wait",
+                "vendor_status": "menunggu vendor",
+                "attempts": 0,
+            }
+            await query.answer(
+                "⏳ Batal / Refund Server 4 dimulai.\n\n"
+                "Bot mengikuti proses vendor secara langsung (tidak ada waktu tetap). "
+                "Begitu vendor berhasil membatalkan, saldo otomatis dikembalikan.\n\n"
+                "Silakan tekan OK. Proses tetap berjalan.",
+                show_alert=True,
+            )
+            _CANCEL_TASKS[order_id] = asyncio.create_task(
+                _run_server4_cancel(context.application, order_id, provider_order_id)
             )
             return
 
