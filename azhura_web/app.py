@@ -10,7 +10,7 @@ import requests, psycopg
 from psycopg.rows import dict_row
 from flask import Flask, request, jsonify, send_from_directory, session, Response
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from database import create_pending_order, refund_order, save_provider_order
+from database import create_pending_order, refund_order, save_provider_order, fail_and_refund_order, sweep_review_orders
 import reseller_core as rc
 # Web pricing is isolated from bot config: importing provider.py also imports
 # config.py, whose bot-only required variables can crash this web service.
@@ -280,6 +280,9 @@ def web_terms():
 @app.get('/api/orders')
 def orders():
     if not uid():return err('Login diperlukan',401)
+    # Order lama berstatus REVIEW yang tidak pernah mendapat nomor: refund otomatis + FAILED.
+    try:sweep_review_orders(uid())
+    except Exception:app.logger.exception('Sweep REVIEW gagal')
     rows=query('''SELECT order_id,COALESCE(service_name,service) service,COALESCE(country_name,country) country,
         provider,sell_price,status,created_at,otp_code,previous_otp_code,sms_text,phone,expired_at,refund_status
         FROM orders WHERE telegram_id=%s ORDER BY id DESC LIMIT 40''',(uid(),))
@@ -343,17 +346,26 @@ def buy():
         except ValueError as exc:
             with conn() as db:db.execute('DELETE FROM azhura_web_requests WHERE telegram_id=%s AND request_id=%s',(uid(),key))
             return err(str(exc),409)
+        got_number=False
         try:
             with conn() as db:db.execute('UPDATE orders SET service_name=%s,country_name=%s WHERE order_id=%s',(service,country,order_id))
             result=prem_buy(order_id,service,country,oid,kind)
             pid=result.get('id');phone=result.get('phone_number') or result.get('phone') or result.get('number')
             if not pid or not phone:raise RuntimeError('Provider tidak mengirim nomor')
+            got_number=True
             save_provider_order(order_id,str(pid),int(round(cost)),str(phone),result.get('expired_at') or result.get('expires_at'))
             return jsonify(order_id=order_id,phone=phone,price=price)
         except Exception:
-            # Provider may have accepted order despite a timeout. Never auto-refund
-            # ambiguous requests: they require reconciliation to avoid double spend.
-            with conn() as db:db.execute("UPDATE orders SET status='REVIEW' WHERE order_id=%s AND provider_order_id IS NULL",(order_id,))
+            app.logger.exception('Pembelian Server 3 web gagal order=%s got_number=%s',order_id,got_number)
+            # Vendor gagal menyiapkan nomor -> order FAILED + saldo kembali.
+            if not got_number:
+                try:
+                    refund=fail_and_refund_order(order_id,'Vendor gagal menyiapkan nomor (web)')
+                    return jsonify(error='Gagal mendapatkan nomor. Saldo sudah dikembalikan.',status='FAILED',balance=refund.get('balance')),409
+                except Exception:
+                    app.logger.exception('Refund otomatis gagal order=%s',order_id)
+            # Nomor sudah didapat tapi gagal disimpan: tahan untuk admin (status terpisah agar tidak ikut di-refund otomatis).
+            with conn() as db:db.execute("UPDATE orders SET status='PROVIDER_REVIEW' WHERE order_id=%s AND provider_order_id IS NULL",(order_id,))
             return err('Status pembelian perlu diperiksa admin. Jangan mengulangi order.',503)
     except psycopg.Error:return err('Database sementara bermasalah',503)
 
@@ -370,7 +382,7 @@ def web_live_traffic():
             COALESCE(o.provider,'') provider,o.sell_price
             FROM orders o LEFT JOIN users u ON u.telegram_id=o.telegram_id
             WHERE o.created_at IS NOT NULL AND o.sell_price > 0
-              AND UPPER(o.status) NOT IN ('FAILED','REFUNDED','CANCELLED','CANCELED','REVIEW')
+              AND UPPER(o.status) NOT IN ('FAILED','REFUNDED','CANCELLED','CANCELED','REVIEW','PROVIDER_REVIEW')
             ORDER BY o.id DESC LIMIT 12""")
         items=[]
         for r in rows:
@@ -449,11 +461,14 @@ def server_buy(server):
         except ValueError as exc:
             with conn() as db:db.execute('DELETE FROM azhura_web_requests WHERE telegram_id=%s AND request_id=%s',(uid(),key))
             return err(str(exc),409)
-        # A provider timeout is ambiguous. Never auto-refund an unknown outcome.
+        # Vendor gagal menyiapkan nomor (ditolak, timeout, respons tanpa nomor) -> order FAILED + saldo kembali.
+        # Hanya jika nomor SUDAH didapat lalu penyimpanan gagal, order ditahan REVIEW (jangan refund nomor yang aktif).
+        got_number=False
         try:
             result=web_purchase(server,q['service'],q['country'],q['metadata'])
             pid=result.get('id');phone=result.get('phone')
-            if not pid or not phone:raise RuntimeError('Provider tidak mengembalikan nomor')
+            if not pid or not phone:raise ProviderRejected('Provider tidak mengembalikan nomor')
+            got_number=True
             save_provider_order(order_id,str(pid),int(q['cost_idr']),str(phone),result.get('expired_at'))
             with conn() as db:db.execute('UPDATE orders SET status=%s,service_name=%s,country_name=%s WHERE order_id=%s',('WAITING_OTP',q['service'],q['country'],order_id))
             return jsonify(order_id=order_id,phone=phone,price=q['price_idr'])
@@ -461,16 +476,21 @@ def server_buy(server):
             app.logger.warning('Provider menolak pembelian order=%s server=%s: %s',order_id,server,rej)
             # Only explicit provider rejection is safe to refund immediately.
             try:
-                refund=refund_order(order_id,'Provider menolak pembelian web')
-                with conn() as db:
-                    db.execute("UPDATE orders SET status='FAILED' WHERE order_id=%s AND refund_status='REFUNDED'",(order_id,))
+                refund=fail_and_refund_order(order_id,'Provider menolak pembelian web')
                 return jsonify(error='Gagal mendapatkan nomor. Saldo sudah dikembalikan.',status='FAILED',balance=refund.get('balance')),409
             except Exception:
                 app.logger.exception('Explicit rejection refund failed: %s',order_id)
                 return err('Pembelian gagal; pengembalian saldo perlu diperiksa admin.',503)
         except Exception:
-            app.logger.exception('Provider order needs reconciliation: %s',order_id)
-            with conn() as db:db.execute("UPDATE orders SET status='REVIEW' WHERE order_id=%s AND provider_order_id IS NULL",(order_id,))
+            app.logger.exception('Pembelian web gagal order=%s got_number=%s',order_id,got_number)
+            if not got_number:
+                try:
+                    refund=fail_and_refund_order(order_id,'Vendor gagal menyiapkan nomor (web)')
+                    return jsonify(error='Gagal mendapatkan nomor. Saldo sudah dikembalikan.',status='FAILED',balance=refund.get('balance')),409
+                except Exception:
+                    app.logger.exception('Refund otomatis gagal order=%s',order_id)
+            # Nomor sudah didapat tapi gagal disimpan: tahan untuk admin (status terpisah agar tidak ikut di-refund otomatis).
+            with conn() as db:db.execute("UPDATE orders SET status='PROVIDER_REVIEW' WHERE order_id=%s AND provider_order_id IS NULL",(order_id,))
             return err('Status pembelian perlu diperiksa admin. Jangan mengulangi order.',503)
     except psycopg.Error:app.logger.exception('Server order database failed');return err('Database sementara bermasalah',503)
 
@@ -529,13 +549,14 @@ def web_cancel_order():
                     return err('OTP sudah diterima. Pembatalan tidak tersedia.',409)
                 if order['status'] not in ('PENDING','WAITING_OTP'):
                     return err('Status order belum memungkinkan pembatalan.',409)
+                pid=order['provider_order_id'];provider=str(order['provider'] or '').lower()
                 started=order['created_at']
-                if started:
+                # Server 4 (grizzly) tidak memakai batas 120 detik tetap: waktu proses batal mengikuti vendor.
+                if started and provider!='grizzly':
                     if isinstance(started,str):started=datetime.fromisoformat(started)
                     now=datetime.now(started.tzinfo) if started.tzinfo else datetime.now()
                     seconds=(now-started).total_seconds()
                     if seconds<120:return err('Tunggu '+str(max(1,math.ceil((120-seconds)/60)))+' menit sebelum membatalkan.',409)
-                pid=order['provider_order_id'];provider=str(order['provider'] or '').lower()
                 if not pid:return err('ID provider belum tersedia; admin perlu memeriksa pesanan.',409)
                 verified=False
                 if provider=='5sim':
@@ -562,17 +583,26 @@ def web_cancel_order():
                     state=prem_status(pid)
                     verified=str(state.get('status','')).lower() in ('cancel','canceled','cancelled','expired','timeout')
                 elif provider=='grizzly':
-                    from grizzlysms import cancel_number as g4_cancel
-                    from azhura_web.web_servers import g4_confirm_cancelled
-                    cancel_ok=False
-                    try:
-                        res=g4_cancel(pid)
-                        cancel_ok=isinstance(res,dict) and res.get('response')=='OK'
-                    except Exception as g4ex:
-                        # Pembatalan ulang pada aktivasi yang sudah dibatalkan bisa membalas ACCESS_CANCEL*.
-                        cancel_ok='ACCESS_CANCEL' in str(g4ex).upper()
-                        app.logger.warning('Server 4 cancel reply order=%s: %s',oid,g4ex)
-                    verified=cancel_ok or g4_confirm_cancelled(pid)
+                    # Server 4: ikuti proses vendor secara realtime. Endpoint ini idempoten dan dipanggil
+                    # berulang oleh web selama vendor belum membatalkan; refund hanya setelah vendor batal.
+                    from grizzlysms import cancel_attempt as g4_attempt
+                    with conn() as db:
+                        db.execute('''CREATE TABLE IF NOT EXISTS web_cancel_requests (order_id TEXT PRIMARY KEY,requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),last_status TEXT,attempts INT NOT NULL DEFAULT 0)''')
+                        db.execute('INSERT INTO web_cancel_requests(order_id) VALUES(%s) ON CONFLICT (order_id) DO NOTHING',(oid,))
+                        req=db.execute('SELECT EXTRACT(EPOCH FROM (NOW()-requested_at))::int AS elapsed FROM web_cancel_requests WHERE order_id=%s',(oid,)).fetchone()
+                    elapsed=int((req or {}).get('elapsed') or 0)
+                    if elapsed>20*60:
+                        with conn() as db:db.execute('DELETE FROM web_cancel_requests WHERE order_id=%s',(oid,))
+                        return err('Vendor Server 4 belum mengonfirmasi pembatalan setelah 20 menit. Saldo belum dikembalikan; hubungi admin.',409)
+                    attempt=g4_attempt(pid)
+                    g4state=attempt.get('state');g4status=str(attempt.get('provider_status') or '')[:120]
+                    with conn() as db:db.execute('UPDATE web_cancel_requests SET last_status=%s,attempts=attempts+1 WHERE order_id=%s',(g4status,oid))
+                    if g4state=='otp_received':
+                        with conn() as db:db.execute('DELETE FROM web_cancel_requests WHERE order_id=%s',(oid,))
+                        return err('OTP sudah diterima di vendor. Pembatalan tidak tersedia.',409)
+                    if g4state!='cancelled':
+                        return jsonify(status='PENDING_VENDOR',message='Menunggu vendor Server 4 menyelesaikan pembatalan. Saldo otomatis kembali begitu vendor berhasil batal.',elapsed=elapsed,vendor_status=g4status or 'menunggu vendor',retry_after=5),202
+                    verified=True
                 else:return err('Provider order tidak dikenal. Hubungi admin.',409)
                 if not verified:return err('Provider belum mengonfirmasi pembatalan. Saldo belum dikembalikan; coba lagi atau hubungi admin.',409)
                 # Recheck OTP after network call; if another worker recorded an OTP,
@@ -582,6 +612,10 @@ def web_cancel_order():
                 if not latest or latest['otp_code'] or latest['status'] in ('SUCCESS','COMPLETED'):
                     return err('OTP sudah diterima atau order selesai; refund ditahan untuk pemeriksaan.',409)
                 refund=refund_order(oid,'Pembatalan web dikonfirmasi provider')
+                if provider=='grizzly':
+                    try:
+                        with conn() as db:db.execute('DELETE FROM web_cancel_requests WHERE order_id=%s',(oid,))
+                    except Exception:app.logger.warning('Cleanup web_cancel_requests gagal: %s',oid)
                 return jsonify(status='REFUNDED',message='Pembatalan disetujui provider. Saldo sudah dikembalikan.',balance=refund.get('balance'))
             finally:lock_db.execute('SELECT pg_advisory_unlock(hashtext(%s))',(oid,))
     except (psycopg.Error,requests.RequestException,RuntimeError,ValueError) as ex:
