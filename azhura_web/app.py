@@ -598,8 +598,27 @@ def web_cancel_order():
                     g4state=attempt.get('state');g4status=str(attempt.get('provider_status') or '')[:120]
                     with conn() as db:db.execute('UPDATE web_cancel_requests SET last_status=%s,attempts=attempts+1 WHERE order_id=%s',(g4status,oid))
                     if g4state=='otp_received':
+                        # Kode OTP muncul di vendor saat proses batal: JANGAN batal/refund, teruskan OTP ke user.
                         with conn() as db:db.execute('DELETE FROM web_cancel_requests WHERE order_id=%s',(oid,))
-                        return err('OTP sudah diterima di vendor. Pembatalan tidak tersedia.',409)
+                        snap=attempt.get('data') or {}
+                        otp=snap.get('otp');otp_text=snap.get('text')
+                        if otp:
+                            try:
+                                from database import save_otp_result, mark_order_success
+                                save_otp_result(oid,otp,otp_text)
+                                changed=bool(mark_order_success(oid))
+                                with conn() as db:
+                                    moved=db.execute("UPDATE orders SET status='SUCCESS' WHERE order_id=%s AND telegram_id=%s AND status='WAITING_OTP'",(oid,uid()))
+                                    changed=changed or moved.rowcount>0
+                                if changed:
+                                    try:
+                                        with conn() as db:
+                                            db.execute('''CREATE TABLE IF NOT EXISTS web_otp_notify (order_id TEXT PRIMARY KEY,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),notified BOOLEAN NOT NULL DEFAULT FALSE,attempts INT NOT NULL DEFAULT 0)''')
+                                            db.execute('''INSERT INTO web_otp_notify(order_id) VALUES(%s)
+                                                ON CONFLICT (order_id) DO UPDATE SET notified=FALSE,attempts=0,created_at=NOW()''',(oid,))
+                                    except Exception:app.logger.exception('Antrean notifikasi OTP web gagal: %s',oid)
+                            except Exception:app.logger.exception('Simpan OTP saat batal Server 4 gagal: %s',oid)
+                        return jsonify(status='OTP_RECEIVED',message='OTP sudah diterima dari vendor. Pesanan diteruskan, pembatalan tidak diperlukan.',otp_code=otp)
                     if g4state!='cancelled':
                         return jsonify(status='PENDING_VENDOR',message='Menunggu vendor Server 4 menyelesaikan pembatalan. Saldo otomatis kembali begitu vendor berhasil batal.',elapsed=elapsed,vendor_status=g4status or 'menunggu vendor',retry_after=5),202
                     verified=True
