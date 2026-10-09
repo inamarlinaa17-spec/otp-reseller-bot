@@ -227,7 +227,8 @@ _AUTO_POLL_CURSOR = 0
 # Server 4: rotasi poller per-order (agar setiap order Grizzly pasti ter-poll) dan jeda
 # percobaan auto-expire (agar vendor tidak dipanggil tiap detik untuk order yang sama).
 _S4_LAST_POLLED_ORDER = None
-_S4_EXPIRE_RETRY_AT = {}
+_POLL_LAST_ORDER = {}  # provider -> order_id terakhir yang di-poll (rotasi adil semua server)
+_S4_EXPIRE_RETRY_AT = {}  # (dipakai semua server) order_id -> waktu boleh coba auto-expire lagi
 S4_EXPIRE_RETRY_SECONDS = 30
 
 
@@ -4853,11 +4854,11 @@ async def _auto_expire_order(application, order, provider_order_id):
         logger.warning("[AUTO EXPIRE] provider order id missing order=%s; refund blocked", order_id)
         return False
 
-    # Server 4: jangan memanggil vendor tiap detik untuk order yang sama.
-    if provider == "grizzly":
-        _loop_now = asyncio.get_running_loop().time()
-        if _loop_now < _S4_EXPIRE_RETRY_AT.get(order_id, 0.0):
-            return False
+    # Semua server: jangan memanggil vendor tiap detik untuk order expired yang sama
+    # (tanpa jeda, satu order macet bisa menyita poller sehingga OTP order baru telat).
+    _loop_now = asyncio.get_running_loop().time()
+    if _loop_now < _S4_EXPIRE_RETRY_AT.get(order_id, 0.0):
+        return False
 
     # Serialize auto-expiry with a user's manual Batal/Refund task for this
     # exact order. Different users/orders never block each other.
@@ -4889,7 +4890,7 @@ async def _auto_expire_order(application, order, provider_order_id):
             _S4_EXPIRE_RETRY_AT[order_id] = asyncio.get_running_loop().time() + S4_EXPIRE_RETRY_SECONDS
             return False
 
-        if provider == "grizzly" and (not cancel_result or cancel_result.get("response") != "OK"):
+        if not cancel_result or cancel_result.get("response") != "OK":
             _S4_EXPIRE_RETRY_AT[order_id] = asyncio.get_running_loop().time() + S4_EXPIRE_RETRY_SECONDS
 
         if not cancel_result or cancel_result.get("response") != "OK":
@@ -4907,6 +4908,7 @@ async def _auto_expire_order(application, order, provider_order_id):
             )
         except Exception:
             logger.exception("[AUTO EXPIRE] refund failed order=%s", order_id)
+            _S4_EXPIRE_RETRY_AT[order_id] = asyncio.get_running_loop().time() + S4_EXPIRE_RETRY_SECONDS
             return False
 
     try:
@@ -5113,20 +5115,33 @@ async def auto_process_pending_orders(application):
                             _AUTO_POLL_CURSOR = (idx + 1) % total
                             break
 
-                # Server 4: pastikan SEMUA order Grizzly bergiliran di-poll (sebelumnya satu
-                # order bisa terus terpilih sementara order lain tidak pernah dicek).
-                if selected and str(selected.get("provider") or "").strip().lower() == "grizzly":
-                    s4_rows = [
+                # Rotasi adil untuk SEMUA server (1,2,3,4): setiap order milik provider yang
+                # sama bergiliran di-poll. Sebelumnya kursor round-robin bisa jatuh di baris
+                # yang sama terus, sehingga satu order lama terus di-poll dan order baru
+                # tidak pernah dicek (OTP muncul di vendor tapi tidak diteruskan).
+                if selected:
+                    def _norm_provider(r):
+                        pv = str(r.get("provider") or "5sim").strip().lower()
+                        return pv if pv in _AUTO_POLL_NEXT else "5sim"
+
+                    def _has_provider_id(r):
+                        rt = _RUNTIME_PROVIDER_CACHE.get(r.get("order_id")) or {}
+                        return bool(str(r.get("provider_order_id") or rt.get("provider_order_id") or "").strip())
+
+                    sel_provider = _norm_provider(selected)
+                    same_rows = [
                         r for r in rows
-                        if str(r.get("provider") or "").strip().lower() == "grizzly"
+                        if _norm_provider(r) == sel_provider and _has_provider_id(r)
                     ]
-                    if len(s4_rows) > 1:
-                        ids = [str(r.get("order_id")) for r in s4_rows]
-                        if _S4_LAST_POLLED_ORDER in ids:
-                            selected = s4_rows[(ids.index(_S4_LAST_POLLED_ORDER) + 1) % len(s4_rows)]
+                    if len(same_rows) > 1:
+                        ids = [str(r.get("order_id")) for r in same_rows]
+                        last_id = _POLL_LAST_ORDER.get(sel_provider)
+                        if last_id in ids:
+                            selected = same_rows[(ids.index(last_id) + 1) % len(same_rows)]
                         else:
-                            selected = s4_rows[0]
-                    _S4_LAST_POLLED_ORDER = str(selected.get("order_id"))
+                            selected = same_rows[0]
+                    if _has_provider_id(selected):
+                        _POLL_LAST_ORDER[sel_provider] = str(selected.get("order_id"))
 
                 # Polling below is shared by 5SIM, RumahOTP and PremOTP.
                 if selected:
