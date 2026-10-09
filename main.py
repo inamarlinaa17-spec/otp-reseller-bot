@@ -1579,10 +1579,10 @@ async def user_start(
         user.id
     )
 
+    # Total User di Bot Stats selalu sama dengan bot utama (termasuk di bot reseller).
+    # Jumlah pembeli asli per reseller tetap terlihat di panel reseller & admin panel.
     total_user = get_total_users()
     _rs = current_reseller()
-    if _rs:
-        total_user = reseller_buyer_count(_rs["id"])
 
     waktu = get_wib_time()
 
@@ -4266,7 +4266,11 @@ async def _send_traffic_otp_notification(application, order, code, sms_text):
             # Reuse the running Telegram application when the main bot token is
             # used. This avoids opening a second Bot client for every OTP and
             # keeps the notification on the same authenticated application.
-            await application.bot.send_message(
+            # PENTING: untuk order dari bot reseller, `application.bot` adalah bot
+            # reseller (bukan admin channel traffic), sehingga kirim ke channel
+            # gagal dan OTP dikirim berulang ke user. Selalu pakai BOT UTAMA.
+            _main_app = _WEBHOOK_APPLICATION or getattr(application, "_app", None) or application
+            await _main_app.bot.send_message(
                 chat_id=TRAFFIC_CHANNEL,
                 text=traffic_text,
                 parse_mode="HTML",
@@ -4407,6 +4411,11 @@ def _app_for_order(application, order):
 
 
 _OTP_DELIVERY_INFLIGHT = set()
+# Anti-spam: OTP yang sudah terkirim ke user tidak dikirim ulang walau notifikasi
+# channel traffic gagal dan proses diulang (order_id -> kode OTP).
+_OTP_USER_MSG_SENT = {}
+_OTP_TRAFFIC_ATTEMPTS = {}
+_OTP_TRAFFIC_MAX_ATTEMPTS = 5
 
 
 async def _send_otp_received_message(application, order_id, data_sms):
@@ -4482,58 +4491,74 @@ async def _send_otp_received_message_impl(application, order_id, data_sms):
     # return False so the polling/webhook layer can retry instead of silently
     # marking the order completed.
     try:
-        message_id = current.get("telegram_message_id") or runtime.get("telegram_message_id")
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
-            [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
-        ])
-        if message_id:
-            try:
-                await application.bot.edit_message_text(
-                    chat_id=int(current["telegram_id"]),
-                    message_id=int(message_id),
-                    text=text_body,
-                    parse_mode="HTML",
-                    reply_markup=markup,
-                )
-            except Exception:
-                # The original order message may have been deleted or become
-                # uneditable. Send a fresh OTP message and remember its ID.
-                logger.warning(
-                    "[AUTO OTP] edit order message failed; sending new message order=%s",
-                    order_id,
-                )
+        # Pesan OTP untuk kode ini sudah sampai ke user pada percobaan sebelumnya
+        # (yang gagal hanya notifikasi traffic) -> jangan kirim ulang / spam.
+        if _OTP_USER_MSG_SENT.get(order_id) != str(code):
+            message_id = current.get("telegram_message_id") or runtime.get("telegram_message_id")
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+            ])
+            if message_id:
+                try:
+                    await application.bot.edit_message_text(
+                        chat_id=int(current["telegram_id"]),
+                        message_id=int(message_id),
+                        text=text_body,
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+                except Exception as edit_exc:
+                    if "not modified" in str(edit_exc).lower():
+                        # Isi pesan sudah sama = OTP sudah tampil di chat user.
+                        logger.info("[AUTO OTP] message already up to date order=%s", order_id)
+                    else:
+                        # The original order message may have been deleted or become
+                        # uneditable. Send a fresh OTP message and remember its ID.
+                        logger.warning(
+                            "[AUTO OTP] edit order message failed; sending new message order=%s",
+                            order_id,
+                        )
+                        sent = await application.bot.send_message(
+                            chat_id=int(current["telegram_id"]),
+                            text=text_body,
+                            parse_mode="HTML",
+                            reply_markup=markup,
+                        )
+                        await asyncio.to_thread(
+                            save_order_message_id, order_id, sent.message_id
+                        )
+            else:
+                # Backward compatibility for an order created before this patch.
                 sent = await application.bot.send_message(
                     chat_id=int(current["telegram_id"]),
                     text=text_body,
                     parse_mode="HTML",
                     reply_markup=markup,
                 )
-                await asyncio.to_thread(
-                    save_order_message_id, order_id, sent.message_id
-                )
-        else:
-            # Backward compatibility for an order created before this patch.
-            sent = await application.bot.send_message(
-                chat_id=int(current["telegram_id"]),
-                text=text_body,
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-            await asyncio.to_thread(save_order_message_id, order_id, sent.message_id)
+                await asyncio.to_thread(save_order_message_id, order_id, sent.message_id)
+            _OTP_USER_MSG_SENT[order_id] = str(code)
     except Exception:
         logger.exception("[AUTO OTP] failed to update user message order=%s", order_id)
         return False
 
     # Traffic notification is also required for this OTP event. Keep it in the
     # retry path so a temporary channel/bot error does not lose the event.
+    # Percobaan dibatasi agar order tidak macet selamanya bila channel bermasalah.
     try:
         traffic_sent = await _send_traffic_otp_notification(application, current, code, text)
     except Exception:
         logger.exception("[TRAFFIC] OTP notification exception order=%s", order_id)
-        return False
+        traffic_sent = False
     if not traffic_sent:
-        return False
+        attempts = _OTP_TRAFFIC_ATTEMPTS.get(order_id, 0) + 1
+        _OTP_TRAFFIC_ATTEMPTS[order_id] = attempts
+        if attempts < _OTP_TRAFFIC_MAX_ATTEMPTS:
+            return False
+        logger.error(
+            "[TRAFFIC] notification failed %s times order=%s; continue without it",
+            attempts, order_id,
+        )
 
     # Both Telegram destinations have now accepted the OTP. Persist it only
     # after delivery so a failed notification never blocks retry/refund.
@@ -4570,6 +4595,8 @@ async def _send_otp_received_message_impl(application, order_id, data_sms):
     if not changed:
         return False
 
+    _OTP_USER_MSG_SENT.pop(order_id, None)
+    _OTP_TRAFFIC_ATTEMPTS.pop(order_id, None)
     return True
 
 
