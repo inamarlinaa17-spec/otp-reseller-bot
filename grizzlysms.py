@@ -1099,7 +1099,7 @@ def cancel_attempt(activation_id):
         if status_is_cancelled(snapshot):
             return {"state": "cancelled", "provider_status": "STATUS_CANCEL"}
         if snapshot.get("otp"):
-            return {"state": "otp_received", "provider_status": str(snapshot.get("status") or "OK")}
+            return {"state": "otp_received", "provider_status": str(snapshot.get("status") or "OK"), "data": snapshot}
 
     # 2) Minta vendor membatalkan.
     reply = ""
