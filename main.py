@@ -224,6 +224,11 @@ _CANCEL_ORDER_LOCKS = {}
 _WEBHOOK_APPLICATION = None
 _WEBHOOK_LOOP = None
 _AUTO_POLL_CURSOR = 0
+# Server 4: rotasi poller per-order (agar setiap order Grizzly pasti ter-poll) dan jeda
+# percobaan auto-expire (agar vendor tidak dipanggil tiap detik untuk order yang sama).
+_S4_LAST_POLLED_ORDER = None
+_S4_EXPIRE_RETRY_AT = {}
+S4_EXPIRE_RETRY_SECONDS = 30
 
 
 # =========================================================
@@ -4400,7 +4405,22 @@ def _app_for_order(application, order):
     return application
 
 
+_OTP_DELIVERY_INFLIGHT = set()
+
+
 async def _send_otp_received_message(application, order_id, data_sms):
+    """Pembungkus anti-duplikat: satu order hanya diproses satu pengirim OTP pada satu waktu
+    (poller otomatis dan proses Batal/Refund Server 4 bisa bertemu di order yang sama)."""
+    if order_id in _OTP_DELIVERY_INFLIGHT:
+        return False
+    _OTP_DELIVERY_INFLIGHT.add(order_id)
+    try:
+        return await _send_otp_received_message_impl(application, order_id, data_sms)
+    finally:
+        _OTP_DELIVERY_INFLIGHT.discard(order_id)
+
+
+async def _send_otp_received_message_impl(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
     if not order or str(order.get("status") or "").upper() not in {"PENDING", "WAITING_OTP"}:
@@ -4652,6 +4672,7 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
                 "error": "Pembatalan Server 4 belum dikonfirmasi provider.",
                 "provider_status": attempt.get("provider_status"),
                 "state": attempt.get("state"),
+                "data": attempt.get("data"),
             }
 
         result = await asyncio.to_thread(cancel_number, provider_order_id)
@@ -4674,6 +4695,20 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
     except Exception as exc:
         logger.exception("[CANCEL] provider cancel failed order=%s provider=%s", order_id, provider)
         return {"response": "ERROR", "error": str(exc)}
+
+
+def _grizzly_snapshot_to_data_sms(gd):
+    """Bentuk data OTP Server 4 sama persis dengan yang dipakai poller otomatis."""
+    gd = gd if isinstance(gd, dict) else {}
+    return {
+        "response": "OK",
+        "status": gd.get("status"),
+        "phone": gd.get("phone"),
+        "otp": gd.get("otp"),
+        "expired_at": gd.get("expired_at"),
+        "sms": gd.get("sms") if isinstance(gd.get("sms"), list) else [],
+        "sms_text": gd.get("text") or "",
+    }
 
 
 def _server4_order_cancellable(order):
@@ -4703,6 +4738,8 @@ async def _run_server4_cancel(application, order_id, provider_order_id):
             async with lock:
                 current = await asyncio.to_thread(get_order, order_id)
                 if not _server4_order_cancellable(current):
+                    if current and _order_has_received_otp(current):
+                        state["phase"] = "otp_received"
                     return  # OTP masuk / sudah direfund / status berubah
 
                 attempt = await asyncio.to_thread(cancel_grizzly_attempt, provider_order_id)
@@ -4715,9 +4752,21 @@ async def _run_server4_cancel(application, order_id, provider_order_id):
                 vendor_state = attempt.get("state")
 
                 if vendor_state == "otp_received":
-                    # Vendor sudah menerima OTP: jangan batal/refund. Poller OTP
-                    # yang sudah ada akan mengirim kodenya ke user.
-                    logger.info("[S4 CANCEL] OTP already received at vendor order=%s", order_id)
+                    # Kode OTP muncul di vendor saat proses batal berjalan: jangan batal/refund,
+                    # TERUSKAN OTP ke user (status order -> OTP diterima).
+                    logger.info("[S4 CANCEL] OTP received at vendor during cancel order=%s -> deliver", order_id)
+                    state["phase"] = "otp_received"
+                    data_sms = _normalize_otp_response(_grizzly_snapshot_to_data_sms(attempt.get("data")))
+                    for _ in range(3):
+                        try:
+                            if await _send_otp_received_message(application, order_id, data_sms):
+                                break
+                        except Exception:
+                            logger.exception("[S4 CANCEL] deliver OTP failed order=%s", order_id)
+                        latest = await asyncio.to_thread(get_order, order_id)
+                        if not latest or str(latest.get("status") or "").upper() not in {"PENDING", "WAITING_OTP"}:
+                            break  # sudah diteruskan oleh poller otomatis
+                        await asyncio.sleep(2)
                     return
 
                 if vendor_state == "cancelled":
@@ -4804,6 +4853,12 @@ async def _auto_expire_order(application, order, provider_order_id):
         logger.warning("[AUTO EXPIRE] provider order id missing order=%s; refund blocked", order_id)
         return False
 
+    # Server 4: jangan memanggil vendor tiap detik untuk order yang sama.
+    if provider == "grizzly":
+        _loop_now = asyncio.get_running_loop().time()
+        if _loop_now < _S4_EXPIRE_RETRY_AT.get(order_id, 0.0):
+            return False
+
     # Serialize auto-expiry with a user's manual Batal/Refund task for this
     # exact order. Different users/orders never block each other.
     lock = _get_cancel_order_lock(order_id)
@@ -4816,6 +4871,27 @@ async def _auto_expire_order(application, order, provider_order_id):
         application = _app_for_order(application, current)
 
         cancel_result = await _cancel_provider_and_verify(provider, provider_order_id, order_id)
+
+        if provider == "grizzly" and (cancel_result or {}).get("state") == "otp_received":
+            # Vendor sudah menerima OTP: TERUSKAN ke user, jangan refund/batal.
+            data_sms = _normalize_otp_response(
+                _grizzly_snapshot_to_data_sms((cancel_result or {}).get("data"))
+            )
+            delivered = False
+            try:
+                delivered = await _send_otp_received_message(application, order_id, data_sms)
+            except Exception:
+                logger.exception("[AUTO EXPIRE] deliver OTP failed order=%s", order_id)
+            if delivered:
+                logger.info("[AUTO EXPIRE] Server 4 OTP delivered instead of refund order=%s", order_id)
+                _S4_EXPIRE_RETRY_AT.pop(order_id, None)
+                return True
+            _S4_EXPIRE_RETRY_AT[order_id] = asyncio.get_running_loop().time() + S4_EXPIRE_RETRY_SECONDS
+            return False
+
+        if provider == "grizzly" and (not cancel_result or cancel_result.get("response") != "OK"):
+            _S4_EXPIRE_RETRY_AT[order_id] = asyncio.get_running_loop().time() + S4_EXPIRE_RETRY_SECONDS
+
         if not cancel_result or cancel_result.get("response") != "OK":
             logger.warning(
                 "[AUTO EXPIRE] cancel not confirmed order=%s provider=%s provider_order=%s result=%s",
@@ -4979,7 +5055,7 @@ async def auto_process_pending_orders(application):
     worker therefore spaces status reads per provider instead of polling every
     order aggressively. This also removes the need for users to press Cek OTP.
     """
-    global _AUTO_POLL_CURSOR
+    global _AUTO_POLL_CURSOR, _S4_LAST_POLLED_ORDER
     while True:
         try:
             with get_db() as db:
@@ -5036,6 +5112,21 @@ async def auto_process_pending_orders(application):
                             selected = candidate
                             _AUTO_POLL_CURSOR = (idx + 1) % total
                             break
+
+                # Server 4: pastikan SEMUA order Grizzly bergiliran di-poll (sebelumnya satu
+                # order bisa terus terpilih sementara order lain tidak pernah dicek).
+                if selected and str(selected.get("provider") or "").strip().lower() == "grizzly":
+                    s4_rows = [
+                        r for r in rows
+                        if str(r.get("provider") or "").strip().lower() == "grizzly"
+                    ]
+                    if len(s4_rows) > 1:
+                        ids = [str(r.get("order_id")) for r in s4_rows]
+                        if _S4_LAST_POLLED_ORDER in ids:
+                            selected = s4_rows[(ids.index(_S4_LAST_POLLED_ORDER) + 1) % len(s4_rows)]
+                        else:
+                            selected = s4_rows[0]
+                    _S4_LAST_POLLED_ORDER = str(selected.get("order_id"))
 
                 # Polling below is shared by 5SIM, RumahOTP and PremOTP.
                 if selected:
@@ -7576,6 +7667,13 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
                     logger.exception("[OTP CANCEL] failed to repair refunded card order=%s", order_id)
                 await query.answer(
                     "✅ Refund sudah berhasil diproses dan saldo sudah dikembalikan.",
+                    show_alert=True,
+                )
+            elif phase == "otp_received":
+                await query.answer(
+                    "🎉 OTP sudah diterima dari vendor.\n\n"
+                    "Pesanan diteruskan dan pembatalan tidak diperlukan. "
+                    "Kode OTP ditampilkan di pesan order.",
                     show_alert=True,
                 )
             elif phase == "vendor_wait":
