@@ -87,6 +87,11 @@ def _service_detail_text(s):
     return "\n".join(lines)
 
 
+def _bottom_rows():
+    return [[_btn("🧾 Pesanan SMM Saya", "smm_h:0"), _btn("❓ Bantuan", "smm_help")],
+            [_btn("« Kembali ke Menu", "user_home")]]
+
+
 # =========================================================
 # CALLBACK ROUTER
 # =========================================================
@@ -103,8 +108,23 @@ async def handle_callback(query, context):
                     _kb([[_btn("⬅️ Menu Utama", "user_home")]]))
         return
 
+    # Maintenance SMM: user biasa hanya boleh cek pesanan & bantuan. Admin tetap bebas.
+    if user_id != _admin_id() and not data.startswith(("smm_h:", "smm_st:", "smm_help")):
+        try:
+            under_maint = await asyncio.to_thread(smm.is_maintenance)
+        except Exception:
+            logger.exception("smm: gagal membaca status maintenance")
+            under_maint = False
+        if under_maint:
+            context.user_data.pop("smm_state", None)
+            await _show(query, smm.MAINTENANCE_TEXT, _kb(_bottom_rows()))
+            return
+
     try:
-        if data == "smm_home":
+        if data == "smm_help":
+            await _show(query, smm.HELP_TEXT,
+                        _kb([[_btn("« Menu SMM", "smm_home")], [_btn("« Kembali ke Menu", "user_home")]]))
+        elif data == "smm_home":
             await _platforms(query, context)
         elif data.startswith("smm_p:"):
             await _kinds(query, context, int(data.split(":")[1]))
@@ -146,12 +166,14 @@ async def _platforms(query, context):
             rows.append(row); row = []
     if row:
         rows.append(row)
-    rows.append([_btn("📋 Riwayat SMM", "smm_h:0")])
-    rows.append([_btn("⬅️ Menu Utama", "user_home")])
+    rows.extend(_bottom_rows())
     bal = await asyncio.to_thread(get_balance, query.from_user.id)
+    maint_note = ""
+    if query.from_user.id == _admin_id() and await asyncio.to_thread(smm.is_maintenance):
+        maint_note = "\n🛠 <i>Maintenance SMM aktif — hanya admin yang bisa order.</i>\n"
     await _show(query,
                 "🚀 <b>SMM PANEL</b>\n\nFollowers, Likes, Views & lainnya untuk sosial media kamu.\n"
-                f"💳 Saldo: <b>{smm.rupiah(bal)}</b>\n\nPilih platform:", _kb(rows))
+                f"💳 Saldo: <b>{smm.rupiah(bal)}</b>\n{maint_note}\nPilih platform:", _kb(rows))
 
 
 async def _kinds(query, context, idx):
@@ -180,7 +202,10 @@ async def _list_services(query, context, kind_idx, page):
             await _platforms(query, context); return
         ctx["kind"] = kinds[kind_idx]
         svcs = await asyncio.to_thread(smm.get_services, ctx["platform"], ctx["kind"], None, 200)
-        svcs = sorted(svcs, key=lambda s: (s.get("price") or 0))
+        fset = await asyncio.to_thread(smm.featured_ids, ctx["platform"], ctx["kind"])
+        ctx["featured"] = fset
+        # layanan ⭐ Rekomendasi tampil paling atas, lalu urut termurah
+        svcs = sorted(svcs, key=lambda s: (0 if smm.is_featured(s, fset) else 1, s.get("price") or 0))
         ctx["svcs"] = svcs
         context.user_data["smm_ctx"] = ctx
     svcs = ctx.get("svcs")
@@ -188,24 +213,31 @@ async def _list_services(query, context, kind_idx, page):
         await _platforms(query, context); return
     total_pages = max(1, (len(svcs) + PAGE - 1) // PAGE)
     page = max(0, min(page, total_pages - 1))
+    fset = ctx.get("featured") or frozenset()
     rows = []
     for s in svcs[page * PAGE:(page + 1) * PAGE]:
-        price = smm.sell_price_per_1000(s.get("price") or 0)
-        rows.append([_btn(f"{smm.service_title(s)[:34]} • {smm.rupiah(price)}/1K", f"smm_s:{s['id']}")])
+        rows.append([_btn(smm.service_button_label(s, fset), f"smm_s:{s['id']}")])
     nav = []
     if page > 0:
-        nav.append(_btn("◀️", f"smm_l:{page - 1}"))
-    nav.append(_btn(f"{page + 1}/{total_pages}", "smm_home"))
+        nav.append(_btn("« Sebelumnya", f"smm_l:{page - 1}"))
     if page < total_pages - 1:
-        nav.append(_btn("▶️", f"smm_l:{page + 1}"))
-    rows.append(nav)
-    rows.append([_btn("⬅️ Jenis", f"smm_p:{(context.user_data.get('smm_plats') or []).index(ctx['platform'])}")
-                 if ctx.get("platform") in (context.user_data.get("smm_plats") or []) else _btn("⬅️ Platform", "smm_home")])
-    head = f"🚀 <b>{escape(str(ctx.get('platform')))} • {escape(str(ctx.get('kind')))}</b>\n"
+        nav.append(_btn("Berikutnya »", f"smm_l:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("« Sub-kategori", f"smm_p:{(context.user_data.get('smm_plats') or []).index(ctx['platform'])}")
+                 if ctx.get("platform") in (context.user_data.get("smm_plats") or []) else _btn("« Platform", "smm_home")])
+    head = (f"🚀 <b>{escape(str(ctx.get('platform')))} · {escape(str(ctx.get('kind')))}</b> "
+            f"({len(svcs)} layanan)\n")
     if not svcs:
         await _show(query, head + "\nBelum ada layanan untuk kategori ini.", _kb(rows[-1:]))
         return
-    await _show(query, head + f"\n{len(svcs)} layanan • harga per 1.000 (urut termurah).\nPilih layanan:", _kb(rows))
+    has_star = any(smm.is_featured(x, fset) for x in svcs)
+    notice = smm.delay_notice(ctx.get("platform"), has_star)
+    legend = "Harga per 1.000 • ↻ = tingkat selesai" + (" • ⭐ = Rekomendasi" if has_star else "")
+    body = head + (f"\n{notice}\n" if notice else "") + f"\n{legend}\n"
+    if total_pages > 1:
+        body += f"Halaman {page + 1}/{total_pages}\n"
+    await _show(query, body + "\nPilih layanan:", _kb(rows))
 
 
 def _lookup(context, sid):
@@ -414,8 +446,19 @@ async def admin_view(query, page=0):
         nav.append(_btn("◀️", f"admin_smm_page:{page - 1}"))
     if page < pages - 1:
         nav.append(_btn("▶️", f"admin_smm_page:{page + 1}"))
-    kb = ([nav] if nav else []) + [[_btn("⬅️ Admin Panel", "admin_home")]]
+    maint = await asyncio.to_thread(smm.is_maintenance)
+    lines.insert(1, "🛠 Maintenance SMM: <b>" + ("AKTIF" if maint else "NONAKTIF") + "</b>")
+    kb = ([nav] if nav else []) + [
+        [_btn("🛠 Maintenance SMM: " + ("ON → matikan" if maint else "OFF → aktifkan"), "admin_smm_maintenance")],
+        [_btn("⬅️ Admin Panel", "admin_home")]]
     await _show(query, "\n".join(lines), _kb(kb))
+
+
+async def admin_toggle_maintenance(query):
+    """Toggle maintenance SMM (flag sama dengan dashboard azhura_web)."""
+    current = await asyncio.to_thread(smm.is_maintenance)
+    await asyncio.to_thread(smm.set_maintenance, not current)
+    await admin_view(query, 0)
 
 
 # =========================================================

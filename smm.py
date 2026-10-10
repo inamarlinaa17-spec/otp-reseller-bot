@@ -711,3 +711,146 @@ def sync_active_orders(max_orders=25):
             log.exception("sync %s gagal", r["local_id"])
         time.sleep(0.3)
     return n
+
+
+# =========================================================
+# TAMBAHAN: MAINTENANCE SMM, NOTICE PLATFORM, LABEL LAYANAN
+# (aditif - tidak mengubah fungsi di atas)
+# =========================================================
+
+MAINT_KEY = "smm_maintenance"          # dipakai bersama oleh bot Telegram & dashboard azhura_web
+_TRUE = {"1", "true", "on", "yes"}
+
+
+def is_maintenance():
+    """True bila SMM PANEL sedang maintenance (flag bersama bot + web, tabel bot_settings)."""
+    from database import get_bot_setting
+    return str(get_bot_setting(MAINT_KEY, "0")).strip().lower() in _TRUE
+
+
+def set_maintenance(enabled):
+    from database import set_bot_setting
+    set_bot_setting(MAINT_KEY, "1" if enabled else "0")
+    return bool(enabled)
+
+
+MAINTENANCE_TEXT = (
+    "🛠 <b>SMM PANEL SEDANG MAINTENANCE</b>\n\n"
+    "Pemesanan layanan SMM sementara ditutup agar proses perbaikan berjalan aman.\n\n"
+    "✅ Saldo dan pesanan kamu yang sudah berjalan tetap aman.\n"
+    "🧾 Kamu masih bisa mengecek progres lewat \"Pesanan SMM Saya\".\n\n"
+    "Silakan kembali beberapa saat lagi. Terima kasih 🙏"
+)
+
+HELP_TEXT = (
+    "❓ <b>Tentang Pesanan SMM</b>\n\n"
+    "⚡ <b>Diproses otomatis</b>\n"
+    "Setiap pesanan langsung diproses otomatis begitu pembayaran berhasil. "
+    "Kamu tidak perlu melakukan apa pun — cukup tunggu.\n\n"
+    "🛡 <b>Gagal? Saldo kembali</b>\n"
+    "Jika pesanan gagal diproses, saldo otomatis dikembalikan penuh. "
+    "Kamu tidak dirugikan sedikit pun.\n\n"
+    "⏳ <b>Beberapa platform perlu waktu</b>\n"
+    "Sebagian platform menerapkan keamanan ekstra ketat, sehingga pemrosesannya bisa lebih lama — "
+    "kadang sampai beberapa hari. Itu normal dan pesanan tetap aman dalam antrean.\n\n"
+    "😊 Tenang saja, pesanan kamu aman dan pasti kami proses. "
+    "Cek perkembangannya kapan saja di \"Pesanan SMM Saya\"."
+)
+
+
+def delay_notice(platform, has_featured=True):
+    """Teks pemberitahuan di atas daftar layanan untuk platform yang sedang delay.
+    Env SMM_DELAY_NOTICE_PLATFORMS (pisah koma, default 'TikTok'; kosongkan / '-' untuk mematikan).
+    Env SMM_DELAY_NOTICE_TEXT (opsional) boleh memakai {platform}."""
+    raw = os.getenv("SMM_DELAY_NOTICE_PLATFORMS", "TikTok")
+    names = {p.strip().lower() for p in raw.split(",") if p.strip() and p.strip() != "-"}
+    if not platform or str(platform).strip().lower() not in names:
+        return ""
+    custom = os.getenv("SMM_DELAY_NOTICE_TEXT", "").strip()
+    if custom:
+        return custom.replace("{platform}", html.escape(str(platform)))
+    msg = f"⚠️ Layanan {html.escape(str(platform))} sedang dominan mengalami delay proses."
+    if has_featured:
+        msg += " Disarankan memilih layanan berlabel ⭐ Rekomendasi."
+    return msg
+
+
+def featured_ids(platform, kind):
+    """Set id layanan 'rekomendasi' (filter resmi `featured=true`). Gagal -> set kosong."""
+    def load():
+        params = {"featured": "true", "limit": 200}
+        if platform:
+            params["platform"] = platform
+        if kind:
+            params["kind"] = kind
+        try:
+            data = _call("/smm/services", params) or []
+        except SmmError:
+            return frozenset()
+        return frozenset(str(s.get("id")) for s in data if isinstance(s, dict) and s.get("id") is not None)
+    try:
+        return _cached(("featured", platform, kind), load)
+    except Exception:
+        return frozenset()
+
+
+_FEATURED_KEYS = ("featured", "recommended", "is_featured", "is_recommended")
+_RATE_KEYS = ("success_rate", "completion_rate", "completion_percent", "completion_pct",
+              "complete_rate", "completion", "success_percent", "finish_rate", "done_rate")
+
+
+def is_featured(s, featured_set=None):
+    if featured_set and str(s.get("id")) in featured_set:
+        return True
+    return any(s.get(k) is True for k in _FEATURED_KEYS)
+
+
+def service_rate(s):
+    """Persentase penyelesaian (0-100) bila disediakan provider; selain itu None."""
+    for k in _RATE_KEYS:
+        v = s.get(k)
+        if isinstance(v, bool) or v is None:
+            continue
+        try:
+            f = float(str(v).replace("%", "").strip())
+        except ValueError:
+            continue
+        if f < 0:
+            continue
+        if f <= 1:
+            f *= 100
+        return int(round(min(f, 100)))
+    return None
+
+
+def format_start(minutes):
+    """Estimasi mulai: 52m / 2j / 3h (menit / jam / hari)."""
+    try:
+        m = float(minutes)
+    except (TypeError, ValueError):
+        return ""
+    if m < 0:
+        return ""
+    if m < 60:
+        return f"{int(round(m))}m"
+    if m < 60 * 24:
+        return f"{int(round(m / 60))}j"
+    return f"{int(round(m / 1440))}h"
+
+
+def service_button_label(s, featured_set=None, max_len=46):
+    """Teks tombol daftar layanan: ⭐ Judul · Rp900/1K · 1j · ↻56%."""
+    star = "⭐ " if is_featured(s, featured_set) else ""
+    tail = [rupiah(sell_price_per_1000(s.get("price") or 0)) + "/1K"]
+    st = format_start(s.get("start_minutes"))
+    if st:
+        tail.append(st)
+    rate = service_rate(s)
+    if rate is not None:
+        tail.append(f"↻{rate}%")
+    tail_txt = " · ".join(tail)
+    room = max(12, max_len - len(star) - len(tail_txt) - 3)
+    title = service_title(s)
+    if len(title) > room:
+        title = title[:room - 1].rstrip() + "…"
+    return f"{star}{title} · {tail_txt}"

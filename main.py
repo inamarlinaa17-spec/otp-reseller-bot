@@ -26,6 +26,7 @@ from urllib.parse import quote
 from psycopg.errors import UniqueViolation
 
 import reseller
+import smm
 import smm_bot
 from reseller_ctx import current_reseller
 
@@ -599,6 +600,10 @@ def admin_menu():
 
     maintenance = is_maintenance_enabled()
     maintenance_label = "🛠 Maintenance: ON" if maintenance else "🛠 Maintenance: OFF"
+    try:
+        smm_maintenance_label = "🚀 SMM Maintenance: ON" if smm.is_maintenance() else "🚀 SMM Maintenance: OFF"
+    except Exception:
+        smm_maintenance_label = "🚀 SMM Maintenance"
 
     return InlineKeyboardMarkup([
 
@@ -651,6 +656,9 @@ def admin_menu():
         ],
         [
             InlineKeyboardButton("🚀 SMM Orders", callback_data="admin_smm")
+        ],
+        [
+            InlineKeyboardButton(smm_maintenance_label, callback_data="admin_smm_maintenance")
         ]
 
     ])
@@ -9429,6 +9437,9 @@ async def admin_callback(
             smm_page = 0
         await smm_bot.admin_view(query, smm_page)
 
+    elif query.data == "admin_smm_maintenance":
+        await smm_bot.admin_toggle_maintenance(query)
+
     elif query.data == "admin_resellers":
         await _admin_reseller_list(query)
 
@@ -10081,6 +10092,7 @@ async def button_handler(
         or query.data == "admin_noop"
         or query.data.startswith("admin_users_page:")
         or query.data.startswith("admin_smm_page:")
+        or query.data == "admin_smm_maintenance"
         or query.data.startswith("admin_user:")
         or query.data.startswith("admin_user_orders:")
         or query.data.startswith("admin_user_deposits:")
