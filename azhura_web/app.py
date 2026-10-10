@@ -739,6 +739,8 @@ WEB_MAINT_KEYS = {'web': 'azhura_web_maintenance', '1': 'azhura_web_server_1_mai
                   '2': 'azhura_web_server_2_maintenance', '3': 'azhura_web_server_3_maintenance', '4': 'azhura_web_server_4_maintenance',
                   'manual': 'azhura_web_payment_manual_maintenance', 'auto': 'azhura_web_payment_auto_maintenance'}
 
+WEB_MAINT_KEYS['smm']='smm_maintenance'  # saklar SMM PANEL: dibagi dengan bot Telegram (smm.MAINT_KEY)
+
 def web_is_admin():
     return bool(ADMIN_WEB_ID and uid() and int(uid()) == ADMIN_WEB_ID)
 
@@ -772,6 +774,18 @@ def web_maintenance_guard():
     if path=='/api/deposit/qris/create' and flags['auto']: return err('QRIS Otomatis sedang tidak aktif. Silakan gunakan QRIS Manual.',503)
     server=('3' if path=='/api/prem/buy' else path.split('/')[3] if path.startswith('/api/server/') else None)
     if server and flags.get(server): return err('Server '+server+' sedang maintenance. Silakan pilih server lain yang online.',503)
+
+@app.before_request
+def web_smm_maintenance_guard():
+    # Tutup hanya ORDER SMM BARU saat maintenance. Riwayat/status pesanan tetap dapat dibuka.
+    if request.method!='POST' or request.path!='/api/smm/order': return None
+    if web_is_admin(): return None
+    try: flags=web_maintenance_flags()
+    except psycopg.Error:
+        app.logger.exception('Maintenance flags unavailable; refusing new SMM order')
+        return err('Layanan sementara tidak tersedia. Coba beberapa saat lagi.',503)
+    if flags['web']: return err('Website sedang dalam perbaikan. Silakan kembali beberapa saat lagi.',503)
+    if flags['smm']: return err('SMM PANEL sedang maintenance. Pemesanan baru ditutup sementara, silakan coba lagi nanti.',503)
 
 @app.get('/api/web/status')
 def web_public_status():
