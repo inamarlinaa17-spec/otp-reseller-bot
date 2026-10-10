@@ -26,6 +26,7 @@ from urllib.parse import quote
 from psycopg.errors import UniqueViolation
 
 import reseller
+import smm_bot
 from reseller_ctx import current_reseller
 
 from flask import Flask, request, jsonify
@@ -513,6 +514,9 @@ def user_menu():
     ]
 
     if not is_reseller_bot:
+        rows.append([InlineKeyboardButton("🚀 SMM PANEL", callback_data="smm_home")])
+
+    if not is_reseller_bot:
         # Saldo gratis / iklan / referral hanya di bot utama (biayanya ditanggung bot utama).
         rows.append([
             InlineKeyboardButton("👥 Referral", callback_data="referral"),
@@ -644,6 +648,9 @@ def admin_menu():
         ],
         [
             InlineKeyboardButton("🖥 Server Maintenance", callback_data="admin_server_maintenance")
+        ],
+        [
+            InlineKeyboardButton("🚀 SMM Orders", callback_data="admin_smm")
         ]
 
     ])
@@ -5487,6 +5494,7 @@ async def post_init(application):
     application.create_task(auto_process_pending_orders(application))
     application.create_task(auto_notify_web_otp(application))
     application.create_task(reconcile_pending_premotp_qris(application))
+    application.create_task(smm_bot.sync_loop())
     if reseller.MANAGER:
         application.create_task(reseller.MANAGER.sync_loop())
 
@@ -9414,7 +9422,14 @@ async def admin_callback(
 
     ]
 
-    if query.data == "admin_resellers":
+    if query.data == "admin_smm" or query.data.startswith("admin_smm_page:"):
+        try:
+            smm_page = int(query.data.split(":", 1)[1]) if ":" in query.data else 0
+        except Exception:
+            smm_page = 0
+        await smm_bot.admin_view(query, smm_page)
+
+    elif query.data == "admin_resellers":
         await _admin_reseller_list(query)
 
     elif query.data.startswith("admin_reseller:"):
@@ -10056,7 +10071,8 @@ async def button_handler(
         "admin_stats",
         "admin_resellers",
         "admin_maintenance",
-        "admin_home"
+        "admin_home",
+        "admin_smm"
 
     }
 
@@ -10064,6 +10080,7 @@ async def button_handler(
         query.data in admin_callbacks
         or query.data == "admin_noop"
         or query.data.startswith("admin_users_page:")
+        or query.data.startswith("admin_smm_page:")
         or query.data.startswith("admin_user:")
         or query.data.startswith("admin_user_orders:")
         or query.data.startswith("admin_user_deposits:")
@@ -10127,6 +10144,13 @@ async def button_handler(
                 pass
         return
     context.user_data.pop("rs_state", None)
+
+    # SMM PANEL (SIMURU): semua callback smm_* ditangani smm_bot.
+    if not query.data.startswith("smm_"):
+        context.user_data.pop("smm_state", None)
+    else:
+        await smm_bot.handle_callback(query, context)
+        return
 
     if is_maintenance_enabled() and not is_admin(user_id):
         blocked_prefixes = (
@@ -10226,6 +10250,10 @@ async def text_handler(
 
     # Alur menu RESELLER (input token, Contact CS, margin, withdraw).
     if await reseller.handle_text(update, context):
+        return
+
+    # Alur input SMM PANEL (link/target, jumlah, komentar).
+    if await smm_bot.handle_text(update, context):
         return
 
     # Admin manual balance: amount is entered after selecting a user.
