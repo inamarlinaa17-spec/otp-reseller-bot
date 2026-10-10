@@ -4224,6 +4224,21 @@ def _order_has_received_otp(order):
     )
 
 
+def _traffic_server_label(order, runtime=None):
+    """Nama server singkat (Server 1-4) untuk notifikasi live traffic."""
+    runtime = runtime or {}
+    provider = str(
+        (order or {}).get("provider") or runtime.get("provider") or ""
+    ).strip().lower()
+    short = {
+        "5sim": "Server 1",
+        "rumahotp": "Server 2",
+        "premotp": "Server 3",
+        "grizzly": "Server 4",
+    }
+    return short.get(provider, provider.upper() if provider else "-")
+
+
 async def _send_traffic_otp_notification(application, order, code, sms_text):
     """Send the OTP notification to the live traffic channel and report success."""
     if not TRAFFIC_CHANNEL:
@@ -4240,13 +4255,15 @@ async def _send_traffic_otp_notification(application, order, code, sms_text):
         country_name = order.get("country_name") or order.get("country") or "-"
         price = format_rupiah(order.get("sell_price") or 0)
         provider_order_id = order.get("provider_order_id") or runtime.get("provider_order_id") or order.get("order_id")
+        server_label = _traffic_server_label(order, runtime)
         traffic_text = (
             "🔐 <b>CODE RECEIVED 2.0</b>\n\n"
             f"• <b>ID:</b> <code>{escape(str(provider_order_id))}</code>\n"
             f"• <b>Users:</b> {escape(str(masked_user))}\n"
             f"• <b>Code:</b> <code>{escape(str(code))}</code>\n"
             f"• <b>Number:</b> <code>{escape(str(masked_phone))}</code>\n"
-            f"• <b>Price:</b> {escape(str(price))}\n\n"
+            f"• <b>Price:</b> {escape(str(price))}\n"
+            f"• <b>Server:</b> {escape(str(server_label))}\n\n"
             "<b>message_text</b>\n"
             f"<code>{escape(str(sms_text or '-'))}</code>\n\n"
             f"{escape(str(service_name))} - {escape(str(country_name))}"
