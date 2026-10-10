@@ -940,6 +940,118 @@ def web_admin_maintenance():
     return jsonify(ok=True,maintenance=web_maintenance_flags())
 
 
+# ---------------- SMM PANEL (SIMURU) - web ----------------
+# Memakai modul smm.py yang sama dengan bot Telegram (saldo, harga, refund, maintenance = satu sistem).
+import re as _re
+import smm as smm_core
+
+def _smm_json(row,*,admin=False):
+    """Baris DB -> dict JSON aman (Decimal->int). User biasa tidak menerima harga modal/error internal."""
+    if not row:return row
+    out={}
+    for k,v in dict(row).items():
+        if not admin and k in ('provider_cost','cost_per_1000','sell_per_1000','error','idem_key','provider_status','telegram_id','updated_at'):continue
+        out[k]=int(v) if hasattr(v,'as_tuple') else v
+    return out
+
+def _smm_fail(e):
+    if isinstance(e,smm_core.SmmError):return err(str(e),getattr(e,'http_status',None) if getattr(e,'http_status',None) in (400,404,409,429) else 409 if isinstance(e,smm_core.SmmAmbiguous) else 400)
+    app.logger.exception('SMM web error')
+    return err('Layanan SMM sedang bermasalah. Coba lagi sebentar.',500)
+
+@app.get('/api/smm/platforms')
+def smm_platforms():
+    if not uid():return err('Login diperlukan',401)
+    try:
+        items=[]
+        for p in smm_core.get_platforms():
+            cheapest=next((p[k] for k in ('min_price','cheapest_price','cheapest','price_min','min') if isinstance(p.get(k),(int,float,str)) and str(p.get(k)).replace('.','',1).isdigit()),None)
+            items.append({'platform':p['platform'],'total':p.get('total') or p.get('count') or p.get('services') or 0,
+                          'min_price':smm_core.sell_price_per_1000(cheapest) if cheapest is not None else 0})
+        return jsonify(items=items)
+    except Exception as e:return _smm_fail(e)
+
+@app.get('/api/smm/kinds')
+def smm_kinds():
+    if not uid():return err('Login diperlukan',401)
+    platform=request.args.get('platform','').strip()[:60]
+    if not platform:return err('Platform wajib diisi')
+    try:return jsonify(items=smm_core.get_kinds(platform))
+    except Exception as e:return _smm_fail(e)
+
+@app.get('/api/smm/services')
+def smm_services():
+    if not uid():return err('Login diperlukan',401)
+    platform=request.args.get('platform','').strip()[:60];kind=request.args.get('kind','').strip()[:60];q=request.args.get('q','').strip()[:80]
+    if not platform or not kind:return err('Platform dan jenis wajib diisi')
+    try:
+        fset=smm_core.featured_ids(platform,kind)
+        raw=smm_core.get_services(platform,kind,q or None,200)
+        raw=sorted(raw,key=lambda s:(0 if smm_core.is_featured(s,fset) else 1,s.get('price') or 0))
+        items=[]
+        for s in raw:
+            pub=smm_core.public_service(s);pub['custom_comments']=smm_core.needs_custom_comments(s)
+            pub['featured']=smm_core.is_featured(s,fset);pub['success_rate']=smm_core.service_rate(s)
+            items.append(pub)
+        return jsonify(items=items,notice=smm_core.delay_notice(platform,any(i['featured'] for i in items)))
+    except Exception as e:return _smm_fail(e)
+
+@app.post('/api/smm/order')
+def smm_order():
+    # Maintenance SMM sudah dijaga oleh web_smm_maintenance_guard (before_request).
+    if not uid():return err('Login diperlukan',401)
+    d=request.get_json(silent=True) or {}
+    try:
+        sid=int(d.get('service_id'));qty=int(d.get('quantity') or 0)
+        expected=int(d['expected_price']) if d.get('expected_price') is not None else None
+    except (TypeError,ValueError):return err('Data pesanan tidak valid')
+    idem=_re.sub(r'[^a-zA-Z0-9]','',str(d.get('idem_key') or ''))[:40]
+    if len(idem)<8:return err('Permintaan tidak valid. Muat ulang halaman.')
+    target=str(d.get('target') or '').strip()
+    try:
+        s=smm_core.find_fresh_service(sid,str(d.get('platform') or '')[:60] or None,str(d.get('kind') or '')[:60] or None,str(d.get('title') or '')[:120] or None)
+        if not s:return err('Layanan tidak ditemukan atau sudah berubah. Muat ulang daftar layanan.',409)
+        order=smm_core.create_order(int(uid()),s,target,qty,d.get('custom_comments'),'WEB','web-%s-%s'%(uid(),idem),expected)
+        bal=query('SELECT balance FROM users WHERE telegram_id=%s',(uid(),))
+        return jsonify(ok=True,order=_smm_json(order),balance=int(bal[0]['balance']) if bal else None)
+    except Exception as e:return _smm_fail(e)
+
+@app.get('/api/smm/orders')
+def smm_orders():
+    if not uid():return err('Login diperlukan',401)
+    try:return jsonify(orders=[_smm_json(o) for o in smm_core.list_user_orders(int(uid()),30,0)])
+    except Exception as e:return _smm_fail(e)
+
+@app.post('/api/smm/order/status')
+def smm_order_status():
+    if not uid():return err('Login diperlukan',401)
+    local_id=str((request.get_json(silent=True) or {}).get('local_id') or '')[:40]
+    try:
+        if not smm_core.get_smm_order(local_id,int(uid())):return err('Pesanan tidak ditemukan.',404)
+        return jsonify(order=_smm_json(smm_core.sync_order(local_id)))
+    except Exception as e:return _smm_fail(e)
+
+@app.get('/api/admin/smm/orders')
+def web_admin_smm_orders():
+    denied=web_admin_required()
+    if denied:return denied
+    day=request.args.get('date','');status=request.args.get('status','').upper().strip()[:20];search=request.args.get('q','').strip()[:70]
+    if day:
+        try:datetime.strptime(day,'%Y-%m-%d')
+        except ValueError:return err('Tanggal tidak valid')
+    try:
+        items=smm_core.list_all_orders(200,0,day or None,status or None,search or None)
+        return jsonify(configured=smm_core.is_configured(),summary=_smm_json(smm_core.admin_summary(),admin=True),items=[_smm_json(o,admin=True) for o in items])
+    except Exception as e:return _smm_fail(e)
+
+@app.post('/api/admin/smm/orders/sync')
+def web_admin_smm_sync():
+    denied=web_admin_required()
+    if denied:return denied
+    try:return jsonify(ok=True,synced=smm_core.sync_active_orders(25))
+    except Exception as e:return _smm_fail(e)
+
+
 # ---------------- RESELLER (panel web) ----------------
 def reseller_payload():
     data=rc.panel_data(uid())
