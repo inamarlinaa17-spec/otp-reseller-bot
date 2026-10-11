@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify, send_from_directory, session, Respons
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 from database import create_pending_order, refund_order, save_provider_order, fail_and_refund_order, sweep_review_orders
 import reseller_core as rc
+from database import get_reseller_by_id
 # Web pricing is isolated from bot config: importing provider.py also imports
 # config.py, whose bot-only required variables can crash this web service.
 from decimal import Decimal, ROUND_CEILING
@@ -950,7 +951,7 @@ def _smm_json(row,*,admin=False):
     if not row:return row
     out={}
     for k,v in dict(row).items():
-        if not admin and k in ('provider_cost','cost_per_1000','sell_per_1000','error','idem_key','provider_status','telegram_id','updated_at'):continue
+        if not admin and k in ('provider_cost','cost_per_1000','sell_per_1000','error','idem_key','provider_status','telegram_id','updated_at','reseller_bot_id','reseller_margin','reseller_margin_status'):continue
         out[k]=int(v) if hasattr(v,'as_tuple') else v
     return out
 
@@ -1050,6 +1051,55 @@ def web_admin_smm_sync():
     if denied:return denied
     try:return jsonify(ok=True,synced=smm_core.sync_active_orders(25))
     except Exception as e:return _smm_fail(e)
+
+
+# ---------------- MINI APP TELEGRAM: login otomatis untuk SMM PANEL ----------------
+@app.post('/api/auth/telegram-webapp')
+def telegram_webapp_login():
+    # Bot UTAMA: initData ditandatangani BOT_TOKEN milik server (HMAC).
+    # Bot RESELLER (rb=<id>): tanda tangan Ed25519 milik Telegram (bukan HMAC token), karena pemilik bot reseller
+    # memegang token bot-nya dan bisa memalsukan initData user lain. Sesi lalu membawa 'rb' agar harga SMM memakai
+    # margin reseller dan margin masuk saldo reseller.
+    from azhura_web.monetag_rewards import telegram_init_user
+    d=request.get_json(silent=True) or {}
+    init=str(d.get('init_data',''))[:4096]
+    rb=None
+    try:
+        if d.get('rb') not in (None,'',0,'0'):
+            rb=int(d.get('rb'))
+            row=get_reseller_by_id(rb)
+            if not row or row.get('admin_blocked') or not row.get('enabled') or not row.get('cs_url'):
+                return err('Bot ini sedang tidak aktif.',403)
+            user=smm_core.verify_init_data(init,bot_id=int(row['bot_telegram_id']))
+        else:
+            user=telegram_init_user(init,BOT_TOKEN)
+        if not query('SELECT 1 FROM users WHERE telegram_id=%s',(user,)):return err('Silakan /start bot Telegram dahulu.',403)
+        login(user)
+        if rb:session['rb']=rb
+        return jsonify(ok=True,csrf=session['csrf'])
+    except (ValueError,KeyError,TypeError):return err('Sesi Telegram tidak valid. Buka lagi dari bot.',401)
+
+@app.before_request
+def smm_reseller_context():
+    # Sesi mini app dari bot reseller: semua /api/smm/* memakai margin reseller itu (sama dengan margin OTP).
+    rb=session.get('rb') if request.path.startswith('/api/smm/') else None
+    if not rb:return None
+    try:row=get_reseller_by_id(int(rb))
+    except Exception:
+        app.logger.exception('Reseller lookup failed');return err('Layanan sementara tidak tersedia. Coba beberapa saat lagi.',503)
+    if not row or row.get('admin_blocked') or not row.get('enabled'):
+        return err('Bot ini sedang tidak aktif. Silakan coba lagi nanti.',403)
+    from reseller_ctx import CURRENT_RESELLER
+    request.environ['smm_rs_token']=CURRENT_RESELLER.set(row)
+    return None
+
+@app.teardown_request
+def smm_reseller_context_reset(exc):
+    tok=request.environ.pop('smm_rs_token',None)
+    if tok is not None:
+        from reseller_ctx import CURRENT_RESELLER
+        try:CURRENT_RESELLER.reset(tok)
+        except Exception:CURRENT_RESELLER.set(None)
 
 
 # ---------------- RESELLER (panel web) ----------------
