@@ -82,8 +82,55 @@ def _service_detail_text(s):
         lines.append(f"⚡ Kecepatan: ± {escape(str(pub['speed_per_day']))} / hari")
     if pub.get("target_type"):
         lines.append(f"🎯 Target: {escape(str(pub['target_type']))}")
+    rich = smm.rich_service(s)
+    if rich.get("subtitle"):
+        lines.append(f"🏷 {escape(rich['subtitle'])}")
+    stat = []
+    if rich.get("eta"):
+        stat.append(escape(rich["eta"]))
+    if rich.get("completion") is not None:
+        stat.append(f"{rich['completion']}% pesanan tuntas")
+    if rich.get("repeat_rate") is not None:
+        stat.append(f"{rich['repeat_rate']}% order ulang")
+    if stat:
+        lines.append("📈 " + " · ".join(stat))
+    lines.append(f"\n📝 Yang harus dimasukkan: <b>{escape(rich['target_what'])}</b>")
+    if rich.get("target_example"):
+        lines.append(f"   Contoh: <code>{escape(rich['target_example'])}</code>")
+    if rich.get("target_warning"):
+        lines.append(f"⚠️ {escape(rich['target_warning'])}")
     if pub.get("note"):
         lines.append(f"\n📝 {escape(str(pub['note'])[:400])}")
+    return "\n".join(lines)
+
+
+def _stats_line(price=None, total=None, eta=None, completion=None, per="/1K"):
+    bits = []
+    if price:
+        bits.append(f"mulai <b>{smm.rupiah(price)}{per}</b>")
+    if total:
+        bits.append(f"{_n(total)} layanan")
+    if eta:
+        bits.append(escape(str(eta)))
+    if completion is not None:
+        bits.append(f"{completion}% pesanan tuntas")
+    return " · ".join(bits)
+
+
+def _guide_text(g):
+    lines = [f"{g['icon']} <b>{escape(g['title'])}</b>", escape(g["desc"]), ""]
+    lines.append(f"📝 Yang harus dimasukkan: <b>{escape(g['target_what'])}</b>")
+    if g.get("target_example"):
+        lines.append(f"   Contoh: <code>{escape(g['target_example'])}</code>")
+    if g.get("target_warning"):
+        lines.append(f"⚠️ {escape(g['target_warning'])}")
+    stat = []
+    if g.get("eta"):
+        stat.append(f"Estimasi proses: {escape(g['eta'])}")
+    if g.get("completion") is not None:
+        stat.append(f"{g['completion']}% pesanan tuntas")
+    if stat:
+        lines.append("⏱ " + " · ".join(stat))
     return "\n".join(lines)
 
 
@@ -181,17 +228,25 @@ async def _kinds(query, context, idx):
     if idx >= len(plats):
         await _platforms(query, context); return
     platform = plats[idx]
-    kinds = await asyncio.to_thread(smm.get_kinds, platform)
+    overview = await asyncio.to_thread(smm.kind_overview, platform)
+    kinds = [o["kind"] for o in overview]
     context.user_data["smm_ctx"] = {"platform": platform, "kinds": kinds}
     rows, row = [], []
-    for j, k in enumerate(kinds):
-        row.append(_btn(str(k)[:28], f"smm_k:{j}"))
+    for j, o in enumerate(overview):
+        row.append(_btn(f"{o['icon']} {o['kind']}"[:28], f"smm_k:{j}"))
         if len(row) == 2:
             rows.append(row); row = []
     if row:
         rows.append(row)
     rows.append([_btn("⬅️ Platform", "smm_home")])
-    await _show(query, f"🚀 <b>{escape(platform)}</b>\n\nPilih jenis layanan:", _kb(rows))
+    blocks = [f"🚀 <b>{escape(platform)}</b>\n\nPilih kategori produk:\n"]
+    for o in overview:
+        st = _stats_line(o["min_price"], o["total"], o["eta"], o["completion"])
+        blocks.append(f"{o['icon']} <b>{escape(o['kind'])}</b>\n{escape(o['desc'])}" + (f"\n<i>{st}</i>" if st else ""))
+    text = "\n\n".join(blocks)
+    if len(text) > 3900:
+        text = text[:3890].rsplit("\n\n", 1)[0]
+    await _show(query, text, _kb(rows))
 
 
 async def _list_services(query, context, kind_idx, page):
@@ -234,7 +289,8 @@ async def _list_services(query, context, kind_idx, page):
     has_star = any(smm.is_featured(x, fset) for x in svcs)
     notice = smm.delay_notice(ctx.get("platform"), has_star)
     legend = "Harga per 1.000 • ↻ = tingkat selesai" + (" • ⭐ = Rekomendasi" if has_star else "")
-    body = head + (f"\n{notice}\n" if notice else "") + f"\n{legend}\n"
+    guide = _guide_text(smm.kind_guide(ctx.get("platform"), ctx.get("kind"), svcs))
+    body = head + (f"\n{notice}\n" if notice else "") + f"\n{guide}\n\n{legend}\n"
     if total_pages > 1:
         body += f"Halaman {page + 1}/{total_pages}\n"
     await _show(query, body + "\nPilih layanan:", _kb(rows))
@@ -259,6 +315,15 @@ async def _service_detail(query, context, sid):
 # ORDER (input teks via text_handler)
 # =========================================================
 
+def _target_help(s):
+    what, example, warning = smm.target_guide(s.get("platform"), s.get("target_type"))
+    out = f"📝 Yang harus dimasukkan: <b>{escape(what)}</b>\n"
+    if example:
+        out += f"Contoh: <code>{escape(example)}</code>\n"
+    out += "⚠️ " + escape(warning) if warning else "Pastikan link/target benar."
+    return out
+
+
 async def _start_order(query, context, sid):
     s = _lookup(context, sid)
     if not s:
@@ -270,7 +335,7 @@ async def _start_order(query, context, sid):
             "tg_post": "link postingan Telegram"}.get(str(s.get("target_type") or ""), "link / username target")
     await _show(query,
                 f"🛒 <b>{escape(smm.service_title(s))}</b>\n\n🔗 Kirim <b>{hint}</b> sebagai pesan teks.\n"
-                "Pastikan akun/postingan tidak private.",
+                + _target_help(s),
                 _kb([[_btn("❌ Batal", "smm_cancel")]]))
 
 

@@ -854,3 +854,256 @@ def service_button_label(s, featured_set=None, max_len=46):
     if len(title) > room:
         title = title[:room - 1].rstrip() + "…"
     return f"{star}{title} · {tail_txt}"
+
+
+# =========================================================
+# TAMBAHAN V3: KETERANGAN LENGKAP KATEGORI & LAYANAN (bot + web)
+# Field resmi SIMURU: completion_rate, repeat_rate, recommended, speed_label,
+# quality_tags, target_type, start_minutes, min_price, total.
+# =========================================================
+
+KIND_INFO = {
+    "followers": ("👥", "Menambah jumlah pengikut/subscriber pada AKUN — bikin profil terlihat lebih terpercaya."),
+    "subscribers": ("👥", "Menambah jumlah subscriber pada CHANNEL/AKUN — bikin channel terlihat lebih terpercaya."),
+    "members": ("👥", "Menambah jumlah anggota pada grup/channel/komunitas."),
+    "likes": ("❤️", "Menambah jumlah suka pada SATU postingan/video — sinyal engagement ke algoritma."),
+    "views": ("👁", "Menambah tayangan/play pada video atau postingan — dorong jangkauan (reach)."),
+    "plays": ("▶️", "Menambah jumlah putar/play pada konten — dorong jangkauan (reach)."),
+    "comments": ("💬", "Menambah komentar pada postingan — bikin postingan terlihat ramai dan hidup."),
+    "shares": ("🔁", "Menambah jumlah bagikan/share pada postingan — memperluas penyebaran konten."),
+    "saves": ("🔖", "Menambah jumlah simpan/save pada postingan — sinyal konten bernilai ke algoritma."),
+    "reposts": ("🔁", "Menambah jumlah repost pada postingan — memperluas penyebaran konten."),
+    "retweets": ("🔁", "Menambah jumlah retweet/repost pada postingan — memperluas penyebaran konten."),
+    "reactions": ("😍", "Menambah reaksi (emoji) pada postingan — bikin postingan terlihat aktif."),
+    "impressions": ("📊", "Menambah impresi/tayangan konten — memperbesar jangkauan postingan."),
+    "reach": ("📡", "Menambah jangkauan (reach) konten ke lebih banyak akun."),
+    "watch time": ("⏱", "Menambah jam tayang/durasi tonton video — membantu performa channel."),
+    "watchtime": ("⏱", "Menambah jam tayang/durasi tonton video — membantu performa channel."),
+    "live": ("🔴", "Menambah penonton/interaksi pada siaran langsung (live)."),
+    "traffic": ("🌐", "Mengarahkan kunjungan ke link/website — menambah jumlah pengunjung."),
+    "votes": ("🗳", "Menambah suara/vote pada polling atau kontes."),
+    "clicks": ("🖱", "Menambah jumlah klik pada link."),
+    "downloads": ("⬇️", "Menambah jumlah unduhan/install aplikasi atau file."),
+    "lainnya": ("✨", "Layanan tambahan lainnya untuk platform ini."),
+    "other": ("✨", "Layanan tambahan lainnya untuk platform ini."),
+}
+
+# target_type -> (apa yang harus dikirim user, tampilkan peringatan akun publik?)
+TARGET_INFO = {
+    "profile": ("LINK PROFIL atau USERNAME akun — bukan link postingan.", True),
+    "post": ("LINK POSTINGAN/VIDEO — bukan link profil.", True),
+    "comment": ("LINK KOMENTAR yang ingin dituju.", True),
+    "story": ("LINK STORY.", True),
+    "live": ("LINK SIARAN LANGSUNG (live) yang sedang berlangsung.", False),
+    "track": ("LINK LAGU/TRACK.", False),
+    "app": ("LINK APLIKASI.", False),
+    "keyword": ("KATA KUNCI yang dituju.", False),
+    "website": ("LINK WEBSITE.", False),
+    "tg_channel": ("LINK CHANNEL/GRUP TELEGRAM (t.me/namachannel).", False),
+    "tg_post": ("LINK POSTINGAN TELEGRAM (t.me/namachannel/123).", False),
+}
+
+# platform -> (contoh profil, contoh postingan)
+PLATFORM_EXAMPLES = {
+    "instagram": ("instagram.com/username", "instagram.com/p/xxxxxxxx"),
+    "tiktok": ("tiktok.com/@username", "tiktok.com/@username/video/123456"),
+    "youtube": ("youtube.com/@namachannel", "youtube.com/watch?v=xxxxxxxx"),
+    "facebook": ("facebook.com/username", "facebook.com/username/posts/123456"),
+    "twitter": ("x.com/username", "x.com/username/status/123456"),
+    "x": ("x.com/username", "x.com/username/status/123456"),
+    "twitter / x": ("x.com/username", "x.com/username/status/123456"),
+    "threads": ("threads.net/@username", "threads.net/@username/post/xxxxxxxx"),
+    "telegram": ("t.me/namachannel", "t.me/namachannel/123"),
+    "spotify": ("open.spotify.com/artist/xxxx", "open.spotify.com/track/xxxx"),
+    "soundcloud": ("soundcloud.com/username", "soundcloud.com/username/nama-lagu"),
+    "linkedin": ("linkedin.com/in/username", "linkedin.com/posts/xxxx"),
+}
+
+
+def kind_info(kind, platform=None):
+    k = str(kind or "").strip().lower()
+    icon, desc = KIND_INFO.get(k, ("📦", ""))
+    if not desc:
+        for key, val in KIND_INFO.items():
+            if key in k:
+                icon, desc = val
+                break
+    if not desc:
+        desc = f"Layanan {kind} untuk {platform}." if platform else f"Layanan {kind}."
+    return icon, desc
+
+
+def target_guide(platform, target_type):
+    """(teks 'yang harus dimasukkan', contoh, peringatan) berdasarkan target_type dari provider."""
+    tt = str(target_type or "").strip().lower()
+    what, warn = TARGET_INFO.get(tt, ("LINK / USERNAME target sesuai layanan.", False))
+    ex = PLATFORM_EXAMPLES.get(str(platform or "").strip().lower())
+    example = None
+    if ex and tt in ("profile", "post", "comment", "story"):
+        example = ex[0] if tt == "profile" else ex[1]
+    elif tt == "tg_channel":
+        example = "t.me/namachannel"
+    elif tt == "tg_post":
+        example = "t.me/namachannel/123"
+    warning = ("Akun wajib PUBLIK selama proses. Kalau digembok/private → pesanan tidak masuk & bisa hangus."
+               if warn else None)
+    return what, example, warning
+
+
+def _pct(s, keys):
+    for k in keys:
+        v = s.get(k)
+        if isinstance(v, bool) or v is None:
+            continue
+        try:
+            f = float(str(v).replace("%", "").strip())
+        except ValueError:
+            continue
+        if f < 0:
+            continue
+        if f <= 1:
+            f *= 100
+        return int(round(min(f, 100)))
+    return None
+
+
+def format_eta(minutes):
+    try:
+        m = float(minutes)
+    except (TypeError, ValueError):
+        return ""
+    if m <= 0:
+        return ""
+    if m < 60:
+        return f"~{int(round(m))} menit"
+    if m < 1440:
+        return f"~{int(round(m / 60))} jam"
+    return f"~{int(round(m / 1440))} hari"
+
+
+def max_short(n):
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    if n >= 1_000_000:
+        v = n / 1_000_000
+        return f"{v:g}M"
+    if n >= 1000:
+        v = n / 1000
+        return f"{v:g}K"
+    return str(n)
+
+
+def rich_service(s, featured_set=None):
+    """public_service + keterangan lengkap (rekomendasi, % tuntas, % order ulang, estimasi, tag, panduan target)."""
+    pub = public_service(s)
+    tags = s.get("quality_tags")
+    tags = [str(t) for t in tags if t] if isinstance(tags, (list, tuple)) else []
+    speed = s.get("speed_label")
+    eta = (str(speed).strip() if isinstance(speed, str) and speed.strip()
+           else ((("⚡ " if (s.get("start_minutes") or 999) <= 180 else "") + format_eta(s.get("start_minutes")))
+                 if format_eta(s.get("start_minutes")) else ""))
+    what, example, warning = target_guide(s.get("platform"), s.get("target_type"))
+    sub = list(tags)
+    if s.get("max"):
+        sub.append(f"MAX {max_short(s.get('max'))}")
+    pub.update({
+        "custom_comments": needs_custom_comments(s),
+        "featured": is_featured(s, featured_set),
+        "completion": _pct(s, ("completion_rate", "success_rate", "completion_percent")),
+        "repeat_rate": _pct(s, ("repeat_rate",)),
+        "refund_rate": _pct(s, ("refund_rate",)),
+        "eta": eta,
+        "tags": tags,
+        "subtitle": " · ".join(sub),
+        "target_what": what, "target_example": example, "target_warning": warning,
+    })
+    return pub
+
+
+def _kind_raw(platform):
+    def load():
+        try:
+            return [k for k in (_call("/smm/kinds", {"platform": platform}) or []) if isinstance(k, (dict, str))]
+        except SmmError:
+            return []
+    return _cached(("kinds_raw", platform), load)
+
+
+def kind_overview(platform):
+    """Daftar kategori (Followers/Likes/...) lengkap: ikon, deskripsi, jumlah layanan, harga mulai (sudah +margin),
+    estimasi proses, % pesanan tuntas. Memakai field /smm/kinds bila ada; sisanya dihitung dari /smm/services."""
+    def load():
+        raw = _kind_raw(platform)
+        names, meta = [], {}
+        for k in raw:
+            if isinstance(k, str):
+                names.append(k)
+            else:
+                nm = k.get("kind") or k.get("name") or k.get("title")
+                if nm:
+                    names.append(str(nm)); meta[str(nm)] = k
+        if not names:
+            names = list(get_kinds(platform))
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(nm):
+            m = meta.get(nm, {})
+            total = m.get("total") or m.get("count") or m.get("services")
+            cheapest = None
+            for key in ("min_price", "cheapest_price", "cheapest", "price_min"):
+                if m.get(key) not in (None, ""):
+                    try:
+                        cheapest = float(m[key]); break
+                    except (TypeError, ValueError):
+                        pass
+            comp = _pct(m, ("completion_rate", "success_rate", "completion_percent", "completion"))
+            eta_min = None
+            for key in ("start_minutes", "avg_minutes", "eta_minutes", "est_minutes"):
+                if m.get(key) not in (None, ""):
+                    try:
+                        eta_min = float(m[key]); break
+                    except (TypeError, ValueError):
+                        pass
+            if total is None or cheapest is None or comp is None or eta_min is None:
+                try:
+                    svcs = get_services(platform, nm, None, 200)
+                except Exception:
+                    svcs = []
+                prices = [float(x.get("price")) for x in svcs if x.get("price")]
+                if cheapest is None and prices:
+                    cheapest = min(prices)
+                if total is None:
+                    total = len(svcs)
+                if comp is None:
+                    vals = [v for v in (_pct(x, ("completion_rate",)) for x in svcs) if v is not None]
+                    comp = int(round(sum(vals) / len(vals))) if vals else None
+                if eta_min is None:
+                    mins = sorted(float(x["start_minutes"]) for x in svcs
+                                  if isinstance(x.get("start_minutes"), (int, float)) and x["start_minutes"] > 0)
+                    eta_min = mins[len(mins) // 2] if mins else None
+            icon, desc = kind_info(nm, platform)
+            return {"kind": nm, "icon": icon, "desc": desc, "total": int(total or 0),
+                    "min_price": sell_price_per_1000(cheapest) if cheapest else 0,
+                    "eta": format_eta(eta_min), "completion": comp}
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            return list(ex.map(one, names))
+    try:
+        return _cached(("kind_overview", platform), load)
+    except Exception:
+        return [{"kind": k, "icon": kind_info(k, platform)[0], "desc": kind_info(k, platform)[1], "total": 0,
+                 "min_price": 0, "eta": "", "completion": None} for k in get_kinds(platform)]
+
+
+def kind_guide(platform, kind, services):
+    """Kartu keterangan di atas daftar layanan: deskripsi kategori, yang harus dimasukkan, contoh, peringatan, estimasi."""
+    icon, desc = kind_info(kind, platform)
+    tt = next((s.get("target_type") for s in services if s.get("target_type")), None)
+    what, example, warning = target_guide(platform, tt)
+    mins = sorted(float(s["start_minutes"]) for s in services
+                  if isinstance(s.get("start_minutes"), (int, float)) and s["start_minutes"] > 0)
+    vals = [v for v in (_pct(s, ("completion_rate",)) for s in services) if v is not None]
+    return {"icon": icon, "title": f"{kind}", "desc": desc, "target_what": what, "target_example": example,
+            "target_warning": warning, "eta": format_eta(mins[len(mins) // 2]) if mins else "",
+            "completion": int(round(sum(vals) / len(vals))) if vals else None}
