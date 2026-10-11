@@ -70,4 +70,34 @@ function smmFmt(d){if(!d)return '';const x=new Date(String(d).replace(' ','T')+(
 function smmHistCard(o){const st=smmStC[o.status]||[o.status,'#9fb0cc'],q=Number(o.quantity||0),rem=o.remains!=null?Number(o.remains):null,done=o.status==='COMPLETED'?q:(rem!=null?Math.max(0,q-rem):0),pct=q?Math.min(100,Math.round(done*100/q)):0,active=['PROCESSING','PENDING','CREATING'].includes(o.status);return '<div class="hc" id="smm-o-'+esc(o.local_id)+'"><div class="hc-top"><b>'+esc(o.service_name)+'</b><span class="hc-st" style="color:'+st[1]+'">'+st[0]+(active?' ⟳':'')+'</span></div><div class="hc-t">'+esc(o.target)+'</div><div class="hc-row"><span>'+smmNum(q)+' · '+rp(o.sell_price)+'</span><span>'+smmNum(done)+'/'+smmNum(q)+'</span></div><div class="hc-bar"><i style="width:'+pct+'%;background:'+st[1]+'"></i></div>'+(o.refunded_amount>0?'<div class="hc-m">↩️ Dikembalikan ke saldo '+rp(o.refunded_amount)+'</div>':'')+'<div class="hc-m">'+esc(smmFmt(o.created_at))+' · ID '+esc(o.local_id)+(o.provider_order_id?' · Provider '+esc(o.provider_order_id):'')+'</div><button class="btn secondary" style="margin-top:10px" onclick="smmCheck(\''+esc(o.local_id)+'\')">🔄 Cek Status</button></div>'}
 async function smmHistory(){smmBox('Memuat riwayat...');try{const d=await api('/api/smm/orders');smmBox('<button class="btn secondary" onclick="loadSmm()">⬅ SMM PANEL</button><h3>Riwayat SMM</h3>'+(d.orders.map(smmHistCard).join('')||'<p class="muted">Belum ada pesanan SMM.</p>'));d.orders.filter(o=>['PROCESSING','PENDING'].includes(o.status)).slice(0,5).forEach(o=>smmCheck(o.local_id,true))}catch(e){smmErr(e)}}
 async function smmCheck(id,quiet){try{const d=await api('/api/smm/order/status',{method:'POST',body:JSON.stringify({local_id:id})});const el=$('smm-o-'+id);if(el)el.outerHTML=smmHistCard(d.order);if(!quiet)toast('Status: '+(smmStC[d.order.status]?smmStC[d.order.status][0]:d.order.status))}catch(e){if(!quiet)toast(e.message)}}
-</script></body></html>
+</script><script>
+/* ===== MINI APP TELEGRAM (tambahan): login otomatis dari bot + langsung buka tab SMM PANEL ===== */
+(function(){
+  const qs=new URLSearchParams(location.search);
+  let initData='';
+  try{initData=(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData)||new URLSearchParams(location.hash.replace(/^#/,'')).get('tgWebAppData')||''}catch(e){}
+  const rt='',rb=qs.get('rb')||'';
+  if(!initData)return;
+  const wantSmm=qs.get('tab')==='smm';
+  const ready=(async()=>{
+    try{
+      const c=await (await fetch('/api/config',{credentials:'same-origin'})).json();
+      const r=await fetch('/api/auth/telegram-webapp',{method:'POST',credentials:'same-origin',
+        headers:{'Content-Type':'application/json','X-CSRF-Token':c.csrf||''},body:JSON.stringify({init_data:initData,rb:rb})});
+      const d=await r.json();
+      if(r.ok&&d.csrf){csrf=d.csrf;return ''}
+      return d.error||'Login mini app gagal'
+    }catch(e){return 'Login mini app gagal'}
+  })();
+  const _me=me;
+  me=async function(){
+    const problem=await ready;
+    await _me.apply(this,arguments);
+    if(!user){if(problem){const el=$('login-error');if(el)el.textContent=problem}return}
+    if(wantSmm&&!window.__smmOpened){window.__smmOpened=true;tab('smm')}
+    if(initData&&!window.__tgReady){window.__tgReady=true;const s=document.createElement('script');s.src='https://telegram.org/js/telegram-web-app.js';
+      s.onload=()=>{try{Telegram.WebApp.ready();Telegram.WebApp.expand()}catch(e){}};document.head.appendChild(s)}
+  };
+})();
+</script>
+</body></html>
