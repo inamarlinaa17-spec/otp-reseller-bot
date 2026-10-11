@@ -75,7 +75,8 @@ def rupiah(n):
 # PRICING (rumus margin lama: modal * (1 + PROFIT_PERCENT/100), dibulatkan ke atas)
 # =========================================================
 
-def sell_price_per_1000(cost_per_1000):
+def _base_sell_per_1000(cost_per_1000):
+    """Harga jual bot UTAMA per 1.000 (tanpa margin reseller)."""
     try:
         cost = Decimal(str(cost_per_1000))
         if cost <= 0:
@@ -84,6 +85,36 @@ def sell_price_per_1000(cost_per_1000):
         return int(sell.to_integral_value(rounding=ROUND_CEILING))
     except Exception:
         return 0
+
+
+def current_reseller_row():
+    """Reseller yang sedang aktif pada konteks ini (bot reseller / sesi mini app reseller), atau None."""
+    try:
+        from reseller_ctx import current_reseller
+        return current_reseller()
+    except Exception:
+        return None
+
+
+def sell_price_per_1000(cost_per_1000):
+    """Harga jual per 1.000. Di bot/mini app reseller ditambah margin reseller (SAMA dengan margin OTP)."""
+    base = _base_sell_per_1000(cost_per_1000)
+    row = current_reseller_row()
+    if base and row:
+        try:
+            from reseller_ctx import add_margin
+            return add_margin(base, row.get("margin_percent") or 0)
+        except Exception:
+            return base
+    return base
+
+
+def base_sell_total(cost_per_1000, quantity):
+    """Total harga bot utama (tanpa margin reseller) -> dasar menghitung margin reseller."""
+    q = Decimal(int(quantity))
+    cost_total = (Decimal(str(cost_per_1000)) * q / Decimal(1000)).to_integral_value(rounding=ROUND_CEILING)
+    sell_total = (Decimal(_base_sell_per_1000(cost_per_1000)) * q / Decimal(1000)).to_integral_value(rounding=ROUND_CEILING)
+    return int(max(sell_total, cost_total, 1))
 
 
 def calc_prices(cost_per_1000, quantity):
@@ -323,6 +354,9 @@ def ensure_tables():
             """)
             db.execute("CREATE INDEX IF NOT EXISTS smm_orders_user_idx ON smm_orders (telegram_id, id DESC)")
             db.execute("CREATE INDEX IF NOT EXISTS smm_orders_status_idx ON smm_orders (status)")
+            db.execute("ALTER TABLE smm_orders ADD COLUMN IF NOT EXISTS reseller_bot_id BIGINT")
+            db.execute("ALTER TABLE smm_orders ADD COLUMN IF NOT EXISTS reseller_margin BIGINT NOT NULL DEFAULT 0")
+            db.execute("ALTER TABLE smm_orders ADD COLUMN IF NOT EXISTS reseller_margin_status TEXT NOT NULL DEFAULT 'NONE'")
         _tables_ready = True
 
 
@@ -382,7 +416,7 @@ def admin_summary():
               COUNT(*) FILTER (WHERE status IN ('CANCELED','REFUNDED','FAILED')) failed,
               COUNT(*) FILTER (WHERE status='REVIEW') review,
               COALESCE(SUM(sell_price) FILTER (WHERE status NOT IN ('CREATING','FAILED','CANCELED','REFUNDED')),0) gross,
-              COALESCE(SUM((sell_price-provider_cost)*(sell_price-refunded_amount)/GREATEST(sell_price,1)) FILTER (WHERE status NOT IN ('CREATING','FAILED','CANCELED','REFUNDED')),0)::BIGINT profit
+              COALESCE(SUM((sell_price-COALESCE(reseller_margin,0)-provider_cost)*(sell_price-refunded_amount)/GREATEST(sell_price,1)) FILTER (WHERE status NOT IN ('CREATING','FAILED','CANCELED','REFUNDED')),0)::BIGINT profit
             FROM smm_orders""").fetchone()
 
 
@@ -501,6 +535,9 @@ def create_order(telegram_id, service, target, quantity, custom_comments=None,
     if cost_pk <= 0:
         raise SmmError("Harga layanan tidak valid.")
     provider_cost, sell_price = calc_prices(cost_pk, quantity)
+    rs_row = current_reseller_row()
+    rs_id = int(rs_row["id"]) if rs_row and rs_row.get("id") else None
+    rs_margin = max(0, sell_price - base_sell_total(cost_pk, quantity)) if rs_id else 0
     if expected_price is not None and int(expected_price) != sell_price:
         raise SmmError(f"Harga berubah menjadi {rupiah(sell_price)}. Silakan ulangi pemesanan.")
 
@@ -514,11 +551,11 @@ def create_order(telegram_id, service, target, quantity, custom_comments=None,
         try:
             db.execute("""INSERT INTO smm_orders (local_id, idem_key, telegram_id, source, service_id, service_name,
                 platform, kind, target, quantity, cost_per_1000, sell_per_1000, provider_cost, sell_price,
-                status, created_at, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'CREATING',%s,%s)""",
+                reseller_bot_id, reseller_margin, status, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'CREATING',%s,%s)""",
                        (local_id, idem_key, telegram_id, source, int(service["id"]), service_title(service),
                         service.get("platform"), service.get("kind"), target, quantity, cost_pk,
-                        sell_price_per_1000(cost_pk), provider_cost, sell_price, now(), now()))
+                        sell_price_per_1000(cost_pk), provider_cost, sell_price, rs_id, rs_margin, now(), now()))
         except Exception as exc:
             if "idem_key" in str(exc):
                 raise SmmError("Permintaan ganda terdeteksi. Cek riwayat pesanan.")
@@ -577,6 +614,10 @@ def create_order(telegram_id, service, target, quantity, custom_comments=None,
         notify_traffic(local_id, completed=False)
         if order["status"] == "COMPLETED":
             notify_traffic(local_id, completed=True)
+            try:
+                credit_reseller_margin(local_id)
+            except Exception:
+                log.exception("kredit margin reseller gagal %s", local_id)
     return get_smm_order(local_id)
 
 
@@ -654,6 +695,12 @@ def sync_order(local_id):
     order = get_smm_order(local_id)
     if not order:
         raise SmmError("Pesanan tidak ditemukan.")
+    if (order.get("reseller_bot_id") and order.get("reseller_margin_status") == "NONE"
+            and order["status"] in ("COMPLETED", "PARTIAL")):
+        try:  # pemulihan: margin yang belum sempat dikreditkan
+            credit_reseller_margin(local_id)
+        except Exception:
+            log.exception("kredit margin reseller gagal %s", local_id)
     if not order.get("provider_order_id") or order["status"] in ("CREATING", "REVIEW"):
         return order
     needs_refund = (order["status"] in ("CANCELED", "REFUNDED", "FAILED")
@@ -683,6 +730,8 @@ def sync_order(local_id):
                 _refund(local_id, fresh["telegram_id"], min(int(part), int(fresh["sell_price"])), "Refund parsial SMM")
         elif st == "COMPLETED":
             notify_traffic(local_id, completed=True)
+        if st in ("COMPLETED", "PARTIAL"):
+            credit_reseller_margin(local_id)
     except Exception:
         log.exception("post-sync action gagal %s", local_id)
     return get_smm_order(local_id)
@@ -694,7 +743,8 @@ def sync_active_orders(max_orders=25):
     with get_db() as db:
         rows = db.execute(
             "SELECT local_id FROM smm_orders WHERE provider_order_id IS NOT NULL AND "
-            "(status IN ('PENDING','PROCESSING') OR (status='COMPLETED' AND notified_completed=FALSE)) "
+            "(status IN ('PENDING','PROCESSING') OR (status='COMPLETED' AND notified_completed=FALSE) "
+            "OR (reseller_bot_id IS NOT NULL AND reseller_margin_status='NONE' AND status IN ('COMPLETED','PARTIAL'))) "
             "ORDER BY updated_at ASC LIMIT %s", (max_orders,)).fetchall()
         # order yang notif 'dibuat'-nya gagal terkirim sebelumnya
         unsent = db.execute(
@@ -1031,7 +1081,7 @@ def _kind_raw(platform):
     return _cached(("kinds_raw", platform), load)
 
 
-def kind_overview(platform):
+def _kind_overview_raw(platform):
     """Daftar kategori (Followers/Likes/...) lengkap: ikon, deskripsi, jumlah layanan, harga mulai (sudah +margin),
     estimasi proses, % pesanan tuntas. Memakai field /smm/kinds bila ada; sisanya dihitung dari /smm/services."""
     def load():
@@ -1085,7 +1135,7 @@ def kind_overview(platform):
                     eta_min = mins[len(mins) // 2] if mins else None
             icon, desc = kind_info(nm, platform)
             return {"kind": nm, "icon": icon, "desc": desc, "total": int(total or 0),
-                    "min_price": sell_price_per_1000(cheapest) if cheapest else 0,
+                    "min_cost": cheapest or 0,
                     "eta": format_eta(eta_min), "completion": comp}
         with ThreadPoolExecutor(max_workers=6) as ex:
             return list(ex.map(one, names))
@@ -1093,7 +1143,13 @@ def kind_overview(platform):
         return _cached(("kind_overview", platform), load)
     except Exception:
         return [{"kind": k, "icon": kind_info(k, platform)[0], "desc": kind_info(k, platform)[1], "total": 0,
-                 "min_price": 0, "eta": "", "completion": None} for k in get_kinds(platform)]
+                 "min_cost": 0, "eta": "", "completion": None} for k in get_kinds(platform)]
+
+
+def kind_overview(platform):
+    """Kategori + harga mulai (sudah +margin; untuk reseller +margin reseller). Cache hanya menyimpan modal."""
+    return [dict(o, min_price=sell_price_per_1000(o.get("min_cost")) if o.get("min_cost") else 0)
+            for o in _kind_overview_raw(platform)]
 
 
 def kind_guide(platform, kind, services):
@@ -1147,3 +1203,181 @@ TERMS_TEXT = (
     "• <b>Jangan order ulang</b> ke link sama selama proses (garansi hangus). Proses 3–5 hari.\n"
     "• Klaim tidak berlaku bila masa garansi sudah habis."
 )
+
+
+# =========================================================
+# TAMBAHAN V8: MINI APP (Telegram WebApp) + MARGIN RESELLER UNTUK SMM
+# - Bot utama & bot reseller: tombol SMM PANEL langsung membuka mini app (judul jendela = nama bot).
+# - Login mini app dari initData. Bot utama: HMAC dengan BOT_TOKEN. Bot reseller: tanda tangan Ed25519
+#   milik Telegram (tanpa token) -> pemilik bot reseller TIDAK bisa memalsukan user lain.
+# Env: AZHURA_WEB_URL (https, wajib), SMM_MINIAPP=0 untuk mematikan (kembali ke menu di bot).
+# =========================================================
+
+TELEGRAM_PUBKEY_PROD = bytes.fromhex("e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d")
+INITDATA_MAX_AGE = 24 * 3600
+
+
+def miniapp_enabled():
+    return os.getenv("SMM_MINIAPP", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def web_base_url():
+    url = os.getenv("AZHURA_WEB_URL", "").strip().rstrip("/")
+    return url if url.startswith("https://") else ""
+
+
+def miniapp_url(reseller_id=None):
+    """URL mini app SMM. Untuk bot reseller ditambah ?rb=<id reseller>. Kosong bila AZHURA_WEB_URL belum
+    https atau mini app dimatikan (SMM_MINIAPP=0)."""
+    base = web_base_url()
+    if not base or not miniapp_enabled():
+        return ""
+    url = base + "/?tab=smm"
+    if reseller_id:
+        url += f"&rb={int(reseller_id)}"
+    return url
+
+
+# ---- Ed25519 (RFC 8032), hanya verifikasi; dipakai agar web tidak butuh library tambahan ----
+_P = 2 ** 255 - 19
+_L = 2 ** 252 + 27742317777372353535851937790883648493
+_D = (-121665 * pow(121666, _P - 2, _P)) % _P
+_SQRT_M1 = pow(2, (_P - 1) // 4, _P)
+
+
+def _recover_x(y, sign):
+    if y >= _P:
+        return None
+    x2 = ((y * y - 1) * pow(_D * y * y + 1, _P - 2, _P)) % _P
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P != 0:
+        x = (x * _SQRT_M1) % _P
+    if (x * x - x2) % _P != 0:
+        return None
+    if (x & 1) != sign:
+        x = _P - x
+    return x
+
+
+def _pt(x, y):
+    return (x, y, 1, (x * y) % _P)
+
+
+def _pt_add(p, q):
+    a = ((p[1] - p[0]) * (q[1] - q[0])) % _P
+    b = ((p[1] + p[0]) * (q[1] + q[0])) % _P
+    c = (2 * p[3] * q[3] * _D) % _P
+    d = (2 * p[2] * q[2]) % _P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return ((e * f) % _P, (g * h) % _P, (f * g) % _P, (e * h) % _P)
+
+
+def _pt_mul(s, p):
+    q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            q = _pt_add(q, p)
+        p = _pt_add(p, p)
+        s >>= 1
+    return q
+
+
+def _pt_eq(p, q):
+    return ((p[0] * q[2] - q[0] * p[2]) % _P == 0) and ((p[1] * q[2] - q[1] * p[2]) % _P == 0)
+
+
+def _pt_decode(b):
+    y = int.from_bytes(b, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _recover_x(y, sign)
+    return None if x is None else _pt(x, y)
+
+
+_G = _pt(_recover_x(4 * pow(5, _P - 2, _P) % _P, 0), 4 * pow(5, _P - 2, _P) % _P)
+
+
+def ed25519_verify(public_key, message, signature):
+    import hashlib
+    try:
+        if len(public_key) != 32 or len(signature) != 64:
+            return False
+        a = _pt_decode(public_key)
+        r = _pt_decode(signature[:32])
+        s = int.from_bytes(signature[32:], "little")
+        if a is None or r is None or s >= _L:
+            return False
+        h = int.from_bytes(hashlib.sha512(signature[:32] + public_key + message).digest(), "little") % _L
+        return _pt_eq(_pt_mul(s, _G), _pt_add(r, _pt_mul(h, a)))
+    except Exception:
+        return False
+
+
+def verify_init_data(init_data, bot_token=None, bot_id=None, now_ts=None, public_key=None):
+    """Validasi initData Telegram Mini App -> kembalikan telegram_id; raise ValueError bila tidak sah.
+    bot_token  : validasi HMAC (hanya untuk bot milik server sendiri / bot utama).
+    bot_id     : validasi tanda tangan Ed25519 Telegram (untuk bot reseller; tidak butuh token bot)."""
+    import hmac, hashlib, json, base64
+    from urllib.parse import parse_qsl
+    try:
+        pairs = dict(parse_qsl(str(init_data), keep_blank_values=True))
+        auth_date = int(pairs.get("auth_date", "0"))
+        if abs(int(now_ts if now_ts is not None else time.time()) - auth_date) > INITDATA_MAX_AGE:
+            raise ValueError("kedaluwarsa")
+        user_id = int(json.loads(pairs["user"])["id"])
+        if bot_token:
+            given = pairs.pop("hash", "")
+            check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+            secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+            if not given or not hmac.compare_digest(given, hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()):
+                raise ValueError("hash")
+        elif bot_id:
+            sig_b64 = pairs.pop("signature", "")
+            pairs.pop("hash", None)
+            if not sig_b64:
+                raise ValueError("tanpa signature")
+            sig = base64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4))
+            check = f"{int(bot_id)}:WebAppData\n" + "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+            if not ed25519_verify(public_key or TELEGRAM_PUBKEY_PROD, check.encode(), sig):
+                raise ValueError("signature")
+        else:
+            raise ValueError("tanpa kunci")
+        return user_id
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, base64.binascii.Error):
+        raise ValueError("initData tidak valid")
+
+
+# ---- Margin reseller untuk SMM (sama dengan margin OTP; masuk saldo margin reseller) ----
+
+def credit_reseller_margin(local_id):
+    """Kreditkan margin reseller SEKALI (atomik). COMPLETED -> penuh; PARTIAL -> proporsional bagian
+    yang terkirim. Order gagal/batal/refund tidak pernah dikreditkan. Return jumlah yang dikreditkan."""
+    ensure_tables()
+    with get_db() as db:
+        o = db.execute(
+            "SELECT reseller_bot_id, reseller_margin, reseller_margin_status, status, quantity, remains "
+            "FROM smm_orders WHERE local_id=%s FOR UPDATE", (local_id,)).fetchone()
+        if not o or not o["reseller_bot_id"] or o["reseller_margin_status"] != "NONE":
+            return 0
+        margin = int(o["reseller_margin"] or 0)
+        if o["status"] == "PARTIAL":
+            qty, rem = int(o["quantity"] or 0), int(o["remains"] or 0)
+            margin = margin * (qty - rem) // qty if qty > 0 and 0 <= rem <= qty else 0
+        elif o["status"] != "COMPLETED":
+            return 0
+        if margin <= 0:
+            db.execute("UPDATE smm_orders SET reseller_margin_status='SKIPPED' WHERE local_id=%s", (local_id,))
+            return 0
+        bot = db.execute(
+            "UPDATE reseller_bots SET margin_balance = margin_balance + %s, total_earned = total_earned + %s "
+            "WHERE id = %s RETURNING margin_balance", (margin, margin, o["reseller_bot_id"])).fetchone()
+        if not bot:
+            return 0  # bot reseller sudah dihapus -> tidak ada yang dikreditkan
+        db.execute("UPDATE smm_orders SET reseller_margin_status='CREDITED', reseller_margin=%s WHERE local_id=%s",
+                   (margin, local_id))
+        db.execute("INSERT INTO reseller_ledger (bot_id, amount, balance_after, entry_type, reference, created_at) "
+                   "VALUES (%s,%s,%s,%s,%s,%s)",
+                   (o["reseller_bot_id"], margin, int(bot["margin_balance"]), "MARGIN", local_id, now()))
+        return margin

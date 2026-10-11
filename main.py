@@ -514,8 +514,8 @@ def user_menu():
         ],
     ]
 
-    if not is_reseller_bot:
-        rows.append([InlineKeyboardButton("🚀 SMM PANEL", callback_data="smm_home")])
+    # SMM PANEL: bot utama -> langsung mini app; bot reseller -> peluncur mini app / menu di bot.
+    rows.append([smm_bot.menu_button()])
 
     if not is_reseller_bot:
         # Saldo gratis / iklan / referral hanya di bot utama (biayanya ditanggung bot utama).

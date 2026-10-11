@@ -10,7 +10,7 @@ import asyncio
 import logging
 from html import escape
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import smm
 from database import get_balance, is_maintenance_enabled
@@ -51,7 +51,33 @@ def _n(v):
         return "-"
 
 
+def _native_home(markup):
+    """Bot reseller + mini app aktif: tombol 'smm_home' (launcher) di layar menu-bot diganti 'smm_n'
+    supaya navigasi kembali tetap di daftar platform bot."""
+    try:
+        if markup is None or current_reseller() is None or not smm.miniapp_url():
+            return markup
+        rows = []
+        for row in markup.inline_keyboard:
+            rows.append([InlineKeyboardButton(b.text, callback_data="smm_n")
+                         if getattr(b, "callback_data", None) == "smm_home" else b for b in row])
+        return InlineKeyboardMarkup(rows)
+    except Exception:
+        return markup
+
+
+def menu_button():
+    """Tombol 'SMM PANEL' di menu utama user: langsung buka mini app (bot utama maupun bot reseller; judul
+    jendela = nama bot). Bila mini app tidak aktif -> menu SMM di dalam bot."""
+    rs = current_reseller()
+    url = smm.miniapp_url(rs["id"] if rs else None)
+    if url:
+        return InlineKeyboardButton("🚀 SMM PANEL", web_app=WebAppInfo(url=url))
+    return _btn("🚀 SMM PANEL", "smm_home")
+
+
 async def _show(query, text, markup):
+    markup = _native_home(markup)
     try:
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup,
                                       disable_web_page_preview=True)
@@ -147,9 +173,6 @@ async def handle_callback(query, context):
     data = query.data
     user_id = query.from_user.id
 
-    if current_reseller() is not None:
-        await query.answer("Menu SMM hanya tersedia di bot utama.", show_alert=True)
-        return
     if not smm.is_configured():
         await _show(query, "🚀 <b>SMM PANEL</b>\n\nLayanan SMM belum diaktifkan. Hubungi admin.",
                     _kb([[_btn("⬅️ Menu Utama", "user_home")]]))
@@ -177,6 +200,8 @@ async def handle_callback(query, context):
             await _show(query, smm.HELP_TEXT,
                         _kb([[_btn("« Menu SMM", "smm_home")], [_btn("« Kembali ke Menu", "user_home")]]))
         elif data == "smm_home":
+            await _platforms(query, context)
+        elif data == "smm_n":
             await _platforms(query, context)
         elif data.startswith("smm_p:"):
             await _kinds(query, context, int(data.split(":")[1]))
@@ -428,7 +453,8 @@ async def _confirm(query, context, user_id, token):
     await _show(query, "⏳ Memproses pesanan...", None)
     comments = st.get("comments")
     order = await asyncio.to_thread(
-        smm.create_order, user_id, s, st["target"], st["qty"], comments, "BOT",
+        smm.create_order, user_id, s, st["target"], st["qty"], comments,
+        "BOT" if current_reseller() is None else "RESELLER",
         f"bot-{user_id}-{token}", st["price"])
     await _show(query, _order_text(order, header="✅ <b>PESANAN DIBUAT</b>"),
                 _kb([[_btn("🔄 Cek Status", f"smm_st:{order['local_id']}")],
