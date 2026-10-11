@@ -1107,3 +1107,43 @@ def kind_guide(platform, kind, services):
     return {"icon": icon, "title": f"{kind}", "desc": desc, "target_what": what, "target_example": example,
             "target_warning": warning, "eta": format_eta(mins[len(mins) // 2]) if mins else "",
             "completion": int(round(sum(vals) / len(vals))) if vals else None}
+
+
+# =========================================================
+# TAMBAHAN V4: INFO PENTING & KETENTUAN SMM (teks bot Telegram, HTML)
+# =========================================================
+
+INFO_TEXT = (
+    "⚠️ <b>Info penting sebelum memesan</b>\n\n"
+    "📸 <b>Instagram</b>\n"
+    "Sebagian akun perlu <b>menonaktifkan</b> pengaturan \"Laporkan untuk ditinjau\" agar followers masuk "
+    "dan pesanan tidak error/partial.\n"
+    "<i>Pengaturan dan aktivitas → Ikut dan undang teman → Laporkan untuk ditinjau (nonaktifkan)</i>\n\n"
+    "🎵 <b>TikTok</b>\n"
+    "Pastikan akun <b>publik</b> (bukan privat) dan video tidak disembunyikan, agar followers / likes / views "
+    "bisa masuk dan tidak error.\n\n"
+    "✈️ <b>Telegram (Subscriber Channel)</b>\n"
+    "Channel harus <b>publik</b> dan punya <b>username</b>. Jangan ubah ke privat atau ganti username selama "
+    "pesanan berjalan agar subscriber masuk.\n\n"
+    "<i>Pesanan dipantau otomatis untuk estimasi kecepatan pengerjaan tiap layanan.</i>"
+)
+
+TERMS_TEXT = (
+    "📋 <b>Ketentuan (Order · Speed Up · Refill) — wajib baca</b>\n\n"
+    "<b>Order</b>\n"
+    "• Input link <b>sesuai format</b> di keterangan — pesanan <b>tidak bisa dibatalkan</b>.\n"
+    "• Jangan pakai 2 layanan sekaligus untuk link yang sama (tunggu <b>completed</b> dulu).\n"
+    "• Link salah / di-private / dihapus setelah order → otomatis completed, <b>tanpa refund</b>.\n"
+    "• Status <b>partial / canceled</b> → saldo otomatis di-refund, bisa order ulang.\n"
+    "• Jumlah <b>maks = kapasitas total per akun/link</b>, bukan per sekali order.\n"
+    "• Speed &amp; drop rate = estimasi, bisa berubah tergantung server. Report setelah 24 jam.\n\n"
+    "<b>Speed Up</b>\n"
+    "• Untuk order <b>stuck &gt;24 jam</b> (kecuali layanan bertanda SLOW).\n"
+    "• Lapor <b>Order ID</b> ke CS; diproses 1×24 jam; maks 1×/hari per order.\n\n"
+    "<b>Refill (garansi isi ulang drop)</b>\n"
+    "• Untuk drop <b>&gt;30%</b> setelah status SELESAI (partial tidak bisa refill).\n"
+    "• Hanya layanan bergaransi refill (lihat keterangan). Ajukan ke CS dengan <b>Order ID</b>.\n"
+    "• Akun harus <b>PUBLIK</b> &amp; <b>tidak ganti username</b> — kalau tidak, refill gagal.\n"
+    "• <b>Jangan order ulang</b> ke link sama selama proses (garansi hangus). Proses 3–5 hari.\n"
+    "• Klaim tidak berlaku bila masa garansi sudah habis."
+)

@@ -156,7 +156,7 @@ async def handle_callback(query, context):
         return
 
     # Maintenance SMM: user biasa hanya boleh cek pesanan & bantuan. Admin tetap bebas.
-    if user_id != _admin_id() and not data.startswith(("smm_h:", "smm_st:", "smm_help")):
+    if user_id != _admin_id() and not data.startswith(("smm_h:", "smm_st:", "smm_help", "smm_info", "smm_terms")):
         try:
             under_maint = await asyncio.to_thread(smm.is_maintenance)
         except Exception:
@@ -168,7 +168,12 @@ async def handle_callback(query, context):
             return
 
     try:
-        if data == "smm_help":
+        if data in ("smm_info", "smm_terms"):
+            await _show(query, smm.INFO_TEXT if data == "smm_info" else smm.TERMS_TEXT,
+                        _kb([[_btn("📋 Ketentuan" if data == "smm_info" else "⚠️ Info Penting",
+                                   "smm_terms" if data == "smm_info" else "smm_info")],
+                             [_btn("« Menu SMM", "smm_home")], [_btn("« Kembali ke Menu", "user_home")]]))
+        elif data == "smm_help":
             await _show(query, smm.HELP_TEXT,
                         _kb([[_btn("« Menu SMM", "smm_home")], [_btn("« Kembali ke Menu", "user_home")]]))
         elif data == "smm_home":
@@ -213,6 +218,7 @@ async def _platforms(query, context):
             rows.append(row); row = []
     if row:
         rows.append(row)
+    rows.append([_btn("⚠️ Info Penting", "smm_info"), _btn("📋 Ketentuan", "smm_terms")])
     rows.extend(_bottom_rows())
     bal = await asyncio.to_thread(get_balance, query.from_user.id)
     maint_note = ""
