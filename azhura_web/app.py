@@ -976,7 +976,9 @@ def smm_kinds():
     if not uid():return err('Login diperlukan',401)
     platform=request.args.get('platform','').strip()[:60]
     if not platform:return err('Platform wajib diisi')
-    try:return jsonify(items=smm_core.get_kinds(platform))
+    try:
+        details=smm_core.kind_overview(platform)
+        return jsonify(items=[d['kind'] for d in details],details=details)
     except Exception as e:return _smm_fail(e)
 
 @app.get('/api/smm/services')
@@ -988,12 +990,10 @@ def smm_services():
         fset=smm_core.featured_ids(platform,kind)
         raw=smm_core.get_services(platform,kind,q or None,200)
         raw=sorted(raw,key=lambda s:(0 if smm_core.is_featured(s,fset) else 1,s.get('price') or 0))
-        items=[]
-        for s in raw:
-            pub=smm_core.public_service(s);pub['custom_comments']=smm_core.needs_custom_comments(s)
-            pub['featured']=smm_core.is_featured(s,fset);pub['success_rate']=smm_core.service_rate(s)
-            items.append(pub)
-        return jsonify(items=items,notice=smm_core.delay_notice(platform,any(i['featured'] for i in items)))
+        items=[smm_core.rich_service(s,fset) for s in raw]
+        for it in items:it['success_rate']=it.get('completion')
+        return jsonify(items=items,notice=smm_core.delay_notice(platform,any(i['featured'] for i in items)),
+                       guide=smm_core.kind_guide(platform,kind,raw))
     except Exception as e:return _smm_fail(e)
 
 @app.post('/api/smm/order')
