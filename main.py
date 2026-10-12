@@ -28,6 +28,8 @@ from psycopg.errors import UniqueViolation
 import reseller
 import smm
 import smm_bot
+import apk_bot
+import apk_premium as apk
 from reseller_ctx import current_reseller
 
 from flask import Flask, request, jsonify
@@ -516,6 +518,8 @@ def user_menu():
 
     # SMM PANEL: bot utama -> langsung mini app; bot reseller -> peluncur mini app / menu di bot.
     rows.append([smm_bot.menu_button()])
+    # APK PREMIUM AZHURA (SIMURU backend, branding sendiri)
+    rows.append([apk_bot.menu_button()])
 
     if not is_reseller_bot:
         # Saldo gratis / iklan / referral hanya di bot utama (biayanya ditanggung bot utama).
@@ -604,6 +608,10 @@ def admin_menu():
         smm_maintenance_label = "🚀 SMM Maintenance: ON" if smm.is_maintenance() else "🚀 SMM Maintenance: OFF"
     except Exception:
         smm_maintenance_label = "🚀 SMM Maintenance"
+    try:
+        apk_maintenance_label = "💎 APK Maintenance: ON" if apk.is_maintenance() else "💎 APK Maintenance: OFF"
+    except Exception:
+        apk_maintenance_label = "💎 APK Maintenance"
 
     return InlineKeyboardMarkup([
 
@@ -655,10 +663,14 @@ def admin_menu():
             InlineKeyboardButton("🖥 Server Maintenance", callback_data="admin_server_maintenance")
         ],
         [
-            InlineKeyboardButton("🚀 SMM Orders", callback_data="admin_smm")
+            InlineKeyboardButton("🚀 SMM Orders", callback_data="admin_smm"),
+            InlineKeyboardButton("💎 APK Orders", callback_data="admin_apk")
         ],
         [
             InlineKeyboardButton(smm_maintenance_label, callback_data="admin_smm_maintenance")
+        ],
+        [
+            InlineKeyboardButton(apk_maintenance_label, callback_data="admin_apk_maintenance")
         ]
 
     ])
@@ -5503,6 +5515,7 @@ async def post_init(application):
     application.create_task(auto_notify_web_otp(application))
     application.create_task(reconcile_pending_premotp_qris(application))
     application.create_task(smm_bot.sync_loop())
+    application.create_task(apk_bot.sync_loop())
     if reseller.MANAGER:
         application.create_task(reseller.MANAGER.sync_loop())
 
@@ -9440,6 +9453,16 @@ async def admin_callback(
     elif query.data == "admin_smm_maintenance":
         await smm_bot.admin_toggle_maintenance(query)
 
+    elif query.data == "admin_apk" or query.data.startswith("admin_apk_page:"):
+        try:
+            apk_page = int(query.data.split(":", 1)[1]) if ":" in query.data else 0
+        except Exception:
+            apk_page = 0
+        await apk_bot.admin_view(query, apk_page)
+
+    elif query.data == "admin_apk_maintenance":
+        await apk_bot.admin_toggle_maintenance(query)
+
     elif query.data == "admin_resellers":
         await _admin_reseller_list(query)
 
@@ -10083,7 +10106,8 @@ async def button_handler(
         "admin_resellers",
         "admin_maintenance",
         "admin_home",
-        "admin_smm"
+        "admin_smm",
+        "admin_apk"
 
     }
 
@@ -10093,6 +10117,8 @@ async def button_handler(
         or query.data.startswith("admin_users_page:")
         or query.data.startswith("admin_smm_page:")
         or query.data == "admin_smm_maintenance"
+        or query.data.startswith("admin_apk_page:")
+        or query.data == "admin_apk_maintenance"
         or query.data.startswith("admin_user:")
         or query.data.startswith("admin_user_orders:")
         or query.data.startswith("admin_user_deposits:")
@@ -10162,6 +10188,13 @@ async def button_handler(
         context.user_data.pop("smm_state", None)
     else:
         await smm_bot.handle_callback(query, context)
+        return
+
+    # APK PREMIUM AZHURA: semua callback apk_* ditangani apk_bot.
+    if not query.data.startswith("apk_"):
+        context.user_data.pop("apk_state", None)
+    else:
+        await apk_bot.handle_callback(query, context)
         return
 
     if is_maintenance_enabled() and not is_admin(user_id):
@@ -10266,6 +10299,10 @@ async def text_handler(
 
     # Alur input SMM PANEL (link/target, jumlah, komentar).
     if await smm_bot.handle_text(update, context):
+        return
+
+    # Alur input email APK PREMIUM.
+    if await apk_bot.handle_text(update, context):
         return
 
     # Admin manual balance: amount is entered after selecting a user.
