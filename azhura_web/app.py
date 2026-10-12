@@ -23,7 +23,11 @@ def hitung_harga_jual_idr(harga_modal_rp):
         if cost <= 0:
             return 0
         margin = Decimal(os.getenv('PROFIT_PERCENT', '7')) / Decimal('100')
-        return int((cost * (Decimal('1') + margin)).to_integral_value(rounding=ROUND_CEILING))
+        base=int((cost * (Decimal('1') + margin)).to_integral_value(rounding=ROUND_CEILING))
+        # Sesi mini app bot reseller: harga = harga utama + margin reseller (sama dengan bot reseller).
+        from reseller_ctx import current_reseller, add_margin
+        rs=current_reseller()
+        return add_margin(base,rs['margin_percent']) if rs else base
     except (ValueError, ArithmeticError):
         return 0
 from premotp import get_services, get_countries, get_offers, create_order as prem_buy, get_order as prem_status
@@ -1081,14 +1085,19 @@ def telegram_webapp_login():
 
 @app.before_request
 def smm_reseller_context():
-    # Sesi mini app dari bot reseller: semua /api/smm/* memakai margin reseller itu (sama dengan margin OTP).
-    rb=session.get('rb') if request.path.startswith('/api/smm/') else None
+    # Sesi mini app dari bot reseller: SMM dan ORDER OTP memakai margin reseller itu (sama dengan di bot reseller),
+    # dan margin dicatat ke order agar masuk saldo margin reseller. Polling OTP/batal/refund tetap berjalan
+    # walau reseller dinonaktifkan; hanya harga/pembelian baru yang ditolak.
+    rb=session.get('rb') if request.path.startswith('/api/') else None
     if not rb:return None
+    p=request.path
+    pricing=p.startswith('/api/smm/') or p.startswith('/api/prem/offers/') or p=='/api/prem/buy' or (p.startswith('/api/server/') and ('/quotes/' in p or p.endswith('/buy')))
     try:row=get_reseller_by_id(int(rb))
     except Exception:
-        app.logger.exception('Reseller lookup failed');return err('Layanan sementara tidak tersedia. Coba beberapa saat lagi.',503)
+        app.logger.exception('Reseller lookup failed')
+        return err('Layanan sementara tidak tersedia. Coba beberapa saat lagi.',503) if pricing else None
     if not row or row.get('admin_blocked') or not row.get('enabled'):
-        return err('Bot ini sedang tidak aktif. Silakan coba lagi nanti.',403)
+        return err('Bot ini sedang tidak aktif. Silakan coba lagi nanti.',403) if pricing else None
     from reseller_ctx import CURRENT_RESELLER
     request.environ['smm_rs_token']=CURRENT_RESELLER.set(row)
     return None
@@ -1100,6 +1109,54 @@ def smm_reseller_context_reset(exc):
         from reseller_ctx import CURRENT_RESELLER
         try:CURRENT_RESELLER.reset(tok)
         except Exception:CURRENT_RESELLER.set(None)
+
+
+# ---------------- BRANDING MINI APP BOT RESELLER (nama + logo bot reseller) ----------------
+_BRAND_LOGO_CACHE={}
+def _brand_row():
+    rb=session.get('rb')
+    if not rb or not uid():return None
+    try:row=get_reseller_by_id(int(rb))
+    except Exception:return None
+    return row if row and not row.get('admin_blocked') and row.get('enabled') else None
+
+@app.get('/api/brand')
+def web_brand():
+    row=_brand_row()
+    if not row:return jsonify(ok=True,reseller=False)
+    return jsonify(ok=True,reseller=True,name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
+                   username=str(row.get('bot_username') or '').lstrip('@')[:64])
+
+@app.get('/api/brand/logo')
+def web_brand_logo():
+    # Foto profil bot reseller (diambil via Bot API, di-cache 1 jam). Gagal -> 404 dan tampilan memakai logo bawaan.
+    row=_brand_row()
+    if not row:return Response(status=404)
+    rid=int(row['id']);hit=_BRAND_LOGO_CACHE.get(rid)
+    if hit and time.time()-hit[0]<3600:
+        data=hit[1]
+    else:
+        data=None
+        try:
+            from database import get_reseller_token
+            tok=get_reseller_token(rid)
+            api='https://api.telegram.org/bot%s/'%tok
+            fid=None
+            ph=requests.get(api+'getUserProfilePhotos',params={'user_id':int(row['bot_telegram_id']),'limit':1},timeout=8).json()
+            if ph.get('ok') and ph['result'].get('photos'):fid=ph['result']['photos'][0][-1]['file_id']
+            if not fid:
+                ch=requests.get(api+'getChat',params={'chat_id':int(row['bot_telegram_id'])},timeout=8).json()
+                if ch.get('ok') and ch['result'].get('photo'):fid=ch['result']['photo'].get('big_file_id')
+            if fid:
+                fi=requests.get(api+'getFile',params={'file_id':fid},timeout=8).json()
+                if fi.get('ok'):
+                    img=requests.get('https://api.telegram.org/file/bot%s/%s'%(tok,fi['result']['file_path']),timeout=10)
+                    if img.ok and 0<len(img.content)<2_000_000:data=img.content
+        except Exception:
+            app.logger.warning('Brand logo fetch failed',exc_info=False)
+        _BRAND_LOGO_CACHE[rid]=(time.time(),data)
+    if not data:return Response(status=404)
+    return Response(data,mimetype='image/jpeg',headers={'Cache-Control':'private, max-age=3600'})
 
 
 # ---------------- RESELLER (panel web) ----------------
