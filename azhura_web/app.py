@@ -745,6 +745,7 @@ WEB_MAINT_KEYS = {'web': 'azhura_web_maintenance', '1': 'azhura_web_server_1_mai
                   'manual': 'azhura_web_payment_manual_maintenance', 'auto': 'azhura_web_payment_auto_maintenance'}
 
 WEB_MAINT_KEYS['smm']='smm_maintenance'  # saklar SMM PANEL: dibagi dengan bot Telegram (smm.MAINT_KEY)
+WEB_MAINT_KEYS['apk']='apk_premium_maintenance'  # saklar APK PREMIUM: dibagi dengan bot Telegram
 
 def web_is_admin():
     return bool(ADMIN_WEB_ID and uid() and int(uid()) == ADMIN_WEB_ID)
@@ -1057,6 +1058,150 @@ def web_admin_smm_sync():
     except Exception as e:return _smm_fail(e)
 
 
+# ---------------- APK PREMIUM AZHURA (backend SIMURU, branding sendiri) ----------------
+import apk_premium as apk_core
+
+def _apk_json(row, *, admin=False):
+    if not row: return None
+    base = apk_core.order_public(row) if not admin else dict(row)
+    if admin:
+        base = {
+            'local_id': row.get('local_id'),
+            'telegram_id': row.get('telegram_id'),
+            'source': row.get('source'),
+            'app_name': row.get('app_name'),
+            'package_name': row.get('package_name'),
+            'email': row.get('email'),
+            'sell_price': int(row.get('sell_price') or 0),
+            'provider_cost': int(row.get('provider_cost') or 0),
+            'status': row.get('status'),
+            'account': row.get('account_data') if row.get('status') == 'COMPLETED' else None,
+            'refunded_amount': int(row.get('refunded_amount') or 0),
+            'provider_order_id': row.get('provider_order_id'),
+            'created_at': row.get('created_at'),
+            'completed_at': row.get('completed_at'),
+            'username': row.get('username'),
+        }
+    return base
+
+def _apk_fail(e):
+    if isinstance(e, apk_core.ApkError):
+        code = getattr(e, 'http_status', 400) or 400
+        if isinstance(e, apk_core.ApkAmbiguous):
+            code = 409
+        return err(str(e), code if code in (400, 404, 409, 429) else 400)
+    app.logger.exception('APK error')
+    return err('Terjadi kesalahan. Coba lagi.', 500)
+
+@app.get('/api/apk/categories')
+def apk_categories():
+    if not uid(): return err('Login diperlukan', 401)
+    try:
+        if not apk_core.is_configured():
+            return jsonify(configured=False, items=[])
+        cats = [apk_core.public_category(c) for c in apk_core.get_categories()]
+        return jsonify(configured=True, items=cats, maintenance=apk_core.is_maintenance())
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.get('/api/apk/variants')
+def apk_variants():
+    if not uid(): return err('Login diperlukan', 401)
+    slug = (request.args.get('slug') or '').strip()[:80]
+    if not slug: return err('slug wajib')
+    try:
+        items = [apk_core.public_item(i) for i in apk_core.get_variants(slug)]
+        return jsonify(items=items)
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.get('/api/apk/catalog')
+def apk_catalog():
+    if not uid(): return err('Login diperlukan', 401)
+    try:
+        if not apk_core.is_configured():
+            return jsonify(configured=False, items=[])
+        out = []
+        for cat in apk_core.get_catalog():
+            pub = apk_core.public_category(cat)
+            pub['items'] = [apk_core.public_item(i, cat) for i in (cat.get('items') or [])]
+            out.append(pub)
+        return jsonify(configured=True, items=out, maintenance=apk_core.is_maintenance())
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.post('/api/apk/order')
+def apk_order():
+    if not uid(): return err('Login diperlukan', 401)
+    if apk_core.is_maintenance() and not web_is_admin():
+        return err('APK PREMIUM sedang maintenance. Pemesanan baru ditutup sementara.', 503)
+    d = request.get_json(silent=True) or {}
+    try:
+        app_id = int(d.get('app_id') or 0)
+        if not app_id: return err('app_id wajib')
+        email = (d.get('email') or '').strip() or None
+        expected = d.get('expected_price')
+        expected = int(expected) if expected is not None else None
+        idem = str(d.get('idem_key') or f"web-{uid()}-{uuid.uuid4().hex[:10]}")[:64]
+        order = apk_core.create_order(int(uid()), app_id, email=email, source='WEB',
+                                      idem_key=idem, expected_price=expected)
+        bal = query('SELECT balance FROM users WHERE telegram_id=%s', (uid(),))
+        return jsonify(ok=True, order=_apk_json(order), balance=int(bal[0]['balance']) if bal else None)
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.get('/api/apk/orders')
+def apk_orders():
+    if not uid(): return err('Login diperlukan', 401)
+    try:
+        return jsonify(orders=[_apk_json(o) for o in apk_core.list_user_orders(int(uid()), 30, 0)])
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.post('/api/apk/order/status')
+def apk_order_status():
+    if not uid(): return err('Login diperlukan', 401)
+    local_id = str((request.get_json(silent=True) or {}).get('local_id') or '')[:40]
+    try:
+        o = apk_core.get_apk_order(local_id, int(uid()))
+        if not o: return err('Pesanan tidak ditemukan.', 404)
+        return jsonify(order=_apk_json(apk_core.sync_order(local_id)))
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.get('/api/admin/apk/orders')
+def web_admin_apk_orders():
+    denied = web_admin_required()
+    if denied: return denied
+    search = (request.args.get('q') or '').strip()[:70]
+    try:
+        items = apk_core.list_all_orders(200, 0, search or None)
+        return jsonify(configured=apk_core.is_configured(),
+                       summary=apk_core.admin_summary(),
+                       items=[_apk_json(o, admin=True) for o in items],
+                       maintenance=apk_core.is_maintenance())
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.post('/api/admin/apk/orders/sync')
+def web_admin_apk_sync():
+    denied = web_admin_required()
+    if denied: return denied
+    try:
+        return jsonify(ok=True, synced=apk_core.sync_active_orders(25))
+    except Exception as e:
+        return _apk_fail(e)
+
+@app.post('/api/admin/apk/maintenance')
+def web_admin_apk_maintenance():
+    denied = web_admin_required()
+    if denied: return denied
+    d = request.get_json(silent=True) or {}
+    enabled = bool(d.get('enabled'))
+    apk_core.set_maintenance(enabled)
+    return jsonify(ok=True, maintenance=apk_core.is_maintenance())
+
+
 # ---------------- MINI APP TELEGRAM: login otomatis untuk SMM PANEL ----------------
 @app.post('/api/auth/telegram-webapp')
 def telegram_webapp_login():
@@ -1091,7 +1236,7 @@ def smm_reseller_context():
     rb=session.get('rb') if request.path.startswith('/api/') else None
     if not rb:return None
     p=request.path
-    pricing=p.startswith('/api/smm/') or p.startswith('/api/prem/offers/') or p=='/api/prem/buy' or (p.startswith('/api/server/') and ('/quotes/' in p or p.endswith('/buy')))
+    pricing=p.startswith('/api/smm/') or p.startswith('/api/apk/') or p.startswith('/api/prem/offers/') or p=='/api/prem/buy' or (p.startswith('/api/server/') and ('/quotes/' in p or p.endswith('/buy')))
     try:row=get_reseller_by_id(int(rb))
     except Exception:
         app.logger.exception('Reseller lookup failed')
