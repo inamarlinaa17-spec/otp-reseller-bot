@@ -94,6 +94,14 @@ async function smmCheck(id,quiet){try{const d=await api('/api/smm/order/status',
     const problem=await ready;
     await _me.apply(this,arguments);
     if(!user){if(problem){const el=$('login-error');if(el)el.textContent=problem}return}
+    if(rb&&!window.__brandDone){window.__brandDone=true;try{
+      const b=await (await fetch('/api/brand',{credentials:'same-origin'})).json();
+      if(b&&b.reseller&&b.name){
+        document.title=b.name;
+        document.querySelectorAll('header h1,#login h2').forEach(h=>{h.textContent=b.name});
+        document.querySelectorAll('header img,#login>img').forEach(im=>{const old=im.getAttribute('src');im.alt=b.name;im.onerror=()=>{im.onerror=null;im.src=old};im.src='/api/brand/logo'});
+      }
+    }catch(e){}}
     if(wantSmm&&!window.__smmOpened){window.__smmOpened=true;tab('smm')}
     if(initData&&!window.__tgReady){window.__tgReady=true;const s=document.createElement('script');s.src='https://telegram.org/js/telegram-web-app.js';
       s.onload=()=>{try{Telegram.WebApp.ready();Telegram.WebApp.expand()}catch(e){}};document.head.appendChild(s)}
