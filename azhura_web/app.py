@@ -1125,7 +1125,8 @@ def web_brand():
     row=_brand_row()
     if not row:return jsonify(ok=True,reseller=False)
     return jsonify(ok=True,reseller=True,name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
-                   username=str(row.get('bot_username') or '').lstrip('@')[:64])
+                   username=str(row.get('bot_username') or '').lstrip('@')[:64],
+                   cs_username=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64])
 
 @app.get('/api/brand/logo')
 def web_brand_logo():
