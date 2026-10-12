@@ -98,6 +98,7 @@ async function smmCheck(id,quiet){try{const d=await api('/api/smm/order/status',
       const b=await (await fetch('/api/brand',{credentials:'same-origin'})).json();
       if(b&&b.reseller&&b.name){
         document.title=b.name;
+        if(b.cs_username){const ci=$('cs-info'),cl=$('cs-link');if(ci)ci.textContent='@'+b.cs_username;if(cl){cl.href='https://t.me/'+encodeURIComponent(b.cs_username);cl.classList.remove('hidden')}}
         document.querySelectorAll('header h1,#login h2').forEach(h=>{h.textContent=b.name});
         document.querySelectorAll('header img,#login>img').forEach(im=>{const old=im.getAttribute('src');im.alt=b.name;im.onerror=()=>{im.onerror=null;im.src=old};im.src='/api/brand/logo'});
       }
