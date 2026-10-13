@@ -747,6 +747,7 @@ WEB_MAINT_KEYS = {'web': 'azhura_web_maintenance', '1': 'azhura_web_server_1_mai
 
 WEB_MAINT_KEYS['smm']='smm_maintenance'  # saklar SMM PANEL: dibagi dengan bot Telegram (smm.MAINT_KEY)
 WEB_MAINT_KEYS['apk']='apk_premium_maintenance'  # saklar APK PREMIUM: dibagi dengan bot Telegram
+WEB_MAINT_KEYS['gmail']='gmail_premium_maintenance'  # saklar BELI GMAIL: dibagi dengan bot Telegram
 
 def web_is_admin():
     return bool(ADMIN_WEB_ID and uid() and int(uid()) == ADMIN_WEB_ID)
@@ -1203,6 +1204,125 @@ def web_admin_apk_maintenance():
     return jsonify(ok=True, maintenance=apk_core.is_maintenance())
 
 
+# ---------------- BELI GMAIL (backend SIMURU) ----------------
+import gmail_premium as gmail_core
+
+def _gmail_json(row, *, admin=False):
+    if not row:
+        return {}
+    base = gmail_core.order_public(row) if not admin else dict(row)
+    if admin:
+        base = {
+            'local_id': row.get('local_id'),
+            'telegram_id': row.get('telegram_id'),
+            'source': row.get('source'),
+            'provider_order_id': row.get('provider_order_id'),
+            'status': row.get('status'),
+            'provider_cost': int(row.get('provider_cost') or 0),
+            'sell_price': int(row.get('sell_price') or 0),
+            'email_address': row.get('email_address'),
+            'password': row.get('password') if row.get('status') == 'COMPLETED' else None,
+            'account': row.get('account_data') if row.get('status') == 'COMPLETED' else None,
+            'refunded_amount': int(row.get('refunded_amount') or 0),
+            'reseller_bot_id': row.get('reseller_bot_id'),
+            'reseller_margin': int(row.get('reseller_margin') or 0),
+            'created_at': row.get('created_at'),
+            'completed_at': row.get('completed_at'),
+        }
+    return base
+
+def _gmail_fail(e):
+    if isinstance(e, gmail_core.GmailError):
+        code = getattr(e, 'http_status', 400) or 400
+        if isinstance(e, gmail_core.GmailAmbiguous):
+            code = 409
+        return err(str(e), code)
+    app.logger.exception('Gmail error')
+    return err('Terjadi kesalahan. Coba lagi.', 500)
+
+@app.get('/api/gmail/stock')
+def gmail_stock():
+    if not uid(): return err('Silakan login terlebih dahulu.', 401)
+    try:
+        if not gmail_core.is_configured():
+            return jsonify(configured=False, maintenance=False)
+        stock = gmail_core.get_stock()
+        return jsonify(configured=True, maintenance=gmail_core.is_maintenance(), **stock)
+    except Exception as e:
+        return _gmail_fail(e)
+
+@app.post('/api/gmail/order')
+def gmail_order():
+    if not uid(): return err('Silakan login terlebih dahulu.', 401)
+    if gmail_core.is_maintenance() and not web_is_admin():
+        return err('BELI GMAIL sedang maintenance. Pemesanan baru ditutup sementara.', 503)
+    d = request.get_json(silent=True) or {}
+    expected = d.get('expected_price')
+    try:
+        expected = int(expected) if expected is not None else None
+    except (TypeError, ValueError):
+        expected = None
+    idem = str(d.get('idem_key') or '')[:80] or None
+    try:
+        order = gmail_core.create_order(int(uid()), source='WEB', idem_key=idem, expected_price=expected)
+        bal = query('SELECT balance FROM users WHERE telegram_id=%s', (int(uid()),))
+        return jsonify(ok=True, order=_gmail_json(order), balance=int(bal[0]['balance']) if bal else None)
+    except Exception as e:
+        return _gmail_fail(e)
+
+@app.get('/api/gmail/orders')
+def gmail_orders():
+    if not uid(): return err('Silakan login terlebih dahulu.', 401)
+    try:
+        return jsonify(orders=[_gmail_json(o) for o in gmail_core.list_user_orders(int(uid()), 30, 0)])
+    except Exception as e:
+        return _gmail_fail(e)
+
+@app.post('/api/gmail/order/status')
+def gmail_order_status():
+    if not uid(): return err('Silakan login terlebih dahulu.', 401)
+    d = request.get_json(silent=True) or {}
+    local_id = str(d.get('local_id') or '')[:40]
+    try:
+        o = gmail_core.get_gmail_order(local_id, int(uid()))
+        if not o: return err('Pesanan tidak ditemukan.', 404)
+        return jsonify(order=_gmail_json(gmail_core.sync_order(local_id)))
+    except Exception as e:
+        return _gmail_fail(e)
+
+@app.get('/api/admin/gmail/orders')
+def web_admin_gmail_orders():
+    denied = web_admin_required()
+    if denied: return denied
+    search = (request.args.get('q') or '').strip()[:80]
+    try:
+        items = gmail_core.list_all_orders(200, 0, search or None)
+        return jsonify(configured=gmail_core.is_configured(),
+                       summary=gmail_core.admin_summary(),
+                       items=[_gmail_json(o, admin=True) for o in items],
+                       maintenance=gmail_core.is_maintenance())
+    except Exception as e:
+        return _gmail_fail(e)
+
+@app.post('/api/admin/gmail/orders/sync')
+def web_admin_gmail_sync():
+    denied = web_admin_required()
+    if denied: return denied
+    try:
+        return jsonify(ok=True, synced=gmail_core.sync_active_orders(25))
+    except Exception as e:
+        return _gmail_fail(e)
+
+@app.post('/api/admin/gmail/maintenance')
+def web_admin_gmail_maintenance():
+    denied = web_admin_required()
+    if denied: return denied
+    d = request.get_json(silent=True) or {}
+    enabled = bool(d.get('enabled'))
+    gmail_core.set_maintenance(enabled)
+    return jsonify(ok=True, maintenance=gmail_core.is_maintenance())
+
+
 def telegram_init_user(init_data, bot_token):
     # Official Telegram WebApp initData HMAC verification (Telegram WebApp initData HMAC verification).
     pairs = dict(parse_qsl(init_data, keep_blank_values=True))
@@ -1250,7 +1370,7 @@ def smm_reseller_context():
     rb=session.get('rb') if request.path.startswith('/api/') else None
     if not rb:return None
     p=request.path
-    pricing=p.startswith('/api/smm/') or p.startswith('/api/apk/') or p.startswith('/api/prem/offers/') or p=='/api/prem/buy' or (p.startswith('/api/server/') and ('/quotes/' in p or p.endswith('/buy')))
+    pricing=p.startswith('/api/smm/') or p.startswith('/api/apk/') or p.startswith('/api/gmail/') or p.startswith('/api/prem/offers/') or p=='/api/prem/buy' or (p.startswith('/api/server/') and ('/quotes/' in p or p.endswith('/buy')))
     try:row=get_reseller_by_id(int(rb))
     except Exception:
         app.logger.exception('Reseller lookup failed')
