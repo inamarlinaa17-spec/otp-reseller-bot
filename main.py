@@ -30,6 +30,8 @@ import smm
 import smm_bot
 import apk_bot
 import apk_premium as apk
+import gmail_bot
+import gmail_premium as gmail
 from reseller_ctx import current_reseller
 
 from flask import Flask, request, jsonify
@@ -520,6 +522,8 @@ def user_menu():
     rows.append([smm_bot.menu_button()])
     # APK PREMIUM AZHURA (SIMURU backend, branding sendiri)
     rows.append([apk_bot.menu_button()])
+    # BELI GMAIL (SIMURU backend)
+    rows.append([gmail_bot.menu_button()])
 
     if not is_reseller_bot:
         # Saldo gratis / iklan / referral hanya di bot utama (biayanya ditanggung bot utama).
@@ -611,6 +615,10 @@ def admin_menu():
         apk_maintenance_label = "💎 APK Maintenance: ON" if apk.is_maintenance() else "💎 APK Maintenance: OFF"
     except Exception:
         apk_maintenance_label = "💎 APK Maintenance"
+    try:
+        gmail_maintenance_label = "📧 Gmail Maintenance: ON" if gmail.is_maintenance() else "📧 Gmail Maintenance: OFF"
+    except Exception:
+        gmail_maintenance_label = "📧 Gmail Maintenance"
 
     return InlineKeyboardMarkup([
 
@@ -666,10 +674,16 @@ def admin_menu():
             InlineKeyboardButton("💎 APK Orders", callback_data="admin_apk")
         ],
         [
+            InlineKeyboardButton("📧 Gmail Orders", callback_data="admin_gmail"),
+        ],
+        [
             InlineKeyboardButton(smm_maintenance_label, callback_data="admin_smm_maintenance")
         ],
         [
             InlineKeyboardButton(apk_maintenance_label, callback_data="admin_apk_maintenance")
+        ],
+        [
+            InlineKeyboardButton(gmail_maintenance_label, callback_data="admin_gmail_maintenance")
         ]
 
     ])
@@ -5503,6 +5517,7 @@ async def post_init(application):
     application.create_task(reconcile_pending_premotp_qris(application))
     application.create_task(smm_bot.sync_loop())
     application.create_task(apk_bot.sync_loop())
+    application.create_task(gmail_bot.sync_loop())
     if reseller.MANAGER:
         application.create_task(reseller.MANAGER.sync_loop())
 
@@ -9430,6 +9445,16 @@ async def admin_callback(
     elif query.data == "admin_apk_maintenance":
         await apk_bot.admin_toggle_maintenance(query)
 
+    elif query.data == "admin_gmail" or query.data.startswith("admin_gmail_page:"):
+        try:
+            gmail_page = int(query.data.split(":", 1)[1]) if ":" in query.data else 0
+        except Exception:
+            gmail_page = 0
+        await gmail_bot.admin_view(query, gmail_page)
+
+    elif query.data == "admin_gmail_maintenance":
+        await gmail_bot.admin_toggle_maintenance(query)
+
     elif query.data == "admin_resellers":
         await _admin_reseller_list(query)
 
@@ -10074,7 +10099,8 @@ async def button_handler(
         "admin_maintenance",
         "admin_home",
         "admin_smm",
-        "admin_apk"
+        "admin_apk",
+        "admin_gmail"
 
     }
 
@@ -10086,6 +10112,8 @@ async def button_handler(
         or query.data == "admin_smm_maintenance"
         or query.data.startswith("admin_apk_page:")
         or query.data == "admin_apk_maintenance"
+        or query.data.startswith("admin_gmail_page:")
+        or query.data == "admin_gmail_maintenance"
         or query.data.startswith("admin_user:")
         or query.data.startswith("admin_user_orders:")
         or query.data.startswith("admin_user_deposits:")
@@ -10162,6 +10190,13 @@ async def button_handler(
         context.user_data.pop("apk_state", None)
     else:
         await apk_bot.handle_callback(query, context)
+        return
+
+    # BELI GMAIL: semua callback gmail_* ditangani gmail_bot.
+    if not query.data.startswith("gmail_"):
+        context.user_data.pop("gmail_state", None)
+    else:
+        await gmail_bot.handle_callback(query, context)
         return
 
     if is_maintenance_enabled() and not is_admin(user_id):
