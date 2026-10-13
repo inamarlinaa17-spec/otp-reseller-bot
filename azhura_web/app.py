@@ -2,6 +2,7 @@
 # Live web purchases are opt-in until staged provider, DB and refund tests succeed.
 #
 import os, sys, time, json, hmac, hashlib, secrets, uuid, math
+from urllib.parse import parse_qsl
 from pathlib import Path
 from datetime import datetime, timezone
 from base64 import b64encode
@@ -43,7 +44,7 @@ def uid():return session.get('uid')
 def err(msg,status=400):return jsonify(error=msg),status
 @app.before_request
 def csrf():
-    if request.method in ('POST','PUT','DELETE') and uid() and request.path not in ('/api/auth/telegram','/api/auth/google','/api/rewards/login'):
+    if request.method in ('POST','PUT','DELETE') and uid() and request.path not in ('/api/auth/telegram','/api/auth/google'):
         if not hmac.compare_digest(str(request.headers.get('X-CSRF-Token','')),str(session.get('csrf','missing'))):return err('Sesi tidak valid. Muat ulang halaman.',403)
 def login(user):
     session.clear();session.permanent=True;session['uid']=int(user);session['csrf']=secrets.token_urlsafe(32)
@@ -1202,6 +1203,20 @@ def web_admin_apk_maintenance():
     return jsonify(ok=True, maintenance=apk_core.is_maintenance())
 
 
+def telegram_init_user(init_data, bot_token):
+    # Official Telegram WebApp initData HMAC verification (Telegram WebApp initData HMAC verification).
+    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+    signature = pairs.pop('hash', '')
+    auth_date = int(pairs.get('auth_date', '0'))
+    if not signature or abs(time.time() - auth_date) > 300:
+        raise ValueError('Sesi Telegram kedaluwarsa')
+    check = '\n'.join(f'{k}={v}' for k, v in sorted(pairs.items()))
+    secret = hmac.new(b'WebAppData', bot_token.encode(), hashlib.sha256).digest()
+    expected = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError('Tanda tangan Telegram tidak valid')
+    return int(json.loads(pairs['user'])['id'])
+
 # ---------------- MINI APP TELEGRAM: login otomatis untuk SMM PANEL ----------------
 @app.post('/api/auth/telegram-webapp')
 def telegram_webapp_login():
@@ -1209,7 +1224,6 @@ def telegram_webapp_login():
     # Bot RESELLER (rb=<id>): tanda tangan Ed25519 milik Telegram (bukan HMAC token), karena pemilik bot reseller
     # memegang token bot-nya dan bisa memalsukan initData user lain. Sesi lalu membawa 'rb' agar harga SMM memakai
     # margin reseller dan margin masuk saldo reseller.
-    from azhura_web.monetag_rewards import telegram_init_user
     d=request.get_json(silent=True) or {}
     init=str(d.get('init_data',''))[:4096]
     rb=None
@@ -1369,7 +1383,3 @@ def reseller_withdraw():
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
 if __name__=='__main__':app.run(port=int(os.getenv('PORT','8080')),debug=os.getenv('WEB_DEV')=='1')
-
-# --- AZHURA Monetag rewards (isolated web module; shared users/ledger) ---
-from azhura_web.monetag_rewards import rewards_bp
-app.register_blueprint(rewards_bp)
