@@ -1,213 +1,133 @@
-<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#7c3aed"><link rel="manifest" href="/manifest.webmanifest"><title>AZHURA ID</title><script>(function(){try{var t=localStorage.getItem("azhura-theme")||"light";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","light")}})();</script><style>
+<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b1a32"><link rel="manifest" href="/manifest.webmanifest"><title>AZHURA ID</title><style>
+:root{font:15px system-ui,-apple-system,Segoe UI,sans-serif;color:#edf6ff;background:#080e1b}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#173e73 0,transparent 52%),#080e1b;min-height:100vh}button,select,input{font:inherit}button{cursor:pointer}header{max-width:680px;margin:auto;display:flex;align-items:center;gap:13px;padding:22px 18px 6px}header img{width:54px;height:54px;border-radius:16px;object-fit:cover;box-shadow:0 0 24px #1289e858}h1{font-size:23px;margin:0;letter-spacing:1px}h1 span,.blue{color:#38c5ff}.muted{color:#9aafc9}.small{font-size:12px}main{max-width:680px;margin:auto;padding:12px 18px 105px}.card{background:linear-gradient(135deg,#192d4b,#101c31);border:1px solid #365578;border-radius:23px;padding:20px;margin:14px 0;box-shadow:0 10px 25px #0003}.balance{background:linear-gradient(120deg,#1645a2,#0ba6d8);border-color:#60cbff}.balance h2{font-size:36px;margin:12px 0 22px}.flex{display:flex;align-items:center;justify-content:space-between;gap:12px}.pill{border-radius:50px;background:#143e58;color:#82f4cf;font-size:12px;padding:7px 10px}.btn{border:0;border-radius:14px;background:linear-gradient(110deg,#1468dd,#0bb5e4);padding:13px 17px;font-weight:750;color:white}.btn.secondary{background:#29415d}.btn:disabled{opacity:.48;cursor:not-allowed}.wide{width:100%}.tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px}.tile{border:1px solid #335477;background:#162944;border-radius:19px;padding:19px 14px;color:white;text-align:left;min-height:106px}.tile b{display:block;margin:8px 0 4px}.tile span{font-size:12px;color:#9eb7d3}.tile i{font-size:26px;font-style:normal}.item{display:block;border:1px solid #345272;background:#162942;border-radius:15px;padding:14px;margin:10px 0;width:100%;text-align:left;color:#fff}.item b{display:block;margin-bottom:4px}#server-select{display:grid;grid-template-columns:1fr 1fr;gap:10px}#server-select .item{margin:0;width:100%;min-width:0}#server-select .item:nth-child(1){grid-column:1;grid-row:1}#server-select .item:nth-child(2){grid-column:1;grid-row:2}#server-select .item:nth-child(3){grid-column:2;grid-row:1}#server-select .item:nth-child(4){grid-column:2;grid-row:2}.item small{color:#9fb8d2} .status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e;margin-right:7px;vertical-align:middle;box-shadow:0 0 8px currentColor}.status-dot.off{background:#ef4444}.btn.maint{background:#243447;color:#8b97a8}.btn.maint .status-dot{box-shadow:0 0 8px #ef4444}.nav{position:fixed;bottom:0;left:0;right:0;background:#0b1728f5;backdrop-filter:blur(16px);border-top:1px solid #314761;display:flex;justify-content:space-around;padding:12px 8px max(14px,env(safe-area-inset-bottom))}.nav button{background:none;border:0;color:#92a7c3;font-size:12px}.nav button.active{color:#45c8ff;font-weight:800}.nav i{display:block;font-size:23px;font-style:normal}.hidden{display:none!important}#login{max-width:420px;margin:10vh auto;padding:28px;text-align:center}#login img{width:110px;height:110px;object-fit:cover;border-radius:28px;box-shadow:0 0 50px #138af255}#login h2{font-size:29px}.number{font-size:26px;font-weight:850;letter-spacing:1px;overflow-wrap:anywhere;margin:15px 0;color:#fff}.otp{border:1px dashed #438ce4;background:#0c2849;border-radius:17px;padding:19px;text-align:center;margin:15px 0}.otp strong{font-size:34px;display:block;letter-spacing:6px;color:#6bdeff;margin:10px 0}.field{width:100%;padding:14px;border:1px solid #3b5b7c;border-radius:13px;background:#10233d;color:#fff;margin:8px 0}#toast{display:none;position:fixed;top:14px;left:50%;transform:translateX(-50%);max-width:90%;background:#275481;padding:13px 20px;border-radius:13px;z-index:20}a{color:#71d5ff}.divider{height:1px;background:#334b67;margin:17px 0}.empty{text-align:center;padding:24px;color:#a4b8d0}
+.choice-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:9px;margin-top:12px}.choice-tile{display:flex;gap:9px;align-items:center;text-align:left;border:1px solid #355477;background:#12243b;color:#edf6ff;padding:12px;border-radius:13px;min-width:0;cursor:pointer}.choice-tile span:last-child{min-width:0}.choice-tile b{display:block;font-size:13px;overflow-wrap:anywhere}.choice-tile small{display:block;color:#a5bdd7;margin-top:4px}.choice-icon{font-size:22px;flex-shrink:0}@media(max-width:400px){.choice-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+#web-maint-overlay{position:fixed;inset:0;z-index:99999;background:radial-gradient(circle at 50% 28%,#1e4380,#071328 65%);color:#eaf4ff;display:none;align-items:center;justify-content:center;text-align:center;padding:25px}#web-maint-overlay.show{display:flex}#web-maint-overlay .maint-card{max-width:460px;width:100%;padding:34px 22px;border:1px solid #3c6a9c;border-radius:28px;background:#122544e8;box-shadow:0 25px 100px #0008}#web-maint-overlay h1{font-size:28px;margin:14px 0;color:white}#web-maint-overlay p{line-height:1.7;color:#b9cce8}#web-maint-overlay .robot{font-size:82px;display:block;animation:fixrobot 2.2s ease-in-out infinite}#web-maint-overlay .tools{font-size:27px;display:inline-block;animation:fixtools 1.5s ease-in-out infinite}@keyframes fixrobot{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-12px) rotate(5deg)}}@keyframes fixtools{0%,100%{transform:rotate(-20deg)}50%{transform:rotate(20deg)}}#az-modal{position:fixed;inset:0;z-index:9990;background:#020817c9;display:none;align-items:center;justify-content:center;padding:18px}#az-modal.show{display:flex}#az-modal .box{max-width:420px;width:100%;padding:25px;border-radius:22px;background:#122748;border:1px solid #4384c5;color:white;box-shadow:0 20px 70px #0009}#az-modal .box p{line-height:1.65;color:#c7d8ee}#az-modal .box button{margin:6px} #az-live-traffic{position:fixed;left:12px;bottom:85px;z-index:500;max-width:min(330px,calc(100vw - 24px));background:linear-gradient(120deg,#143e73,#0c213f);color:white;border:1px solid #3b82f6;border-radius:15px;padding:12px 34px 12px 14px;box-shadow:0 14px 42px #0008;display:none;animation:azSlide .35s ease}#az-live-traffic b{display:block;font-size:13px}#az-live-traffic small{display:block;color:#c5d9f6;margin-top:4px}#az-live-traffic button{position:absolute;right:7px;top:5px;border:0;background:transparent;color:white;font-size:18px;cursor:pointer}@keyframes azSlide{from{transform:translateX(-120%);opacity:0}to{transform:translateX(0);opacity:1}}
+/* AZHURA: hanya tampilan katalog layanan dan grid harga Server 3 */
+.service-logo{width:35px;height:35px;display:inline-flex;align-items:center;justify-content:center;border-radius:10px;background:var(--logo-bg,#28517b);color:white;font-weight:800;font-size:15px;flex-shrink:0;overflow:hidden}.service-logo img{width:23px;height:23px;object-fit:contain;filter:brightness(0) invert(1)}.service-logo .service-initial{line-height:1}.server3-price-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.server3-price-grid .choice-tile{min-height:65px}.server3-price-grid .choice-tile b{font-size:15px}.server3-price-grid .choice-tile small{font-size:12px;overflow-wrap:anywhere}
+.apk-grid{display:flex;flex-direction:column;gap:8px}.apk-item{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 14px;border:0;border-radius:14px;background:linear-gradient(90deg,#1d4ed8,#2563eb);color:#fff;cursor:pointer}.apk-item:active{opacity:.9}.apk-logo{width:40px;height:40px;border-radius:10px;object-fit:contain;background:#0f172a;flex-shrink:0}.apk-logo-fallback{display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;color:#93c5fd}.apk-meta{display:flex;flex-direction:column;gap:2px}.apk-meta b{font-size:15px}.apk-meta small{opacity:.9;font-size:12px}.apk-pack .apk-logo{width:32px;height:32px}
+</style><style id="az-themes">/* ===== AZHURA THEMES (tambahan): dark = bawaan tanpa perubahan. Pilih tema di menu Profil ===== */
+html[data-theme="light"]{--bg:#eef3fb;--bgimg:radial-gradient(ellipse at top,#d6e6ff 0,transparent 55%);--tx:#0f1b2d;--mu:#4b5d78;--ac:#1259c9;--cbg:#fff;--cbd:#d3deee;--csh:0 8px 24px #1b3a6b1a;--cfl:none;--tile:#f3f7fd;--tilebd:#d3deee;--fld:#f4f7fc;--fldbd:#b9c9e0;--navbg:#fffffff2;--navbd:#d3deee;--navtx:#5a6c86;--navac:#1259c9;--b1:#1468dd;--b2:#0b8fc0;--btnfg:#fff;--s2:#e2eaf7;--s2fg:#17325a;--balfg:#fff;--bal1:#1259c9;--bal2:#0b8fc0;--pill:#d8f5ea;--pillfg:#0a6a4a;--otp:#eaf3ff;--otpbd:#5b9bf0;--otpcode:#0b57c4;--soft:#f3f7fd;--softbd:#d3deee;--ovl:#0d1b2fc9;--tc:#eef3fb;--lnk:#0b57c4;--tgl:#0f1b2d;--rad:23px}
+html[data-theme="glass"]{--bg:#0a0f24;--bgimg:radial-gradient(circle at 12% 8%,#7c3aedcc 0,transparent 42%),radial-gradient(circle at 92% 22%,#06b6d4bb 0,transparent 40%),radial-gradient(circle at 20% 78%,#ec4899aa 0,transparent 42%),radial-gradient(circle at 88% 92%,#2563ebcc 0,transparent 45%);--tx:#fff;--mu:#dbe7fb;--ac:#9be7ff;--cbg:#ffffff24;--cbd:#ffffff52;--csh:inset 0 1px 0 #ffffff80,inset 0 -1px 0 #ffffff14,0 18px 40px #0000004d;--cfl:blur(26px) saturate(180%);--tile:#ffffff1c;--tilebd:#ffffff47;--fld:#0a0f2473;--fldbd:#ffffff52;--navbg:#0e1238b8;--navbd:#ffffff66;--navtx:#e6efff;--navac:#fff;--b1:#ffffff3d;--b2:#ffffff1f;--btnfg:#fff;--s2:#ffffff1f;--s2fg:#fff;--balfg:#fff;--bal1:#ffffff33;--bal2:#ffffff14;--pill:#0a0f2473;--pillfg:#9ff7d9;--otp:#0a0f2473;--otpbd:#ffffff66;--otpcode:#b6f0ff;--soft:#ffffff1c;--softbd:#ffffff47;--ovl:#0a0f24d9;--tc:#0a0f24;--lnk:#b6f0ff;--tgl:#fff;--rad:26px}
+html[data-theme="aurora"]{--bg:#07060f;--bgimg:radial-gradient(circle at 10% 0,#00f5a02e 0,transparent 40%),radial-gradient(circle at 92% 8%,#7c3aed57 0,transparent 45%),radial-gradient(circle at 50% 100%,#00b4ff33 0,transparent 50%);--tx:#f4f1ff;--mu:#b4adda;--ac:#5eead4;--cbg:#13102bb8;--cbd:#8b78ff47;--csh:0 0 0 1px #5eead414,0 14px 34px #0000008c;--cfl:blur(14px);--tile:#1b1740cc;--tilebd:#8b78ff3d;--fld:#0d0b22;--fldbd:#6c5ce066;--navbg:#0d0b22eb;--navbd:#6c5ce05c;--navtx:#a79fd3;--navac:#5eead4;--b1:#7c3aed;--b2:#06b6d4;--btnfg:#fff;--s2:#2a2458;--s2fg:#ece8ff;--balfg:#fff;--bal1:#7c3aed;--bal2:#06b6d4;--pill:#0f2e2e;--pillfg:#5eead4;--otp:#14113a;--otpbd:#8b78ff;--otpcode:#5eead4;--soft:#ffffff0d;--softbd:#8b78ff3d;--ovl:#07060fd9;--tc:#07060f;--lnk:#5eead4;--tgl:#f4f1ff;--rad:22px}
+html[data-theme="pop"]{--bg:#fff1d0;--bgimg:none;--tx:#111;--mu:#4a4a4a;--ac:#d6196b;--cbg:#fff;--cbd:#111;--csh:5px 5px 0 #111;--cfl:none;--tile:#fff;--tilebd:#111;--fld:#fff;--fldbd:#111;--navbg:#fff;--navbd:#111;--navtx:#333;--navac:#111;--b1:#ffd23f;--b2:#ffd23f;--btnfg:#111;--s2:#fff;--s2fg:#111;--balfg:#111;--bal1:#7ee8c6;--bal2:#7ee8c6;--pill:#b9f6ca;--pillfg:#0b4a22;--otp:#e9f5ff;--otpbd:#111;--otpcode:#111;--soft:#fff;--softbd:#111;--ovl:#111d;--tc:#ffd23f;--lnk:#b3125a;--tgl:#111;--rad:16px}
 
-:root{
-  --bg:#f4f5fb;
-  --bg-grad:linear-gradient(180deg,#f0eefc 0%,#f4f5fb 40%);
-  --text:#0f172a;
-  --muted:#64748b;
-  --card:#ffffff;
-  --card-border:#e8eaf2;
-  --card-shadow:0 4px 20px rgba(15,23,42,.06);
-  --balance:linear-gradient(135deg,#7c3aed 0%,#6d28d9 55%,#5b21b6 100%);
-  --balance-text:#fff;
-  --accent:#7c3aed;
-  --accent-2:#6d28d9;
-  --btn:linear-gradient(110deg,#7c3aed,#6d28d9);
-  --btn-sec:#eef0f8;
-  --btn-sec-text:#334155;
-  --tile-bg:#ffffff;
-  --tile-border:#eceef6;
-  --tile-text:#0f172a;
-  --tile-sub:#64748b;
-  --item-bg:#ffffff;
-  --item-border:#e8eaf2;
-  --item-text:#0f172a;
-  --item-sub:#64748b;
-  --nav-bg:rgba(255,255,255,.92);
-  --nav-border:#e8eaf2;
-  --nav-text:#94a3b8;
-  --nav-active:#7c3aed;
-  --field-bg:#f8f9fc;
-  --field-border:#e2e5ef;
-  --field-text:#0f172a;
-  --pill-bg:#ecfdf5;
-  --pill-text:#059669;
-  --divider:#e8eaf2;
-  --toast-bg:#1e1b4b;
-  --link:#7c3aed;
-  --choice-bg:#fff;
-  --choice-border:#e8eaf2;
-  --header-shadow:0 0 20px rgba(124,58,237,.18);
-  --modal-bg:rgba(15,23,42,.45);
-  --modal-box:#fff;
-  --modal-text:#334155;
-  --live-bg:linear-gradient(120deg,#7c3aed,#5b21b6);
-  --maint-bg:radial-gradient(circle at 50% 28%,#ddd6fe,#f4f5fb 65%);
-  --maint-card:#fff;
-  --maint-text:#475569;
-  --apk-item:linear-gradient(90deg,#7c3aed,#6d28d9);
-  --logo-bg:#7c3aed;
-  --empty:#94a3b8;
-  --blue:#7c3aed;
-  font:15px system-ui,-apple-system,Segoe UI,sans-serif;
-  color:var(--text);
-  background:var(--bg);
-}
-[data-theme="dark"]{
-  --bg:#080e1b;
-  --bg-grad:radial-gradient(ellipse at top,#173e73 0,transparent 52%),#080e1b;
-  --text:#edf6ff;
-  --muted:#9aafc9;
-  --card:linear-gradient(135deg,#192d4b,#101c31);
-  --card-border:#365578;
-  --card-shadow:0 10px 25px #0003;
-  --balance:linear-gradient(120deg,#1645a2,#0ba6d8);
-  --balance-text:#fff;
-  --accent:#38c5ff;
-  --accent-2:#0bb5e4;
-  --btn:linear-gradient(110deg,#1468dd,#0bb5e4);
-  --btn-sec:#29415d;
-  --btn-sec-text:#edf6ff;
-  --tile-bg:#162944;
-  --tile-border:#335477;
-  --tile-text:#fff;
-  --tile-sub:#9eb7d3;
-  --item-bg:#162942;
-  --item-border:#345272;
-  --item-text:#fff;
-  --item-sub:#9fb8d2;
-  --nav-bg:#0b1728f5;
-  --nav-border:#314761;
-  --nav-text:#92a7c3;
-  --nav-active:#45c8ff;
-  --field-bg:#10233d;
-  --field-border:#3b5b7c;
-  --field-text:#fff;
-  --pill-bg:#143e58;
-  --pill-text:#82f4cf;
-  --divider:#334b67;
-  --toast-bg:#275481;
-  --link:#71d5ff;
-  --choice-bg:#12243b;
-  --choice-border:#355477;
-  --header-shadow:0 0 24px #1289e858;
-  --modal-bg:#020817c9;
-  --modal-box:#122748;
-  --modal-text:#c7d8ee;
-  --live-bg:linear-gradient(120deg,#143e73,#0c213f);
-  --maint-bg:radial-gradient(circle at 50% 28%,#1e4380,#071328 65%);
-  --maint-card:#122544e8;
-  --maint-text:#b9cce8;
-  --apk-item:linear-gradient(90deg,#1d4ed8,#2563eb);
-  --logo-bg:#28517b;
-  --empty:#a4b8d0;
-  --blue:#38c5ff;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg-grad);background-color:var(--bg);min-height:100vh;color:var(--text);transition:background .25s,color .25s}
-button,select,input{font:inherit}button{cursor:pointer}
-header{max-width:680px;margin:auto;display:flex;align-items:center;gap:13px;padding:22px 18px 6px}
-header img{width:54px;height:54px;border-radius:16px;object-fit:cover;box-shadow:var(--header-shadow)}
-h1{font-size:23px;margin:0;letter-spacing:.3px;color:var(--text)}
-h1 span,.blue{color:var(--blue)}
-.muted{color:var(--muted)}.small{font-size:12px}
-main{max-width:680px;margin:auto;padding:12px 18px 105px}
-h2,h3{color:var(--text)}
-.card{background:var(--card);border:1px solid var(--card-border);border-radius:20px;padding:20px;margin:14px 0;box-shadow:var(--card-shadow);color:var(--text)}
-.balance{background:var(--balance)!important;border-color:transparent!important;color:var(--balance-text)!important}
-.balance h2{font-size:36px;margin:12px 0 22px;color:var(--balance-text)!important}
-.balance span,.balance .small{color:rgba(255,255,255,.9)!important}
-.flex{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.pill{border-radius:50px;background:var(--pill-bg);color:var(--pill-text);font-size:12px;padding:7px 10px;font-weight:600}
-.btn{border:0;border-radius:14px;background:var(--btn);padding:13px 17px;font-weight:750;color:white}
-.btn.secondary{background:var(--btn-sec);color:var(--btn-sec-text)}
-.btn:disabled{opacity:.48;cursor:not-allowed}
-.wide{width:100%}
-.tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.tile{border:1px solid var(--tile-border);background:var(--tile-bg);border-radius:18px;padding:18px 14px;color:var(--tile-text);text-align:left;min-height:106px;box-shadow:var(--card-shadow)}
-.tile b{display:block;margin:8px 0 4px;color:var(--tile-text)}
-.tile span{font-size:12px;color:var(--tile-sub)}
-.tile i{font-size:26px;font-style:normal}
-.item{display:block;border:1px solid var(--item-border);background:var(--item-bg);border-radius:15px;padding:14px;margin:10px 0;width:100%;text-align:left;color:var(--item-text);box-shadow:var(--card-shadow)}
-.item b{display:block;margin-bottom:4px;color:var(--item-text)}
-#server-select{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-#server-select .item{margin:0;width:100%;min-width:0}
-#server-select .item:nth-child(1){grid-column:1;grid-row:1}
-#server-select .item:nth-child(2){grid-column:1;grid-row:2}
-#server-select .item:nth-child(3){grid-column:2;grid-row:1}
-#server-select .item:nth-child(4){grid-column:2;grid-row:2}
-.item small{color:var(--item-sub)}
-.status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e;margin-right:7px;vertical-align:middle;box-shadow:0 0 8px currentColor}
-.status-dot.off{background:#ef4444}
-.btn.maint{background:var(--btn-sec);color:var(--muted)}
-.btn.maint .status-dot{box-shadow:0 0 8px #ef4444}
-.nav{position:fixed;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(16px);border-top:1px solid var(--nav-border);display:flex;justify-content:space-around;padding:12px 8px max(14px,env(safe-area-inset-bottom));z-index:40}
-.nav button{background:none;border:0;color:var(--nav-text);font-size:12px}
-.nav button.active{color:var(--nav-active);font-weight:800}
-.nav i{display:block;font-size:18px;font-style:normal;margin-bottom:2px}
-.hidden{display:none!important}
-.field{width:100%;padding:14px;border:1px solid var(--field-border);border-radius:13px;background:var(--field-bg);color:var(--field-text);margin:8px 0}
-#toast{display:none;position:fixed;top:14px;left:50%;transform:translateX(-50%);max-width:90%;background:var(--toast-bg);color:#fff;padding:13px 20px;border-radius:13px;z-index:20}
-a{color:var(--link)}
-.divider{height:1px;background:var(--divider);margin:17px 0}
-.empty{text-align:center;padding:24px;color:var(--empty)}
-.choice-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:9px;margin-top:12px}
-.choice-tile{display:flex;gap:9px;align-items:center;text-align:left;border:1px solid var(--choice-border);background:var(--choice-bg);color:var(--text);padding:12px;border-radius:13px;min-width:0;cursor:pointer;box-shadow:var(--card-shadow)}
-.choice-tile span:last-child{min-width:0}
-.choice-tile b{display:block;font-size:13px;overflow-wrap:anywhere;color:var(--text)}
-.choice-tile small{display:block;color:var(--muted);margin-top:4px}
-.choice-icon{font-size:22px;flex-shrink:0}
-@media(max-width:400px){.choice-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-#web-maint-overlay{position:fixed;inset:0;z-index:99999;background:var(--maint-bg);color:var(--text);display:none;align-items:center;justify-content:center;text-align:center;padding:25px}
-#web-maint-overlay.show{display:flex}
-#web-maint-overlay .maint-card{max-width:460px;width:100%;padding:34px 22px;border:1px solid var(--card-border);border-radius:28px;background:var(--maint-card);box-shadow:0 25px 100px rgba(0,0,0,.12)}
-#web-maint-overlay h1{font-size:28px;margin:14px 0;color:var(--text)}
-#web-maint-overlay p{line-height:1.7;color:var(--maint-text)}
-#web-maint-overlay .robot{font-size:82px;display:block;animation:fixrobot 2.2s ease-in-out infinite}
-#web-maint-overlay .tools{font-size:27px;display:inline-block;animation:fixtools 1.5s ease-in-out infinite}
-@keyframes fixrobot{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-12px) rotate(5deg)}}
-@keyframes fixtools{0%,100%{transform:rotate(-20deg)}50%{transform:rotate(20deg)}}
-#az-modal{position:fixed;inset:0;z-index:9990;background:var(--modal-bg);display:none;align-items:center;justify-content:center;padding:18px}
-#az-modal.show{display:flex}
-#az-modal .box{max-width:420px;width:100%;padding:25px;border-radius:22px;background:var(--modal-box);border:1px solid var(--card-border);color:var(--text);box-shadow:0 20px 70px rgba(0,0,0,.15)}
-#az-modal .box p{line-height:1.65;color:var(--modal-text)}
-#az-modal .box button{margin:6px}
-#az-live-traffic{position:fixed;left:12px;bottom:85px;z-index:500;max-width:min(330px,calc(100vw - 24px));background:var(--live-bg);color:white;border:1px solid rgba(255,255,255,.2);border-radius:15px;padding:12px 34px 12px 14px;box-shadow:0 14px 42px rgba(0,0,0,.2);display:none;animation:azSlide .35s ease}
-#az-live-traffic b{display:block;font-size:13px}
-#az-live-traffic small{display:block;color:rgba(255,255,255,.85);margin-top:4px}
-#az-live-traffic button{position:absolute;right:7px;top:5px;border:0;background:transparent;color:white;font-size:18px;cursor:pointer}
-@keyframes azSlide{from{transform:translateX(-120%);opacity:0}to{transform:translateX(0);opacity:1}}
-.service-logo{width:35px;height:35px;display:inline-flex;align-items:center;justify-content:center;border-radius:10px;background:var(--logo-bg,#7c3aed);color:white;font-weight:800;font-size:15px;flex-shrink:0;overflow:hidden}
-.service-logo img{width:23px;height:23px;object-fit:contain;filter:brightness(0) invert(1)}
-.service-logo .service-initial{line-height:1}
-.server3-price-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
-.server3-price-grid .choice-tile{min-height:65px}
-.server3-price-grid .choice-tile b{font-size:15px}
-.server3-price-grid .choice-tile small{font-size:12px;overflow-wrap:anywhere}
-.apk-grid{display:flex;flex-direction:column;gap:8px}
-.apk-item{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 14px;border:0;border-radius:14px;background:var(--apk-item);color:#fff;cursor:pointer}
-.apk-item:active{opacity:.9}
-.apk-logo{width:40px;height:40px;border-radius:10px;object-fit:contain;background:rgba(0,0,0,.2);flex-shrink:0}
-.apk-logo-fallback{display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;color:#e9d5ff}
-.apk-meta{display:flex;flex-direction:column;gap:2px}
-.apk-meta b{font-size:15px}
-.apk-meta small{opacity:.9;font-size:12px}
-.apk-pack .apk-logo{width:32px;height:32px}
-#login{max-width:420px;margin:10vh auto;padding:28px;text-align:center}
-#login img{width:110px;height:110px;object-fit:cover;border-radius:28px;box-shadow:var(--header-shadow)}
-#login h2{font-size:29px}
-.theme-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.theme-switch{position:relative;width:52px;height:30px;border-radius:999px;background:var(--btn-sec);border:0;padding:0;flex-shrink:0}
-.theme-switch::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.15);transition:transform .2s}
-[data-theme="dark"] .theme-switch{background:var(--accent)}
-[data-theme="dark"] .theme-switch::after{transform:translateX(22px)}
-.badge-ok{display:inline-block;background:#dcfce7;color:#15803d;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px}
-.badge-warn{display:inline-block;background:#ffedd5;color:#c2410c;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px}
-[data-theme="dark"] .badge-ok{background:#14532d;color:#86efac}
-[data-theme="dark"] .badge-warn{background:#7c2d12;color:#fdba74}
+/* ---- aturan bersama (semua tema selain dark) ---- */
+html[data-theme]:not([data-theme="dark"]){color:var(--tx);background:var(--bg)}
+html[data-theme]:not([data-theme="dark"]) body{background:var(--bgimg),var(--bg);background-attachment:fixed;color:var(--tx)}
+html[data-theme]:not([data-theme="dark"]) .muted,html[data-theme]:not([data-theme="dark"]) .tile span,html[data-theme]:not([data-theme="dark"]) .item small,html[data-theme]:not([data-theme="dark"]) .choice-tile small,html[data-theme]:not([data-theme="dark"]) .empty,html[data-theme]:not([data-theme="dark"]) .sk p,html[data-theme]:not([data-theme="dark"]) .sk .st em,html[data-theme]:not([data-theme="dark"]) .sk .price small,html[data-theme]:not([data-theme="dark"]) .hc-t,html[data-theme]:not([data-theme="dark"]) .hc-m,html[data-theme]:not([data-theme="dark"]) .sd .bd,html[data-theme]:not([data-theme="dark"]) .sd .ft,html[data-theme]:not([data-theme="dark"]) [style*="color:#c8d6e8"]{color:var(--mu)!important}
+html[data-theme]:not([data-theme="dark"]) h1 span,html[data-theme]:not([data-theme="dark"]) .blue{color:var(--ac)}
+html[data-theme]:not([data-theme="dark"]) a{color:var(--lnk)}
+html[data-theme]:not([data-theme="dark"]) .card,html[data-theme]:not([data-theme="dark"]) #login{background:var(--cbg);border-color:var(--cbd);box-shadow:var(--csh);-webkit-backdrop-filter:var(--cfl);backdrop-filter:var(--cfl);border-radius:var(--rad);color:var(--tx)}
+html[data-theme]:not([data-theme="dark"]) .card.balance{background:linear-gradient(120deg,var(--bal1),var(--bal2));color:var(--balfg);border-color:var(--cbd)}
+html[data-theme]:not([data-theme="dark"]) .card.balance *{color:inherit}
+html[data-theme]:not([data-theme="dark"]) .pill{background:var(--pill);color:var(--pillfg)}
+html[data-theme]:not([data-theme="dark"]) .btn,html[data-theme]:not([data-theme="dark"]) .btn.maint{background:linear-gradient(110deg,var(--b1),var(--b2));color:var(--btnfg)}
+html[data-theme]:not([data-theme="dark"]) .btn.secondary{background:var(--s2);color:var(--s2fg)}
+html[data-theme]:not([data-theme="dark"]) .btn.maint{opacity:.7}
+html[data-theme]:not([data-theme="dark"]) .tile,html[data-theme]:not([data-theme="dark"]) .item,html[data-theme]:not([data-theme="dark"]) .choice-tile{background:var(--tile);border-color:var(--tilebd);color:var(--tx);border-radius:calc(var(--rad) - 4px);-webkit-backdrop-filter:var(--cfl);backdrop-filter:var(--cfl)}
+html[data-theme]:not([data-theme="dark"]) .tile b,html[data-theme]:not([data-theme="dark"]) .item b,html[data-theme]:not([data-theme="dark"]) .choice-tile b,html[data-theme]:not([data-theme="dark"]) .number,html[data-theme]:not([data-theme="dark"]) .sd h5,html[data-theme]:not([data-theme="dark"]) .sd b,html[data-theme]:not([data-theme="dark"]) .sd.n summary{color:var(--tx)}
+html[data-theme]:not([data-theme="dark"]) .field{background:var(--fld);border-color:var(--fldbd);color:var(--tx)}
+html[data-theme]:not([data-theme="dark"]) .field::placeholder{color:var(--mu);opacity:.85}
+html[data-theme]:not([data-theme="dark"]) .otp{background:var(--otp);border-color:var(--otpbd)}
+html[data-theme]:not([data-theme="dark"]) .otp strong{color:var(--otpcode)}
+html[data-theme]:not([data-theme="dark"]) .divider{background:var(--cbd);opacity:.7}
+html[data-theme]:not([data-theme="dark"]) .nav{background:var(--navbg);border-color:var(--navbd);-webkit-backdrop-filter:blur(22px) saturate(170%);backdrop-filter:blur(22px) saturate(170%)}
+html[data-theme]:not([data-theme="dark"]) .nav button{color:var(--navtx)}
+html[data-theme]:not([data-theme="dark"]) .nav button.active{color:var(--navac)}
+html[data-theme]:not([data-theme="dark"]) #toast{background:var(--tc);color:var(--tx);border:1px solid var(--cbd);box-shadow:0 10px 30px #0004}
+html[data-theme]:not([data-theme="dark"]) .sk,html[data-theme]:not([data-theme="dark"]) .hc,html[data-theme]:not([data-theme="dark"]) .sd.n,html[data-theme]:not([data-theme="dark"]) [style*="rgba(20,60,100,.25)"]{background:var(--soft)!important;border-color:var(--softbd)!important;color:var(--tx)}
+html[data-theme]:not([data-theme="dark"]) .sk .box,html[data-theme]:not([data-theme="dark"]) .sd .hint{background:var(--fld)}
+html[data-theme]:not([data-theme="dark"]) .hc-bar{background:var(--softbd)}
+html[data-theme]:not([data-theme="dark"]) #az-modal{background:var(--ovl)}
+html[data-theme]:not([data-theme="dark"]) #az-modal .box,html[data-theme]:not([data-theme="dark"]) #web-maint-overlay .maint-card{background:var(--cbg);border-color:var(--cbd);color:var(--tx);box-shadow:var(--csh);-webkit-backdrop-filter:var(--cfl);backdrop-filter:var(--cfl)}
+html[data-theme]:not([data-theme="dark"]) #az-modal .box p,html[data-theme]:not([data-theme="dark"]) #web-maint-overlay p{color:var(--mu)}
+html[data-theme]:not([data-theme="dark"]) #web-maint-overlay h1{color:var(--tx)}
+html[data-theme]:not([data-theme="dark"]) #web-maint-overlay{background:var(--bgimg),var(--bg)}
+html[data-theme]:not([data-theme="dark"]) #az-live-traffic{background:var(--cbg);color:var(--tx);border-color:var(--cbd);-webkit-backdrop-filter:var(--cfl);backdrop-filter:var(--cfl)}
+html[data-theme]:not([data-theme="dark"]) #az-live-traffic small{color:var(--mu)}
+html[data-theme]:not([data-theme="dark"]) #az-live-traffic button{color:var(--tx)}
+html[data-theme]:not([data-theme="dark"]) .apk-item{background:linear-gradient(90deg,var(--b1),var(--b2));color:var(--btnfg)}
+html[data-theme]:not([data-theme="dark"]) .apk-logo{background:var(--tile)}
+html[data-theme]:not([data-theme="dark"]) .apk-logo-fallback{color:var(--ac)}
 
-</style></head><body><div id="web-maint-overlay" aria-live="polite"><div class="maint-card"><span class="robot" aria-hidden="true">🤖<span class="tools">🔧</span></span><h1>AZHURA Sedang Diperbaiki</h1><p>Mohon maaf atas ketidaknyamanannya. Tim robot AZHURA sedang melakukan perawatan agar layanan kembali lebih nyaman dan stabil. Terima kasih sudah bersabar, ya! 💙</p><p style="font-size:12px;color:#7dd3fc">Silakan kunjungi kembali beberapa saat lagi.</p></div></div><div id="az-modal"><div class="box"><h2 id="az-modal-title">Pemberitahuan</h2><p id="az-modal-message"></p><div id="az-modal-actions"></div></div></div><div id="toast"></div><div id="az-live-traffic" role="status" aria-live="polite"><button aria-label="Tutup" onclick="this.parentNode.style.display='none'">×</button><b id="az-live-title"></b><small id="az-live-details"></small></div><div id="login" class="card"><img src="/static/logo.jpg" alt="AZHURA ID"><h2>AZHURA <span class="blue">ID</span></h2><p class="muted">Akun bot dan aplikasi dalam satu tempat. Masuk menggunakan Telegram terlebih dahulu.</p><div id="telegram-login" style="display:flex;justify-content:center;margin:22px 0"></div><div id="google-login" style="display:flex;justify-content:center;margin:15px 0"></div><p id="login-error" class="muted small"></p></div><div id="app" class="hidden"><div id="admin-shortcut" class="hidden" style="max-width:680px;margin:12px auto 0;padding:0 12px"><a href="/admin" style="display:block;text-align:center;background:linear-gradient(110deg,#1e40af,#0891b2);padding:12px;border-radius:14px;color:white;font-weight:800;text-decoration:none">🛡️ BUKA DASHBOARD ADMIN AZHURA ↗</a></div><div id="maintenance-notice" class="hidden" style="max-width:680px;margin:12px auto;padding:14px;background:#7c2d12;border:1px solid #fb923c;border-radius:12px;color:white"></div><header><img src="/static/logo.jpg" alt="Logo"><div><h1>AZHURA <span>ID</span></h1><span class="muted small">OTP & LAYANAN DIGITAL</span></div><span class="pill" style="margin-left:auto">● Online</span></header><main><section id="home"><p class="muted" id="greet">Selamat datang kembali 👋</p><div class="card balance"><div class="flex"><span>Saldo tersedia</span><span>💳</span></div><h2 id="balance">Rp 0</h2><div class="flex"><span class="small" id="who">—</span><button class="btn" onclick="tab('deposit')">+ Top Up</button></div></div><h3>Layanan AZHURA</h3><div class="tiles"><button class="tile" onclick="tab('order')"><i>📲</i><b>Order OTP</b><span>Nomor virtual</span></button><button class="tile" onclick="tab('deposit')"><i>💳</i><b>Deposit</b><span>Riwayat & info deposit</span></button><button class="tile" onclick="tab('history')"><i>🧾</i><b>Riwayat</b><span>Nomor & kode OTP</span></button><button class="tile" onclick="tab('profile')"><i>💬</i><b>Profil & CS</b><span>Kelola akun</span></button><button class="tile" onclick="tab('smm')"><i>🚀</i><b>SMM PANEL</b><span>Followers, Likes, Views</span></button><button class="tile" onclick="tab('apk')"><i>💎</i><b>APK PREMIUM</b><span>Netflix, Canva, Gemini, dll</span></button><button class="tile" onclick="tab('gmail')"><i>📧</i><b>BELI GMAIL</b><span>Akun Gmail siap pakai</span></button><button class="tile" onclick="tab('reseller')"><i>🤝</i><b>RESELLER</b><span>Bot sendiri, untung margin</span></button></div><h3>Transaksi terbaru</h3><div id="recent" class="card empty">Belum ada transaksi.</div></section><section id="order" class="hidden"><h2>Order OTP</h2><p class="muted">Pilih server dan jenis nomor virtual.</p><div id="server-select" class="card"><button class="item" onclick="otherServer(1)"><b><span class="status-dot" id="web-server-dot-1"></span>📱 Server 1</b><small>Layanan nomor virtual</small></button><button class="item" onclick="otherServer(2)"><b><span class="status-dot" id="web-server-dot-2"></span>📱 Server 2</b><small>Layanan nomor virtual</small></button><button class="item" onclick="showTypes()"><b><span class="status-dot" id="web-server-dot-3"></span>⚡ Server 3</b><small>Nokos Reguler & Nokos Plus</small></button><button class="item" onclick="otherServer(4)"><b><span class="status-dot" id="web-server-dot-4"></span>⚡ Server 4 — ALTERNATIF 2</b><small>Server global dengan pilihan negara lengkap dan stok alternatif</small></button></div><div id="order-content"></div></section><section id="history" class="hidden"><h2>Riwayat & OTP</h2><p class="muted small">Pembaruan otomatis setiap 10 detik. OTP akan muncul setelah diterima bot.</p><div id="orders"></div></section><section id="profile" class="hidden"><h2>Profil saya</h2><div class="card"><h3 id="profile-name">—</h3><p id="profile-id" class="muted"></p><p>Saldo: <b id="profile-balance">—</b></p><button class="btn secondary" onclick="logout()">Keluar</button></div><div class="card"><h3>Hubungkan akun Google</h3><p class="muted small">Tautkan Google setelah masuk dengan Telegram agar saldo tetap satu akun.</p><div id="google-link"></div></div><div class="card"><div class="theme-toggle-row"><div><h3 style="margin:0 0 4px">Tema tampilan</h3><p class="muted small" style="margin:0" id="theme-label">Mode terang (Light)</p></div><button type="button" class="theme-switch" id="theme-switch" onclick="toggleTheme()" aria-label="Ganti tema"></button></div></div><div class="card"><h3>💬 Contact CS</h3><p class="muted" id="cs-info">Kontak CS belum diatur.</p><a id="cs-link" class="btn secondary hidden" target="_blank" rel="noopener noreferrer">Hubungi CS ↗</a></div><div class="card"><h3>📜 Syarat & Ketentuan</h3><button class="btn secondary" onclick="tab('terms')">Baca di web</button></div></section><section id="deposit" class="hidden"><h2>💳 Deposit</h2><div class="card"><p>Saldo saat ini: <b id="deposit-balance">—</b></p><h3>QRIS Manual</h3><p class="muted small">Buat tagihan dan bayar langsung dari web. Saldo ditambahkan setelah pembayaran diverifikasi admin sesuai alur bot yang sudah berjalan.</p><input class="field" id="deposit-amount" type="number" min="1000" max="10000000" step="1000" placeholder="Nominal saldo, contoh 10000"><button class="btn wide" id="web-payment-manual" onclick="createWebDeposit()"><span class="status-dot" id="web-payment-dot-manual"></span><span id="web-payment-label-manual">Buat QRIS Manual</span></button><div id="deposit-invoice"></div><div class="divider"></div><h3>QRIS Otomatis</h3><p class="muted small">Saldo diproses otomatis setelah pembayaran diverifikasi provider.</p><button class="btn wide" id="web-payment-auto" onclick="createAutoQris()"><span class="status-dot" id="web-payment-dot-auto"></span><span id="web-payment-label-auto">Buat QRIS Otomatis</span></button><div id="auto-qris-invoice"></div><div class="divider"></div><h3>Riwayat deposit</h3><div id="deposit-history">Memuat...</div></div></section><section id="smm" class="hidden"><h2>🚀 SMM PANEL</h2><div id="smm-body" class="card">Memuat...</div></section><section id="apk" class="hidden"><div class="card"><div class="flex"><h3>💎 APK PREMIUM AZHURA</h3><button class="btn secondary" onclick="apkHistory()">📋 Riwayat</button></div><p class="muted small">Langganan aplikasi premium (Netflix, Canva, Gemini, dll). Pesanan tidak dapat dibatalkan.</p><div id="apk-box">Memuat katalog…</div></div></section><section id="gmail" class="hidden"><div class="card"><div class="flex"><h3>📧 BELI GMAIL</h3><button class="btn secondary" onclick="gmailHistory()">📋 Riwayat</button></div><p class="muted small">Akun Gmail siap pakai (email + password). Pesanan tidak dapat dibatalkan setelah akun terkirim.</p><div id="gmail-box">Memuat…</div></div></section><section id="reseller" class="hidden"><h2>🤝 RESELLER / WHITELABEL</h2><div id="reseller-body" class="card">Memuat...</div></section><section id="terms" class="hidden"><h2>📜 Syarat & Ketentuan</h2><div class="card" id="terms-body">Memuat...</div></section></main><nav class="nav"><button data-tab="home" class="active" onclick="tab('home')"><i>⌂</i>Home</button><button data-tab="order" onclick="tab('order')"><i>▣</i>Order OTP</button><button data-tab="history" onclick="tab('history')"><i>◷</i>Riwayat</button><button data-tab="profile" onclick="tab('profile')"><i>♙</i>Profil</button></nav></div><script>function toggleTheme(){var cur=document.documentElement.getAttribute("data-theme")==="dark"?"dark":"light";var next=cur==="dark"?"light":"dark";document.documentElement.setAttribute("data-theme",next);try{localStorage.setItem("azhura-theme",next)}catch(e){}var lb=document.getElementById("theme-label");if(lb)lb.textContent=next==="dark"?"Mode gelap (Dark)":"Mode terang (Light)";var meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=next==="dark"?"#0b1a32":"#7c3aed"}function applyThemeLabel(){var t=document.documentElement.getAttribute("data-theme")==="dark"?"dark":"light";var lb=document.getElementById("theme-label");if(lb)lb.textContent=t==="dark"?"Mode gelap (Dark)":"Mode terang (Light)"}
-let config={},user=null,orders=[],csrf='',kind='',service='',country='',offer=null;let azFlags={};const $=id=>document.getElementById(id),rp=n=>'Rp '+Number(n||0).toLocaleString('id-ID'),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));function toast(s){$('toast').textContent=s;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4000)}async function api(url,options={}){let r=await fetch(url,{credentials:'same-origin',...options,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...options.headers}}),d=await r.json();if(!r.ok)throw Error(d.error||'Permintaan gagal');return d}function openBot(){if(config.bot_username)window.open('https://t.me/'+encodeURIComponent(config.bot_username),'_blank');else toast('BOT_USERNAME belum dikonfigurasi')}function azPopup(title,message,actions=[]){$('az-modal-title').textContent=title;$('az-modal-message').textContent=message;const target=$('az-modal-actions');target.replaceChildren();actions.forEach(([label,fn])=>{const b=document.createElement('button');b.className='btn';b.textContent=label;b.onclick=()=>{$('az-modal').classList.remove('show');fn()};target.appendChild(b)});const close=document.createElement('button');close.className='btn secondary';close.textContent='Tutup';close.onclick=()=>$('az-modal').classList.remove('show');target.appendChild(close);$('az-modal').classList.add('show')}async function azRefresh(){try{const r=await fetch('/api/web/status',{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;const d=await r.json();azFlags=d.maintenance||{};$('web-maint-overlay').classList.toggle('show',!!azFlags.web&&!d.admin);document.body.style.overflow=azFlags.web&&!d.admin?'hidden':'';[1,2,3,4].forEach(n=>{const el=$('web-server-dot-'+n);if(el)el.classList.toggle('off',!!azFlags[String(n)]);});[['manual','web-payment-dot-manual','Buat QRIS Manual','web-payment-manual','web-payment-label-manual'],['auto','web-payment-dot-auto','Buat QRIS Otomatis','web-payment-auto','web-payment-label-auto']].forEach(([k,id,text,btn,lbl])=>{const el=$(id),b=$(btn),l=$(lbl),off=!!azFlags[k];if(el)el.classList.toggle('off',off);if(b)b.classList.toggle('maint',off);if(l)l.textContent=off?text+' (MAINTENANCE)':text;});}catch(e){}}function azCheckServer(n){if(!azFlags[String(n)])return true;const online=[1,2,3,4].filter(x=>x!==n&&!azFlags[String(x)]);azPopup('🔧 Server '+n+' Sedang Maintenance','Mohon maaf, Server '+n+' sedang dalam perawatan. '+(online.length?'Silakan gunakan server yang sedang online.':'Saat ini semua server sedang dalam perawatan.'),online.map(x=>['Buka Server '+x,()=>x===3?showTypes():otherServer(x)]));return false}function azCheckPayment(type){if(!azFlags[type])return true;const other=type==='manual'?'auto':'manual';azPopup('💳 Metode Pembayaran Tidak Aktif','Mohon maaf, QRIS '+(type==='manual'?'Manual':'Otomatis')+' sedang tidak tersedia. '+(!azFlags[other]?'Silakan gunakan QRIS '+(other==='manual'?'Manual':'Otomatis')+'.':'Kedua metode sedang dalam perawatan.'),!azFlags[other]?[['Lihat metode lain',()=>tab('deposit')]]:[]);return false}let azTrafficLast=0,azTrafficTimer=null;async function azLiveTraffic(){if(!user||document.visibilityState!=='visible'||azFlags.web)return;try{const d=await api('/api/live-traffic');const items=d.items||[];if(!items.length)return;const newest=Number(items[0].id);if(!azTrafficLast){azTrafficLast=newest;return}const fresh=items.filter(x=>Number(x.id)>azTrafficLast).reverse();azTrafficLast=Math.max(azTrafficLast,newest);if(!fresh.length)return;const x=fresh[fresh.length-1];$('az-live-title').textContent='🛒 '+x.user+' membeli '+x.service;$('az-live-details').textContent=x.server+' · '+rp(x.price);$('az-live-traffic').style.display='block';clearTimeout(azTrafficTimer);azTrafficTimer=setTimeout(()=>$('az-live-traffic').style.display='none',7000)}catch(e){}}setInterval(azLiveTraffic,15000);function tab(t){['home','order','history','profile','deposit','terms','reseller','smm','apk','gmail'].forEach(x=>$(x).classList.toggle('hidden',x!==t));document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));if(t==='history')loadOrders();if(t==='deposit')loadDeposits();if(t==='terms')loadTerms();if(t==='profile')applyThemeLabel();if(t==='reseller')loadReseller();if(t==='smm')loadSmm();if(t==='apk')loadApk();if(t==='gmail')loadGmail()}function label(x){return x.name||x.service_name||x.country_name||x.title||x.key||x.id||'Layanan'}function key(x){return x.key||x.service_key||x.country_key||x.id||x.name||''}async function me(){try{let d=await api('/api/me');if(!d.user)throw Error('Akun tidak ditemukan');csrf=d.csrf;user=d.user;if(d.is_admin)document.getElementById('admin-shortcut').classList.remove('hidden');fetch('/api/web/status',{credentials:'same-origin'}).then(r=>r.json()).then(st=>{if(st.maintenance){const active=Object.entries(st.maintenance).filter(([k,v])=>v).map(([k])=>k==='web'?'Website':k==='smm'?'SMM Panel':'Server '+k);if(active.length){const n=document.getElementById('maintenance-notice');n.textContent='⚠️ Maintenance: '+active.join(', ')+'. Pesanan aktif tetap bisa dipantau.';n.classList.remove('hidden')}}}).catch(()=>{});$('login').classList.add('hidden');$('app').classList.remove('hidden');$('balance').textContent=rp(user.balance);$('who').textContent='@'+(user.username||user.telegram_id);$('profile-name').textContent=user.first_name||user.username||'Pengguna';$('profile-id').textContent='Telegram ID: '+user.telegram_id;$('profile-balance').textContent=rp(user.balance);await loadOrders();azLiveTraffic()}catch(e){user=null;$('login').classList.remove('hidden');$('app').classList.add('hidden')}}async function loadOrders(){if(!user)return;try{orders=(await api('/api/orders')).orders;await Promise.all(orders.filter(o=>o.phone&&['PENDING','WAITING_OTP','SUCCESS'].includes(o.status)).map(async o=>{try{let d=await api('/api/server/order/'+encodeURIComponent(o.order_id)+'/status');if(d.order)Object.assign(o,d.order)}catch(e){}}));$('recent').innerHTML=orders.length?orders.slice(0,2).map(o=>'<div class="item"><b>'+esc(o.service)+'</b><small>'+esc(o.status)+' · '+rp(o.sell_price)+'</small></div>').join(''):'Belum ada transaksi';$('orders').innerHTML=orders.length?orders.map(o=>{const state=String(o.status||'').toUpperCase(),done=['COMPLETED','REFUNDED','FAILED','CANCELLED','CANCELED','EXPIRED'].includes(state),hasCode=!!o.otp_code,active=!!o.phone&&!done;return '<div class="card"><div class="flex"><b>'+esc(o.service)+'</b><span class="pill">'+esc(state)+'</span></div><p class="muted small">'+esc(o.country)+' · '+esc(o.order_id)+'</p><div class="number">'+esc(o.phone||'Nomor belum tersedia')+'</div>'+(o.phone?'<button class="btn secondary" onclick="copy('+JSON.stringify(o.phone).replace(/"/g,'&quot;')+')">Salin nomor</button>':'')+'<p class="muted">'+rp(o.sell_price)+'</p>'+(o.previous_otp_code?'<p class="muted small">OTP sebelumnya: <b>'+esc(o.previous_otp_code)+'</b></p>':'')+(hasCode?'<div class="otp">Kode OTP<strong>'+esc(o.otp_code)+'</strong><button class="btn" onclick="copy('+JSON.stringify(o.otp_code).replace(/"/g,'&quot;')+')">Salin OTP</button></div>':active?'<div class="otp">⏳ Menunggu Kode OTP<div class="muted small">Pembatalan tersedia setelah 2 menit jika belum menerima OTP.</div>'+(o.previous_otp_code?'Menunggu kode OTP baru':'')+'<button class="btn secondary cancel-otp-btn" data-order="'+esc(o.order_id)+'" data-created="'+esc(o.created_at||'')+'" data-provider="'+esc(o.provider||'')+'" '+(o.previous_otp_code?'hidden':'')+'>Ajukan Batal / Refund</button></div>':'')+(active&&hasCode?'<div class="flex"><button class="btn secondary" onclick="resendOtp('+JSON.stringify(o.order_id).replace(/"/g,'&quot;')+')">🔁 Resend OTP</button><button class="btn" onclick="finishOtp('+JSON.stringify(o.order_id).replace(/"/g,'&quot;')+')">✅ Selesai</button></div>':'')+(o.expired_at?'<p class="muted small">⏰ Nomor kedaluwarsa: '+esc(o.expired_at)+' <b class="expiry-count" data-exp="'+esc(o.expired_at)+'"></b></p>':'<p class="muted small">Masa aktif nomor mengikuti provider; waktu kedaluwarsa belum tersedia.</p>')+'</div>'}).join(''):'<div class="card empty">Belum ada pesanan.</div>';updateOtpWaitTimers();updateExpiryTimers();azResumeG4()}catch(e){$('orders').textContent=e.message}}
+/* ---- khusus terang & pop (latar terang): warna status agar kontras ---- */
+html[data-theme="light"] [style*="color:#fbbf24"],html[data-theme="pop"] [style*="color:#fbbf24"],html[data-theme="light"] .sd summary,html[data-theme="pop"] .sd summary,html[data-theme="light"] .sk .tags,html[data-theme="pop"] .sk .tags,html[data-theme="light"] .sk .warn,html[data-theme="pop"] .sk .warn,html[data-theme="light"] .sk .st b,html[data-theme="pop"] .sk .st b,html[data-theme="light"] .sd .hint,html[data-theme="pop"] .sd .hint,html[data-theme="light"] .sk .badge,html[data-theme="pop"] .sk .badge{color:#a14a05!important}
+html[data-theme="light"] [style*="color:#34d399"],html[data-theme="pop"] [style*="color:#34d399"],html[data-theme="light"] [style*="color:#4ade80"],html[data-theme="pop"] [style*="color:#4ade80"],html[data-theme="light"] .sk .st i,html[data-theme="pop"] .sk .st i{color:#0c7a3d!important}
+html[data-theme="light"] [style*="color:#60a5fa"],html[data-theme="pop"] [style*="color:#60a5fa"],html[data-theme="light"] .sk .st,html[data-theme="pop"] .sk .st,html[data-theme="light"] .sk code,html[data-theme="pop"] .sk code{color:#1448b8!important}
+html[data-theme="light"] [style*="color:#a78bfa"],html[data-theme="pop"] [style*="color:#a78bfa"]{color:#5b32c9!important}
+html[data-theme="light"] [style*="color:#f87171"],html[data-theme="pop"] [style*="color:#f87171"]{color:#c4221f!important}
+html[data-theme="light"] [style*="color:#fb923c"],html[data-theme="pop"] [style*="color:#fb923c"]{color:#b4500a!important}
+html[data-theme="light"] [style*="color:#9fb0cc"],html[data-theme="pop"] [style*="color:#9fb0cc"],html[data-theme="light"] [style*="color:#7dd3fc"],html[data-theme="pop"] [style*="color:#7dd3fc"]{color:var(--mu)!important}
+html[data-theme="light"] .sk .badge,html[data-theme="pop"] .sk .badge{border-color:#a14a05;background:#fff3dc}
+html[data-theme="light"] .sd,html[data-theme="pop"] .sd{background:#fff6e0;border-color:#e0a23a}
+html[data-theme="light"] #maintenance-notice,html[data-theme="pop"] #maintenance-notice{background:#fff0e0!important;border-color:#e07b24!important;color:#6a2a05!important}
+html[data-theme="light"] .service-logo,html[data-theme="pop"] .service-logo{box-shadow:0 0 0 1px #0002}
+
+/* ---- Liquid Glass: kilau tepi + teks selalu terbaca ---- */
+html[data-theme="glass"] body,html[data-theme="glass"] .card,html[data-theme="glass"] .tile,html[data-theme="glass"] .item,html[data-theme="glass"] .choice-tile,html[data-theme="glass"] .nav{text-shadow:0 1px 2px #00000066}
+html[data-theme="glass"] .btn{border:1px solid #ffffff73;box-shadow:inset 0 1px 0 #ffffff8c,0 8px 20px #0003;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+html[data-theme="glass"] .btn.secondary{box-shadow:inset 0 1px 0 #ffffff66}
+html[data-theme="glass"] .card.balance{background:linear-gradient(135deg,#ffffff47,#ffffff14);box-shadow:inset 0 1px 0 #ffffffa6,inset 0 -1px 0 #ffffff1f,0 18px 44px #0000005c}
+html[data-theme="glass"] .nav{-webkit-backdrop-filter:blur(34px) saturate(190%);backdrop-filter:blur(34px) saturate(190%);left:12px;right:12px;bottom:max(10px,env(safe-area-inset-bottom));border:1px solid var(--navbd);border-radius:30px;padding:10px 8px;box-shadow:inset 0 1px 0 #ffffff80,0 14px 34px #0000004d}
+html[data-theme="glass"] .nav button.active{text-shadow:0 0 14px #ffffffb0}
+html[data-theme="glass"] .tile{box-shadow:inset 0 1px 0 #ffffff66}
+html[data-theme="glass"] #az-live-traffic{bottom:100px}
+html[data-theme="glass"] .field{-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+
+/* ---- Aurora Neon ---- */
+html[data-theme="aurora"] .card.balance{box-shadow:0 0 36px #7c3aed66,0 14px 34px #0008;border-color:#c4b5fd80}
+html[data-theme="aurora"] .btn{box-shadow:0 6px 22px #7c3aed59}
+html[data-theme="aurora"] .nav button.active{text-shadow:0 0 12px #5eead4aa}
+html[data-theme="aurora"] .tile:hover,html[data-theme="aurora"] .item:hover{border-color:#5eead4aa}
+
+/* ---- Pop / Neo-Brutalism ---- */
+html[data-theme="pop"] .card,html[data-theme="pop"] #login{border-width:2.5px}
+html[data-theme="pop"] .tile,html[data-theme="pop"] .item,html[data-theme="pop"] .choice-tile{border-width:2.5px;box-shadow:3px 3px 0 #111}
+html[data-theme="pop"] .tile:active,html[data-theme="pop"] .btn:active,html[data-theme="pop"] .item:active,html[data-theme="pop"] .choice-tile:active{transform:translate(2px,2px);box-shadow:1px 1px 0 #111}
+html[data-theme="pop"] .tiles .tile:nth-child(4n+1){background:#ffd6e8}
+html[data-theme="pop"] .tiles .tile:nth-child(4n+2){background:#cde7ff}
+html[data-theme="pop"] .tiles .tile:nth-child(4n+3){background:#d9ffc9}
+html[data-theme="pop"] .tiles .tile:nth-child(4n+4){background:#ffe7a3}
+html[data-theme="pop"] .tile span{color:#333!important}
+html[data-theme="pop"] .btn{border:2.5px solid #111;box-shadow:3px 3px 0 #111;font-weight:850}
+html[data-theme="pop"] .btn.secondary{background:#fff}
+html[data-theme="pop"] .field{border-width:2.5px;box-shadow:3px 3px 0 #111}
+html[data-theme="pop"] .pill{border:2px solid #111}
+html[data-theme="pop"] .nav{border-top:3px solid #111}
+html[data-theme="pop"] .nav button.active{background:#ffd23f;border:2px solid #111;border-radius:14px;padding:4px 14px;box-shadow:2px 2px 0 #111}
+html[data-theme="pop"] .card.balance{border-width:2.5px}
+html[data-theme="pop"] #toast{border:2.5px solid #111;box-shadow:4px 4px 0 #111}
+html[data-theme="pop"] .apk-item{border:2.5px solid #111;box-shadow:3px 3px 0 #111}
+html[data-theme="pop"] .otp{border-style:solid;border-width:2.5px}
+html[data-theme="pop"] #az-modal .box,html[data-theme="pop"] #web-maint-overlay .maint-card{border:3px solid #111;box-shadow:6px 6px 0 #111}
+html[data-theme="pop"] #web-maint-overlay{background:#ffd23f}
+
+/* ---- Pemilih tema di Profil ---- */
+.az-theme-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.az-th{display:flex;flex-direction:column;gap:8px;text-align:left;padding:10px;border:2px solid #4f6d92;background:#12243b;color:#edf6ff;border-radius:16px;min-width:0;position:relative}
+.az-th .sw{height:46px;border-radius:11px;border:1px solid #fff3;display:flex;align-items:flex-end;justify-content:flex-start;gap:5px;padding:6px;overflow:hidden}
+.az-th .sw i{width:16px;height:16px;border-radius:50%;display:block;border:1px solid #0003}
+.az-th b{display:block;font-size:14px}
+.az-th small{display:block;font-size:11.5px;opacity:.8;line-height:1.35}
+.az-th[aria-pressed="true"]{border-color:#38c5ff;box-shadow:0 0 0 2px #38c5ff55}
+.az-th[aria-pressed="true"]::after{content:"✓";position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:50%;background:#22c55e;color:#fff;font-size:13px;font-weight:900;display:flex;align-items:center;justify-content:center}
+.az-th[data-t="dark"] .sw{background:linear-gradient(135deg,#173e73,#080e1b)}
+.az-th[data-t="light"] .sw{background:linear-gradient(135deg,#ffffff,#d6e6ff)}
+.az-th[data-t="glass"] .sw{background:radial-gradient(circle at 20% 20%,#7c3aed,transparent 55%),radial-gradient(circle at 85% 30%,#06b6d4,transparent 55%),radial-gradient(circle at 50% 100%,#ec4899,transparent 60%),#0a0f24}
+.az-th[data-t="aurora"] .sw{background:radial-gradient(circle at 15% 0,#00f5a0aa,transparent 55%),radial-gradient(circle at 90% 10%,#7c3aedcc,transparent 55%),#07060f}
+.az-th[data-t="pop"] .sw{background:#fff1d0}
+html[data-theme="light"] .az-th{background:#f3f7fd;color:#0f1b2d;border-color:#b9c9e0}
+html[data-theme="light"] .az-th[aria-pressed="true"]{border-color:#1259c9;box-shadow:0 0 0 2px #1259c955}
+html[data-theme="glass"] .az-th{background:#ffffff1f;border-color:#ffffff59;color:#fff;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+html[data-theme="glass"] .az-th[aria-pressed="true"]{border-color:#fff;box-shadow:0 0 0 2px #ffffff66}
+html[data-theme="aurora"] .az-th{background:#1b1740cc;border-color:#8b78ff55;color:#f4f1ff}
+html[data-theme="aurora"] .az-th[aria-pressed="true"]{border-color:#5eead4;box-shadow:0 0 0 2px #5eead455}
+html[data-theme="pop"] .az-th{background:#fff;color:#111;border:2.5px solid #111;box-shadow:3px 3px 0 #111}
+html[data-theme="pop"] .az-th[aria-pressed="true"]{background:#ffd23f}
+html[data-theme="pop"] .az-th[aria-pressed="true"]::after{border:2px solid #111;background:#7ee8c6;color:#111}
+@media(min-width:520px){.az-theme-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+</style><script>try{var t=localStorage.getItem('az_theme');if(['dark','light','glass','aurora','pop'].indexOf(t)<0)t='dark';document.documentElement.setAttribute('data-theme',t)}catch(e){document.documentElement.setAttribute('data-theme','dark')}</script></head><body><div id="web-maint-overlay" aria-live="polite"><div class="maint-card"><span class="robot" aria-hidden="true">🤖<span class="tools">🔧</span></span><h1>AZHURA Sedang Diperbaiki</h1><p>Mohon maaf atas ketidaknyamanannya. Tim robot AZHURA sedang melakukan perawatan agar layanan kembali lebih nyaman dan stabil. Terima kasih sudah bersabar, ya! 💙</p><p style="font-size:12px;color:#7dd3fc">Silakan kunjungi kembali beberapa saat lagi.</p></div></div><div id="az-modal"><div class="box"><h2 id="az-modal-title">Pemberitahuan</h2><p id="az-modal-message"></p><div id="az-modal-actions"></div></div></div><div id="toast"></div><div id="az-live-traffic" role="status" aria-live="polite"><button aria-label="Tutup" onclick="this.parentNode.style.display='none'">×</button><b id="az-live-title"></b><small id="az-live-details"></small></div><div id="login" class="card"><img src="/static/logo.jpg" alt="AZHURA ID"><h2>AZHURA <span class="blue">ID</span></h2><p class="muted">Akun bot dan aplikasi dalam satu tempat. Masuk menggunakan Telegram terlebih dahulu.</p><div id="telegram-login" style="display:flex;justify-content:center;margin:22px 0"></div><div id="google-login" style="display:flex;justify-content:center;margin:15px 0"></div><p id="login-error" class="muted small"></p></div><div id="app" class="hidden"><div id="admin-shortcut" class="hidden" style="max-width:680px;margin:12px auto 0;padding:0 12px"><a href="/admin" style="display:block;text-align:center;background:linear-gradient(110deg,#1e40af,#0891b2);padding:12px;border-radius:14px;color:white;font-weight:800;text-decoration:none">🛡️ BUKA DASHBOARD ADMIN AZHURA ↗</a></div><div id="maintenance-notice" class="hidden" style="max-width:680px;margin:12px auto;padding:14px;background:#7c2d12;border:1px solid #fb923c;border-radius:12px;color:white"></div><header><img src="/static/logo.jpg" alt="Logo"><div><h1>AZHURA <span>ID</span></h1><span class="muted small">OTP & LAYANAN DIGITAL</span></div><span class="pill" style="margin-left:auto">● Online</span></header><main><section id="home"><p class="muted" id="greet">Selamat datang kembali 👋</p><div class="card balance"><div class="flex"><span>Saldo tersedia</span><span>💳</span></div><h2 id="balance">Rp 0</h2><div class="flex"><span class="small" id="who">—</span><button class="btn" onclick="tab('deposit')">+ Top Up</button></div></div><h3>Layanan AZHURA</h3><div class="tiles"><button class="tile" onclick="tab('order')"><i>📲</i><b>Order OTP</b><span>Nomor virtual</span></button><button class="tile" onclick="tab('deposit')"><i>💳</i><b>Deposit</b><span>Riwayat & info deposit</span></button><button class="tile" onclick="tab('history')"><i>🧾</i><b>Riwayat</b><span>Nomor & kode OTP</span></button><button class="tile" onclick="tab('profile')"><i>💬</i><b>Profil & CS</b><span>Kelola akun</span></button><button class="tile" onclick="tab('smm')"><i>🚀</i><b>SMM PANEL</b><span>Followers, Likes, Views</span></button><button class="tile" onclick="tab('apk')"><i>💎</i><b>APK PREMIUM</b><span>Netflix, Canva, Gemini, dll</span></button><button class="tile" onclick="tab('gmail')"><i>📧</i><b>BELI GMAIL</b><span>Akun Gmail siap pakai</span></button><button class="tile" onclick="tab('reseller')"><i>🤝</i><b>RESELLER</b><span>Bot sendiri, untung margin</span></button></div><h3>Transaksi terbaru</h3><div id="recent" class="card empty">Belum ada transaksi.</div></section><section id="order" class="hidden"><h2>Order OTP</h2><p class="muted">Pilih server dan jenis nomor virtual.</p><div id="server-select" class="card"><button class="item" onclick="otherServer(1)"><b><span class="status-dot" id="web-server-dot-1"></span>📱 Server 1</b><small>Layanan nomor virtual</small></button><button class="item" onclick="otherServer(2)"><b><span class="status-dot" id="web-server-dot-2"></span>📱 Server 2</b><small>Layanan nomor virtual</small></button><button class="item" onclick="showTypes()"><b><span class="status-dot" id="web-server-dot-3"></span>⚡ Server 3</b><small>Nokos Reguler & Nokos Plus</small></button><button class="item" onclick="otherServer(4)"><b><span class="status-dot" id="web-server-dot-4"></span>⚡ Server 4 — ALTERNATIF 2</b><small>Server global dengan pilihan negara lengkap dan stok alternatif</small></button></div><div id="order-content"></div></section><section id="history" class="hidden"><h2>Riwayat & OTP</h2><p class="muted small">Pembaruan otomatis setiap 10 detik. OTP akan muncul setelah diterima bot.</p><div id="orders"></div></section><section id="profile" class="hidden"><h2>Profil saya</h2><div class="card"><h3 id="profile-name">—</h3><p id="profile-id" class="muted"></p><p>Saldo: <b id="profile-balance">—</b></p><button class="btn secondary" onclick="logout()">Keluar</button></div><div class="card"><h3>Hubungkan akun Google</h3><p class="muted small">Tautkan Google setelah masuk dengan Telegram agar saldo tetap satu akun.</p><div id="google-link"></div></div><div class="card"><h3>🎨 Tema tampilan</h3><p class="muted small">Pilih gaya tampilan. Seluruh menu ikut berubah dan pilihan tersimpan di perangkat ini.</p><div class="az-theme-grid" id="az-theme-grid"></div></div><div class="card"><h3>💬 Contact CS</h3><p class="muted" id="cs-info">Kontak CS belum diatur.</p><a id="cs-link" class="btn secondary hidden" target="_blank" rel="noopener noreferrer">Hubungi CS ↗</a></div><div class="card"><h3>📜 Syarat & Ketentuan</h3><button class="btn secondary" onclick="tab('terms')">Baca di web</button></div></section><section id="deposit" class="hidden"><h2>💳 Deposit</h2><div class="card"><p>Saldo saat ini: <b id="deposit-balance">—</b></p><h3>QRIS Manual</h3><p class="muted small">Buat tagihan dan bayar langsung dari web. Saldo ditambahkan setelah pembayaran diverifikasi admin sesuai alur bot yang sudah berjalan.</p><input class="field" id="deposit-amount" type="number" min="1000" max="10000000" step="1000" placeholder="Nominal saldo, contoh 10000"><button class="btn wide" id="web-payment-manual" onclick="createWebDeposit()"><span class="status-dot" id="web-payment-dot-manual"></span><span id="web-payment-label-manual">Buat QRIS Manual</span></button><div id="deposit-invoice"></div><div class="divider"></div><h3>QRIS Otomatis</h3><p class="muted small">Saldo diproses otomatis setelah pembayaran diverifikasi provider.</p><button class="btn wide" id="web-payment-auto" onclick="createAutoQris()"><span class="status-dot" id="web-payment-dot-auto"></span><span id="web-payment-label-auto">Buat QRIS Otomatis</span></button><div id="auto-qris-invoice"></div><div class="divider"></div><h3>Riwayat deposit</h3><div id="deposit-history">Memuat...</div></div></section><section id="smm" class="hidden"><h2>🚀 SMM PANEL</h2><div id="smm-body" class="card">Memuat...</div></section><section id="apk" class="hidden"><div class="card"><div class="flex"><h3>💎 APK PREMIUM AZHURA</h3><button class="btn secondary" onclick="apkHistory()">📋 Riwayat</button></div><p class="muted small">Langganan aplikasi premium (Netflix, Canva, Gemini, dll). Pesanan tidak dapat dibatalkan.</p><div id="apk-box">Memuat katalog…</div></div></section><section id="gmail" class="hidden"><div class="card"><div class="flex"><h3>📧 BELI GMAIL</h3><button class="btn secondary" onclick="gmailHistory()">📋 Riwayat</button></div><p class="muted small">Akun Gmail siap pakai (email + password). Pesanan tidak dapat dibatalkan setelah akun terkirim.</p><div id="gmail-box">Memuat…</div></div></section><section id="reseller" class="hidden"><h2>🤝 RESELLER / WHITELABEL</h2><div id="reseller-body" class="card">Memuat...</div></section><section id="terms" class="hidden"><h2>📜 Syarat & Ketentuan</h2><div class="card" id="terms-body">Memuat...</div></section></main><nav class="nav"><button data-tab="home" class="active" onclick="tab('home')"><i>⌂</i>Home</button><button data-tab="order" onclick="tab('order')"><i>▣</i>Order OTP</button><button data-tab="history" onclick="tab('history')"><i>◷</i>Riwayat</button><button data-tab="profile" onclick="tab('profile')"><i>♙</i>Profil</button></nav></div><script>
+let config={},user=null,orders=[],csrf='',kind='',service='',country='',offer=null;let azFlags={};const $=id=>document.getElementById(id),rp=n=>'Rp '+Number(n||0).toLocaleString('id-ID'),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));function toast(s){$('toast').textContent=s;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4000)}async function api(url,options={}){let r=await fetch(url,{credentials:'same-origin',...options,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...options.headers}}),d=await r.json();if(!r.ok)throw Error(d.error||'Permintaan gagal');return d}function openBot(){if(config.bot_username)window.open('https://t.me/'+encodeURIComponent(config.bot_username),'_blank');else toast('BOT_USERNAME belum dikonfigurasi')}function azPopup(title,message,actions=[]){$('az-modal-title').textContent=title;$('az-modal-message').textContent=message;const target=$('az-modal-actions');target.replaceChildren();actions.forEach(([label,fn])=>{const b=document.createElement('button');b.className='btn';b.textContent=label;b.onclick=()=>{$('az-modal').classList.remove('show');fn()};target.appendChild(b)});const close=document.createElement('button');close.className='btn secondary';close.textContent='Tutup';close.onclick=()=>$('az-modal').classList.remove('show');target.appendChild(close);$('az-modal').classList.add('show')}async function azRefresh(){try{const r=await fetch('/api/web/status',{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;const d=await r.json();azFlags=d.maintenance||{};$('web-maint-overlay').classList.toggle('show',!!azFlags.web&&!d.admin);document.body.style.overflow=azFlags.web&&!d.admin?'hidden':'';[1,2,3,4].forEach(n=>{const el=$('web-server-dot-'+n);if(el)el.classList.toggle('off',!!azFlags[String(n)]);});[['manual','web-payment-dot-manual','Buat QRIS Manual','web-payment-manual','web-payment-label-manual'],['auto','web-payment-dot-auto','Buat QRIS Otomatis','web-payment-auto','web-payment-label-auto']].forEach(([k,id,text,btn,lbl])=>{const el=$(id),b=$(btn),l=$(lbl),off=!!azFlags[k];if(el)el.classList.toggle('off',off);if(b)b.classList.toggle('maint',off);if(l)l.textContent=off?text+' (MAINTENANCE)':text;});}catch(e){}}function azCheckServer(n){if(!azFlags[String(n)])return true;const online=[1,2,3,4].filter(x=>x!==n&&!azFlags[String(x)]);azPopup('🔧 Server '+n+' Sedang Maintenance','Mohon maaf, Server '+n+' sedang dalam perawatan. '+(online.length?'Silakan gunakan server yang sedang online.':'Saat ini semua server sedang dalam perawatan.'),online.map(x=>['Buka Server '+x,()=>x===3?showTypes():otherServer(x)]));return false}function azCheckPayment(type){if(!azFlags[type])return true;const other=type==='manual'?'auto':'manual';azPopup('💳 Metode Pembayaran Tidak Aktif','Mohon maaf, QRIS '+(type==='manual'?'Manual':'Otomatis')+' sedang tidak tersedia. '+(!azFlags[other]?'Silakan gunakan QRIS '+(other==='manual'?'Manual':'Otomatis')+'.':'Kedua metode sedang dalam perawatan.'),!azFlags[other]?[['Lihat metode lain',()=>tab('deposit')]]:[]);return false}let azTrafficLast=0,azTrafficTimer=null;async function azLiveTraffic(){if(!user||document.visibilityState!=='visible'||azFlags.web)return;try{const d=await api('/api/live-traffic');const items=d.items||[];if(!items.length)return;const newest=Number(items[0].id);if(!azTrafficLast){azTrafficLast=newest;return}const fresh=items.filter(x=>Number(x.id)>azTrafficLast).reverse();azTrafficLast=Math.max(azTrafficLast,newest);if(!fresh.length)return;const x=fresh[fresh.length-1];$('az-live-title').textContent='🛒 '+x.user+' membeli '+x.service;$('az-live-details').textContent=x.server+' · '+rp(x.price);$('az-live-traffic').style.display='block';clearTimeout(azTrafficTimer);azTrafficTimer=setTimeout(()=>$('az-live-traffic').style.display='none',7000)}catch(e){}}setInterval(azLiveTraffic,15000);function tab(t){['home','order','history','profile','deposit','terms','reseller','smm','apk','gmail'].forEach(x=>$(x).classList.toggle('hidden',x!==t));document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));if(t==='history')loadOrders();if(t==='deposit')loadDeposits();if(t==='terms')loadTerms();if(t==='reseller')loadReseller();if(t==='smm')loadSmm();if(t==='apk')loadApk();if(t==='gmail')loadGmail()}function label(x){return x.name||x.service_name||x.country_name||x.title||x.key||x.id||'Layanan'}function key(x){return x.key||x.service_key||x.country_key||x.id||x.name||''}async function me(){try{let d=await api('/api/me');if(!d.user)throw Error('Akun tidak ditemukan');csrf=d.csrf;user=d.user;if(d.is_admin)document.getElementById('admin-shortcut').classList.remove('hidden');fetch('/api/web/status',{credentials:'same-origin'}).then(r=>r.json()).then(st=>{if(st.maintenance){const active=Object.entries(st.maintenance).filter(([k,v])=>v).map(([k])=>k==='web'?'Website':k==='smm'?'SMM Panel':'Server '+k);if(active.length){const n=document.getElementById('maintenance-notice');n.textContent='⚠️ Maintenance: '+active.join(', ')+'. Pesanan aktif tetap bisa dipantau.';n.classList.remove('hidden')}}}).catch(()=>{});$('login').classList.add('hidden');$('app').classList.remove('hidden');$('balance').textContent=rp(user.balance);$('who').textContent='@'+(user.username||user.telegram_id);$('profile-name').textContent=user.first_name||user.username||'Pengguna';$('profile-id').textContent='Telegram ID: '+user.telegram_id;$('profile-balance').textContent=rp(user.balance);await loadOrders();azLiveTraffic()}catch(e){user=null;$('login').classList.remove('hidden');$('app').classList.add('hidden')}}async function loadOrders(){if(!user)return;try{orders=(await api('/api/orders')).orders;await Promise.all(orders.filter(o=>o.phone&&['PENDING','WAITING_OTP','SUCCESS'].includes(o.status)).map(async o=>{try{let d=await api('/api/server/order/'+encodeURIComponent(o.order_id)+'/status');if(d.order)Object.assign(o,d.order)}catch(e){}}));$('recent').innerHTML=orders.length?orders.slice(0,2).map(o=>'<div class="item"><b>'+esc(o.service)+'</b><small>'+esc(o.status)+' · '+rp(o.sell_price)+'</small></div>').join(''):'Belum ada transaksi';$('orders').innerHTML=orders.length?orders.map(o=>{const state=String(o.status||'').toUpperCase(),done=['COMPLETED','REFUNDED','FAILED','CANCELLED','CANCELED','EXPIRED'].includes(state),hasCode=!!o.otp_code,active=!!o.phone&&!done;return '<div class="card"><div class="flex"><b>'+esc(o.service)+'</b><span class="pill">'+esc(state)+'</span></div><p class="muted small">'+esc(o.country)+' · '+esc(o.order_id)+'</p><div class="number">'+esc(o.phone||'Nomor belum tersedia')+'</div>'+(o.phone?'<button class="btn secondary" onclick="copy('+JSON.stringify(o.phone).replace(/"/g,'&quot;')+')">Salin nomor</button>':'')+'<p class="muted">'+rp(o.sell_price)+'</p>'+(o.previous_otp_code?'<p class="muted small">OTP sebelumnya: <b>'+esc(o.previous_otp_code)+'</b></p>':'')+(hasCode?'<div class="otp">Kode OTP<strong>'+esc(o.otp_code)+'</strong><button class="btn" onclick="copy('+JSON.stringify(o.otp_code).replace(/"/g,'&quot;')+')">Salin OTP</button></div>':active?'<div class="otp">⏳ Menunggu Kode OTP<div class="muted small">Pembatalan tersedia setelah 2 menit jika belum menerima OTP.</div>'+(o.previous_otp_code?'Menunggu kode OTP baru':'')+'<button class="btn secondary cancel-otp-btn" data-order="'+esc(o.order_id)+'" data-created="'+esc(o.created_at||'')+'" data-provider="'+esc(o.provider||'')+'" '+(o.previous_otp_code?'hidden':'')+'>Ajukan Batal / Refund</button></div>':'')+(active&&hasCode?'<div class="flex"><button class="btn secondary" onclick="resendOtp('+JSON.stringify(o.order_id).replace(/"/g,'&quot;')+')">🔁 Resend OTP</button><button class="btn" onclick="finishOtp('+JSON.stringify(o.order_id).replace(/"/g,'&quot;')+')">✅ Selesai</button></div>':'')+(o.expired_at?'<p class="muted small">⏰ Nomor kedaluwarsa: '+esc(o.expired_at)+' <b class="expiry-count" data-exp="'+esc(o.expired_at)+'"></b></p>':'<p class="muted small">Masa aktif nomor mengikuti provider; waktu kedaluwarsa belum tersedia.</p>')+'</div>'}).join(''):'<div class="card empty">Belum ada pesanan.</div>';updateOtpWaitTimers();updateExpiryTimers();azResumeG4()}catch(e){$('orders').textContent=e.message}}
 async function resendOtp(id){if(!confirm('Minta kode OTP baru?'))return;try{const d=await api('/api/order/resend',{method:'POST',body:JSON.stringify({order_id:id})});toast(d.message);loadOrders()}catch(e){toast(e.message)}}async function finishOtp(id){if(!confirm('Selesaikan pesanan ini?'))return;try{const d=await api('/api/order/finish',{method:'POST',body:JSON.stringify({order_id:id})});toast(d.message||'Pesanan Selesai');loadOrders()}catch(e){toast(e.message)}}function updateExpiryTimers(){document.querySelectorAll('.expiry-count').forEach(el=>{const t=Date.parse(el.dataset.exp.replace(' ','T')+(el.dataset.exp.includes('Z')||el.dataset.exp.includes('+')?'':'Z'));if(!Number.isFinite(t)){el.textContent='';return}const sec=Math.max(0,Math.floor((t-Date.now())/1000));el.textContent=sec?('· '+Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0')):'· Masa aktif habis'})}
 setInterval(updateExpiryTimers,1000);
 function updateOtpWaitTimers(){document.querySelectorAll('.cancel-otp-btn').forEach(b=>{const note=b.previousElementSibling;if((b.dataset.provider||'')==='grizzly'){const live=azG4Cancel[b.dataset.order];b.disabled=!!live;if(note&&note.classList.contains('muted')){if(live){const sec=Math.max(0,Math.floor(live.base+(Date.now()-live.at)/1000));note.textContent='⏳ Menunggu vendor Server 4 · '+Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0')+' · '+live.status+' · refund otomatis begitu vendor berhasil batal'}else note.textContent='Pembatalan Server 4 mengikuti proses vendor. Refund otomatis begitu vendor berhasil membatalkan.'}return}const raw=b.dataset.created;const t=raw?Date.parse(raw.replace(' ','T')+(raw.includes('Z')||raw.includes('+')?'':'Z')):NaN;const seconds=Number.isFinite(t)?Math.max(0,120-Math.floor((Date.now()-t)/1000)):120;b.disabled=seconds>0;if(note&&note.classList.contains('muted'))note.textContent=seconds>0?'Menunggu OTP · Batal tersedia dalam '+Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0'):'Waktu tunggu 2 menit selesai. Pembatalan memerlukan persetujuan provider.'})}
@@ -340,6 +260,47 @@ async function gmailCheck(id){try{const d=await api('/api/gmail/order/status',{m
     if(initData&&!window.__tgReady){window.__tgReady=true;const s=document.createElement('script');s.src='https://telegram.org/js/telegram-web-app.js';
       s.onload=()=>{try{Telegram.WebApp.ready();Telegram.WebApp.expand()}catch(e){}};document.head.appendChild(s)}
   };
+})();
+</script>
+<script>
+/* ===== AZHURA THEMES (tambahan): pemilih tema di menu Profil, tersimpan di perangkat ===== */
+(function(){
+  const T=[
+    {id:'dark',name:'Gelap',desc:'Tampilan bawaan AZHURA',c:'#0b1a32',sw:['#38c5ff','#1468dd','#9aafc9']},
+    {id:'light',name:'Terang',desc:'Bersih, nyaman di siang hari',c:'#eef3fb',sw:['#1259c9','#0b8fc0','#0f1b2d']},
+    {id:'glass',name:'Liquid Glass',desc:'Kaca transparan, teks tetap jelas',c:'#0a0f24',sw:['#7c3aed','#06b6d4','#ec4899']},
+    {id:'aurora',name:'Aurora Neon',desc:'Gelap dengan gradasi neon',c:'#07060f',sw:['#5eead4','#7c3aed','#06b6d4']},
+    {id:'pop',name:'Pop Brutal',desc:'Neo-brutalism: tebal & ceria',c:'#fff1d0',sw:['#ffd23f','#ff7ab6','#111111']}
+  ];
+  const ids=T.map(t=>t.id);
+  function saved(){try{const v=localStorage.getItem('az_theme');return ids.includes(v)?v:'dark'}catch(e){return 'dark'}}
+  function tg(color){try{const w=window.Telegram&&Telegram.WebApp;if(w){w.setHeaderColor&&w.setHeaderColor(color);w.setBackgroundColor&&w.setBackgroundColor(color)}}catch(e){}}
+  function mark(id){document.querySelectorAll('.az-th').forEach(b=>b.setAttribute('aria-pressed',b.dataset.t===id?'true':'false'))}
+  function apply(id,persist){
+    if(!ids.includes(id))id='dark';
+    const t=T.find(x=>x.id===id);
+    document.documentElement.setAttribute('data-theme',id);
+    const m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',t.c);
+    tg(t.c);mark(id);
+    if(persist){try{localStorage.setItem('az_theme',id)}catch(e){}}
+  }
+  window.azSetTheme=id=>{apply(id,true);try{toast('Tema: '+T.find(x=>x.id===id).name)}catch(e){}};
+  function build(){
+    const box=document.getElementById('az-theme-grid');if(!box||box.children.length)return;
+    T.forEach(t=>{
+      const b=document.createElement('button');b.type='button';b.className='az-th';b.dataset.t=t.id;
+      b.setAttribute('aria-pressed','false');
+      const sw=document.createElement('span');sw.className='sw';
+      t.sw.forEach(c=>{const i=document.createElement('i');i.style.background=c;sw.appendChild(i)});
+      const n=document.createElement('b');n.textContent=t.name;
+      const d=document.createElement('small');d.textContent=t.desc;
+      b.append(sw,n,d);b.onclick=()=>azSetTheme(t.id);box.appendChild(b);
+    });
+    mark(document.documentElement.getAttribute('data-theme')||'dark');
+  }
+  build();apply(saved(),false);
+  /* Telegram WebApp dimuat belakangan oleh skrip mini app: sinkronkan warna header setelah siap */
+  let n=0;const iv=setInterval(()=>{n++;if(window.Telegram&&Telegram.WebApp){tg(T.find(x=>x.id===(document.documentElement.getAttribute('data-theme')||'dark')).c);clearInterval(iv)}else if(n>20)clearInterval(iv)},500);
 })();
 </script>
 </body></html>
