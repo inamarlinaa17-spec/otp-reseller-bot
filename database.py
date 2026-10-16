@@ -1729,6 +1729,43 @@ def register_reseller_buyer(bot_id, telegram_id):
         )
 
 
+
+def update_user_first_name(telegram_id, first_name):
+    """Update display name (first_name) for profile edit on web."""
+    name = (first_name or "").strip()
+    if not name:
+        raise ValueError("Nama tidak boleh kosong.")
+    if len(name) > 64:
+        raise ValueError("Nama maksimal 64 karakter.")
+    with get_db() as db:
+        db.execute(
+            "UPDATE users SET first_name = %s WHERE telegram_id = %s",
+            (name, telegram_id),
+        )
+        row = db.execute(
+            "SELECT telegram_id, username, first_name, balance FROM users WHERE telegram_id = %s",
+            (telegram_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_reseller_buyers(bot_id, limit=100):
+    """Daftar user yang terdaftar di bot/web reseller (untuk dashboard reseller)."""
+    bot_id = int(bot_id)
+    limit = max(1, min(int(limit or 100), 500))
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT b.telegram_id, u.username, u.first_name, u.balance, b.first_seen
+               FROM reseller_buyers b
+               LEFT JOIN users u ON u.telegram_id = b.telegram_id
+               WHERE b.bot_id = %s
+               ORDER BY b.first_seen DESC
+               LIMIT %s""",
+            (bot_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_reseller_stats(bot_id):
     with get_db() as db:
         buyers = db.execute("SELECT COUNT(*) AS c FROM reseller_buyers WHERE bot_id = %s", (bot_id,)).fetchone()["c"]
