@@ -76,10 +76,6 @@ def login(user):
     session.clear();session.permanent=True;session['uid']=int(user);session['csrf']=secrets.token_urlsafe(32)
 @app.get('/')
 def index():return send_from_directory('static','index.html')
-@app.get('/r/<slug>')
-def index_reseller_slug(slug):
-    # Path cantik /r/NamaBot — file HTML sama; branding di client via /api/brand?u=
-    return send_from_directory('static','index.html')
 @app.get('/manifest.webmanifest')
 def manifest():return jsonify(name='AZHURA ID',short_name='AZHURA',start_url='/',display='standalone',background_color='#070d19',theme_color='#0b1a32',icons=[{'src':'/static/logo.jpg','sizes':'any','type':'image/jpeg'}])
 @app.get('/api/config')
@@ -96,9 +92,7 @@ def telegram():
         if not hmac.compare_digest(digest,str(d.get('hash',''))):raise ValueError()
         user=int(items['id'])
         if not query('SELECT 1 FROM users WHERE telegram_id=%s',(user,)):return err('Silakan /start bot Telegram dahulu.',403)
-        login(user)
-        _apply_rb_from_payload(d, user)
-        return jsonify(ok=True,csrf=session['csrf'])
+        login(user);return jsonify(ok=True,csrf=session['csrf'])
     except (ValueError,KeyError,TypeError):return err('Verifikasi Telegram gagal',401)
 def google_claims(credential):
     r=requests.get('https://oauth2.googleapis.com/tokeninfo',params={'id_token':credential},timeout=8)
@@ -127,10 +121,7 @@ def google_login():
                 tid=-(VID_BASE+int(n))
                 db.execute('INSERT INTO users(telegram_id,username,first_name,balance,created_at) VALUES(%s,NULL,%s,0,%s)',(tid,gname,datetime.now(timezone.utc).isoformat()))
                 db.execute('INSERT INTO azhura_web_google_links(google_sub,telegram_id,email,name) VALUES(%s,%s,%s,%s)',(sub,tid,email,gname))
-        login(tid)
-        body=request.get_json(silent=True) or {}
-        _apply_rb_from_payload(body, tid)
-        return jsonify(ok=True,csrf=session['csrf'])
+        login(tid);return jsonify(ok=True,csrf=session['csrf'])
     except (ValueError,requests.RequestException,psycopg.Error):return err('Verifikasi Google gagal',401)
 @app.post('/api/auth/google/link')
 def google_link():
@@ -1425,13 +1416,7 @@ def telegram_webapp_login():
             user=telegram_init_user(init,BOT_TOKEN)
         if not query('SELECT 1 FROM users WHERE telegram_id=%s',(user,)):return err('Silakan /start bot Telegram dahulu.',403)
         login(user)
-        if rb:
-            session['rb']=rb
-            try:
-                from database import register_reseller_buyer
-                register_reseller_buyer(rb, int(user))
-            except Exception:
-                app.logger.exception('register_reseller_buyer webapp failed')
+        if rb:session['rb']=rb
         return jsonify(ok=True,csrf=session['csrf'])
     except (ValueError,KeyError,TypeError):return err('Sesi Telegram tidak valid. Buka lagi dari bot.',401)
 
@@ -1463,74 +1448,22 @@ def smm_reseller_context_reset(exc):
         except Exception:CURRENT_RESELLER.set(None)
 
 
-
-def _apply_rb_from_payload(d, user_id=None):
-    """Set session rb from client payload and register buyer if valid reseller bot."""
-    if not d or not isinstance(d, dict):
-        return
-    raw = d.get('rb')
-    if raw in (None, '', 0, '0'):
-        return
-    try:
-        rb = int(raw)
-    except (TypeError, ValueError):
-        return
-    try:
-        row = get_reseller_by_id(rb)
-    except Exception:
-        return
-    if not row or row.get('admin_blocked') or not row.get('enabled') or not row.get('cs_url'):
-        return
-    session['rb'] = rb
-    uid_val = user_id if user_id is not None else uid()
-    if uid_val:
-        try:
-            from database import register_reseller_buyer
-            register_reseller_buyer(rb, int(uid_val))
-        except Exception:
-            app.logger.exception('register_reseller_buyer failed')
-
 # ---------------- BRANDING MINI APP BOT RESELLER (nama + logo bot reseller) ----------------
 _BRAND_LOGO_CACHE={}
-def _resolve_reseller_brand():
-    """Brand reseller dari session, query ?rb= / ?u=, tanpa wajib login (untuk Chrome)."""
-    rb=session.get('rb')
-    uname=None
-    try:
-        qrb=request.args.get('rb')
-        if qrb not in (None,'','0'):
-            rb=int(qrb)
-    except (TypeError,ValueError):
-        pass
-    uname=(request.args.get('u') or request.args.get('user') or '').strip().lstrip('@')
-    row=None
-    try:
-        if rb:
-            row=get_reseller_by_id(int(rb))
-        elif uname:
-            from database import get_reseller_by_username
-            row=get_reseller_by_username(uname)
-    except Exception:
-        app.logger.exception('brand resolve')
-        return None
-    if not row or row.get('admin_blocked'):
-        return None
-    # tampilan brand boleh meski enabled=False (supaya link tidak "kosong"), tapi prefer enabled
-    return row
-
 def _brand_row():
-    # sesi login mini-app / browser setelah auth
-    return _resolve_reseller_brand()
+    rb=session.get('rb')
+    if not rb or not uid():return None
+    try:row=get_reseller_by_id(int(rb))
+    except Exception:return None
+    return row if row and not row.get('admin_blocked') and row.get('enabled') else None
 
 @app.get('/api/brand')
 def web_brand():
-    row=_resolve_reseller_brand()
+    row=_brand_row()
     if not row:return jsonify(ok=True,reseller=False)
-    return jsonify(ok=True,reseller=True,id=int(row['id']),
-                   name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
+    return jsonify(ok=True,reseller=True,name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
                    username=str(row.get('bot_username') or '').lstrip('@')[:64],
-                   cs_username=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64],
-                   enabled=bool(row.get('enabled')))
+                   cs_username=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64])
 
 @app.get('/api/brand/logo')
 def web_brand_logo():
@@ -1571,53 +1504,13 @@ def reseller_payload():
     b,st=data['bot'],data['stats']
     label,active=rc.status_label(b,True)
     return {'has_bot':True,'min_margin':rc.MIN_MARGIN,'max_margin':rc.MAX_MARGIN,'min_withdraw':rc.MIN_WITHDRAW,
-        'bot':{'id':int(b['id']),'name':b['bot_name'],'username':b['bot_username'],'status':label,'active':active,'enabled':b['enabled'],
+        'bot':{'name':b['bot_name'],'username':b['bot_username'],'status':label,'active':active,'enabled':b['enabled'],
         'margin':b['margin_percent'],'cs_url':b['cs_url'],'balance':int(b['margin_balance']),'total_earned':int(b['total_earned']),
-        'buyers':st['buyers'],'success':st['success'],
-        'web_path':'/?rb='+str(int(b['id'])),'web_slug':('/r/'+str(b.get('bot_username') or '').lstrip('@')) if b.get('bot_username') else ('/?rb='+str(int(b['id'])))}}
+        'buyers':st['buyers'],'success':st['success']}}
 def reseller_call(fn,*a):
     try:return jsonify(ok=True,**{'reseller':(fn(*a),reseller_payload())[1]})
     except ValueError as e:return err(str(e))
     except psycopg.errors.UniqueViolation:return err('Token ini sudah dipakai bot reseller lain.')
-
-@app.post('/api/profile/name')
-def profile_update_name():
-    if not uid():return err('Login diperlukan',401)
-    d=request.get_json(silent=True) or {}
-    name=str(d.get('name') or d.get('first_name') or '').strip()
-    try:
-        from database import update_user_first_name
-        u=update_user_first_name(uid(), name)
-    except ValueError as e:
-        return err(str(e))
-    except Exception:
-        app.logger.exception('profile name update')
-        return err('Gagal menyimpan nama',500)
-    if not u:return err('Akun tidak ditemukan',404)
-    return jsonify(ok=True,user={'telegram_id':u['telegram_id'],'username':u.get('username'),'first_name':u.get('first_name'),'balance':int(u.get('balance') or 0)},csrf=session.get('csrf',''))
-
-@app.get('/api/reseller/buyers')
-def reseller_buyers_list():
-    if not uid():return err('Silakan login terlebih dahulu.',401)
-    try:
-        from database import get_reseller_by_owner, list_reseller_buyers
-        bot=get_reseller_by_owner(uid())
-        if not bot:return err('Anda belum punya bot reseller.',404)
-        items=list_reseller_buyers(int(bot['id']), 200)
-        out=[]
-        for r in items:
-            out.append({
-                'telegram_id':int(r['telegram_id']),
-                'username':(r.get('username') or '') or None,
-                'name':(r.get('first_name') or '') or None,
-                'balance':int(r.get('balance') or 0),
-                'first_seen':r.get('first_seen'),
-            })
-        return jsonify(ok=True,bot_id=int(bot['id']),total=len(out),items=out)
-    except Exception:
-        app.logger.exception('reseller buyers')
-        return err('Gagal memuat daftar user',500)
-
 @app.get('/api/reseller')
 def reseller_info():
     if not uid():return err('Silakan login terlebih dahulu.',401)
