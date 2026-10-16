@@ -76,6 +76,10 @@ def login(user):
     session.clear();session.permanent=True;session['uid']=int(user);session['csrf']=secrets.token_urlsafe(32)
 @app.get('/')
 def index():return send_from_directory('static','index.html')
+@app.get('/r/<slug>')
+def index_reseller_slug(slug):
+    # Path cantik /r/NamaBot — file HTML sama; branding di client via /api/brand?u=
+    return send_from_directory('static','index.html')
 @app.get('/manifest.webmanifest')
 def manifest():return jsonify(name='AZHURA ID',short_name='AZHURA',start_url='/',display='standalone',background_color='#070d19',theme_color='#0b1a32',icons=[{'src':'/static/logo.jpg','sizes':'any','type':'image/jpeg'}])
 @app.get('/api/config')
@@ -1488,20 +1492,45 @@ def _apply_rb_from_payload(d, user_id=None):
 
 # ---------------- BRANDING MINI APP BOT RESELLER (nama + logo bot reseller) ----------------
 _BRAND_LOGO_CACHE={}
-def _brand_row():
+def _resolve_reseller_brand():
+    """Brand reseller dari session, query ?rb= / ?u=, tanpa wajib login (untuk Chrome)."""
     rb=session.get('rb')
-    if not rb or not uid():return None
-    try:row=get_reseller_by_id(int(rb))
-    except Exception:return None
-    return row if row and not row.get('admin_blocked') and row.get('enabled') else None
+    uname=None
+    try:
+        qrb=request.args.get('rb')
+        if qrb not in (None,'','0'):
+            rb=int(qrb)
+    except (TypeError,ValueError):
+        pass
+    uname=(request.args.get('u') or request.args.get('user') or '').strip().lstrip('@')
+    row=None
+    try:
+        if rb:
+            row=get_reseller_by_id(int(rb))
+        elif uname:
+            from database import get_reseller_by_username
+            row=get_reseller_by_username(uname)
+    except Exception:
+        app.logger.exception('brand resolve')
+        return None
+    if not row or row.get('admin_blocked'):
+        return None
+    # tampilan brand boleh meski enabled=False (supaya link tidak "kosong"), tapi prefer enabled
+    return row
+
+def _brand_row():
+    # sesi login mini-app / browser setelah auth
+    return _resolve_reseller_brand()
 
 @app.get('/api/brand')
 def web_brand():
-    row=_brand_row()
+    row=_resolve_reseller_brand()
     if not row:return jsonify(ok=True,reseller=False)
-    return jsonify(ok=True,reseller=True,name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
+    return jsonify(ok=True,reseller=True,id=int(row['id']),
+                   name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
                    username=str(row.get('bot_username') or '').lstrip('@')[:64],
-                   cs_username=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64])
+                   cs_username=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64],
+                   enabled=bool(row.get('enabled')))
 
 @app.get('/api/brand/logo')
 def web_brand_logo():
@@ -1545,7 +1574,7 @@ def reseller_payload():
         'bot':{'id':int(b['id']),'name':b['bot_name'],'username':b['bot_username'],'status':label,'active':active,'enabled':b['enabled'],
         'margin':b['margin_percent'],'cs_url':b['cs_url'],'balance':int(b['margin_balance']),'total_earned':int(b['total_earned']),
         'buyers':st['buyers'],'success':st['success'],
-        'web_path':'/?rb='+str(int(b['id']))}}
+        'web_path':'/?rb='+str(int(b['id'])),'web_slug':('/r/'+str(b.get('bot_username') or '').lstrip('@')) if b.get('bot_username') else ('/?rb='+str(int(b['id'])))}}
 def reseller_call(fn,*a):
     try:return jsonify(ok=True,**{'reseller':(fn(*a),reseller_payload())[1]})
     except ValueError as e:return err(str(e))
