@@ -4455,6 +4455,14 @@ def _app_for_order(application, order):
     return application
 
 
+# Akun yang daftar langsung lewat Google (tanpa Telegram) punya ID virtual negatif <= -10**15.
+def _is_virtual_web_user(telegram_id):
+    try:
+        return int(telegram_id) <= -10**15
+    except (TypeError, ValueError):
+        return False
+
+
 _OTP_DELIVERY_INFLIGHT = set()
 # Anti-spam: OTP yang sudah terkirim ke user tidak dikirim ulang walau notifikasi
 # channel traffic gagal dan proses diulang (order_id -> kode OTP).
@@ -4479,6 +4487,9 @@ async def _send_otp_received_message_impl(application, order_id, data_sms):
     """Persist and notify the user when an OTP is actually received."""
     order = get_order(order_id)
     if not order or str(order.get("status") or "").upper() not in {"PENDING", "WAITING_OTP"}:
+        return False
+    if _is_virtual_web_user(order.get("telegram_id")):
+        # Akun Google-only tidak punya chat Telegram; OTP-nya dikirim lewat web, bukan poller bot.
         return False
     application = _app_for_order(application, order)
 
@@ -5083,15 +5094,16 @@ async def _notify_web_otp(application, order_id):
         f"📨 SMS:\n<code>{escape(str(text))}</code>"
     )
     try:
-        await application.bot.send_message(
-            chat_id=int(order["telegram_id"]),
-            text=text_body,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
-                [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
-            ]),
-        )
+        if not _is_virtual_web_user(order["telegram_id"]):
+            await application.bot.send_message(
+                chat_id=int(order["telegram_id"]),
+                text=text_body,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔁 Resend OTP", callback_data=f"otp_resend:{order_id}")],
+                    [InlineKeyboardButton("✅ Pesanan Selesai", callback_data=f"otp_finish:{order_id}")],
+                ]),
+            )
     except Exception:
         logger.exception("[WEB OTP] gagal kirim OTP ke user Telegram order=%s", order_id)
         return False
