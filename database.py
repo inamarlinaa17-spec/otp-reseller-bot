@@ -1656,6 +1656,19 @@ def get_reseller_by_owner(owner_telegram_id):
         ).fetchone())
 
 
+
+def get_reseller_by_username(username):
+    """Cari bot reseller aktif by bot_username (tanpa @)."""
+    uname = str(username or "").strip().lstrip("@")
+    if not uname:
+        return None
+    with get_db() as db:
+        return _reseller_row(db.execute(
+            "SELECT * FROM reseller_bots WHERE lower(bot_username) = lower(%s) LIMIT 1",
+            (uname,),
+        ).fetchone())
+
+
 def get_reseller_by_id(bot_id):
     with get_db() as db:
         return _reseller_row(db.execute(
