@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from base64 import b64encode
 from premotp import create_qris as prem_create_qris, qris_id as prem_qris_id, qris_ref_id as prem_qris_ref_id, qris_total_payment as prem_qris_total, qr_image_bytes as prem_qr_image
 import requests, psycopg
+import psycopg.sql
 from psycopg.rows import dict_row
 from flask import Flask, request, jsonify, send_from_directory, session, Response
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
@@ -41,6 +42,31 @@ def conn():return psycopg.connect(DB,row_factory=dict_row)
 def query(sql,args=()):
     with conn() as db:return db.execute(sql,args).fetchall()
 def uid():return session.get('uid')
+# Akun yang daftar langsung lewat Google (tanpa Telegram) memakai ID virtual NEGATIF <= -VID_BASE.
+# Angka ini jauh di luar rentang ID Telegram asli (user & grup), jadi tidak mungkin bentrok.
+VID_BASE=10**15
+GOOGLE_SIGNUP=os.getenv('GOOGLE_SIGNUP_ENABLED','true').lower()!='false'
+def is_virtual(tid):
+    try:return int(tid)<=-VID_BASE
+    except (TypeError,ValueError):return False
+_G_READY=False
+def google_tables(db):
+    global _G_READY
+    if _G_READY:return
+    db.execute('CREATE TABLE IF NOT EXISTS azhura_web_google_links (google_sub TEXT PRIMARY KEY, telegram_id BIGINT UNIQUE NOT NULL)')
+    db.execute('ALTER TABLE azhura_web_google_links ADD COLUMN IF NOT EXISTS email TEXT')
+    db.execute('ALTER TABLE azhura_web_google_links ADD COLUMN IF NOT EXISTS name TEXT')
+    db.execute('CREATE SEQUENCE IF NOT EXISTS azhura_web_google_vid_seq')
+    _G_READY=True
+def virtual_is_empty(db,tid):
+    """True bila akun virtual Google belum punya saldo/transaksi apa pun (aman dihapus saat digabung)."""
+    row=db.execute('SELECT balance FROM users WHERE telegram_id=%s',(tid,)).fetchone()
+    if row and int(row['balance'] or 0)!=0:return False
+    tabs=db.execute("SELECT DISTINCT table_name FROM information_schema.columns WHERE table_schema='public' AND column_name='telegram_id' AND table_name NOT IN ('users','azhura_web_google_links','azhura_web_quotes')").fetchall()
+    for t in tabs:
+        q=psycopg.sql.SQL('SELECT 1 FROM {} WHERE telegram_id=%s LIMIT 1').format(psycopg.sql.Identifier(t['table_name']))
+        if db.execute(q,(tid,)).fetchone():return False
+    return True
 def err(msg,status=400):return jsonify(error=msg),status
 @app.before_request
 def csrf():
@@ -79,23 +105,47 @@ def google_login():
     if not GOOGLE_ID:return err('Login Google belum dikonfigurasi',503)
     try:
         d=google_claims((request.get_json(silent=True) or {}).get('credential',''))
+        sub=d['sub'];email=(d.get('email') or '')[:200];gname=(d.get('name') or d.get('given_name') or email.split('@')[0] or 'Pengguna Google')[:60]
         with conn() as db:
-            db.execute('CREATE TABLE IF NOT EXISTS azhura_web_google_links (google_sub TEXT PRIMARY KEY, telegram_id BIGINT UNIQUE NOT NULL)')
-            rows=db.execute('SELECT telegram_id FROM azhura_web_google_links WHERE google_sub=%s',(d['sub'],)).fetchall()
-        if not rows:return err('Masuk dengan Telegram dahulu untuk menautkan Google.',403)
-        login(rows[0]['telegram_id']);return jsonify(ok=True,csrf=session['csrf'])
+            google_tables(db)
+            db.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',('azg:'+sub,))
+            row=db.execute('SELECT telegram_id FROM azhura_web_google_links WHERE google_sub=%s',(sub,)).fetchone()
+            if row:
+                tid=int(row['telegram_id'])
+                db.execute('UPDATE azhura_web_google_links SET email=%s,name=%s WHERE google_sub=%s',(email,gname,sub))
+            else:
+                # Google belum terhubung ke akun mana pun: buat akun baru langsung (tanpa wajib Telegram).
+                # Pengguna lama Telegram tetap menautkan Google lewat menu Profil agar saldo/riwayatnya terbawa.
+                if not GOOGLE_SIGNUP:return err('Pendaftaran lewat Google sedang ditutup. Masuk dengan Telegram.',403)
+                n=db.execute("SELECT nextval('azhura_web_google_vid_seq') AS n").fetchone()['n']
+                tid=-(VID_BASE+int(n))
+                db.execute('INSERT INTO users(telegram_id,username,first_name,balance,created_at) VALUES(%s,NULL,%s,0,%s)',(tid,gname,datetime.now(timezone.utc).isoformat()))
+                db.execute('INSERT INTO azhura_web_google_links(google_sub,telegram_id,email,name) VALUES(%s,%s,%s,%s)',(sub,tid,email,gname))
+        login(tid);return jsonify(ok=True,csrf=session['csrf'])
     except (ValueError,requests.RequestException,psycopg.Error):return err('Verifikasi Google gagal',401)
 @app.post('/api/auth/google/link')
 def google_link():
     if not uid():return err('Login diperlukan',401)
     if not GOOGLE_ID:return err('Google belum diaktifkan',503)
+    if is_virtual(uid()):return err('Akun ini sudah masuk lewat Google.',400)
     try:
         d=google_claims((request.get_json(silent=True) or {}).get('credential',''))
+        sub=d['sub'];email=(d.get('email') or '')[:200];gname=(d.get('name') or d.get('given_name') or '')[:60]
         with conn() as db:
-            db.execute('CREATE TABLE IF NOT EXISTS azhura_web_google_links (google_sub TEXT PRIMARY KEY, telegram_id BIGINT UNIQUE NOT NULL)')
-            existing=db.execute('SELECT telegram_id FROM azhura_web_google_links WHERE google_sub=%s',(d['sub'],)).fetchone()
-            if existing and existing['telegram_id']!=uid():return err('Google sudah terhubung ke akun lain',409)
-            db.execute('INSERT INTO azhura_web_google_links VALUES (%s,%s) ON CONFLICT (google_sub) DO NOTHING',(d['sub'],uid()))
+            google_tables(db)
+            db.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',('azg:'+sub,))
+            existing=db.execute('SELECT telegram_id FROM azhura_web_google_links WHERE google_sub=%s',(sub,)).fetchone()
+            if existing and int(existing['telegram_id'])!=int(uid()):
+                old=int(existing['telegram_id'])
+                # Google ini sempat dipakai daftar sebagai akun baru. Bila akun itu masih KOSONG
+                # (saldo 0, tanpa transaksi), aman dihapus lalu Google dipindah ke akun Telegram ini.
+                if is_virtual(old) and virtual_is_empty(db,old):
+                    db.execute('DELETE FROM azhura_web_google_links WHERE google_sub=%s',(sub,))
+                    db.execute('DELETE FROM users WHERE telegram_id=%s',(old,))
+                else:return err('Google ini sudah terhubung ke akun lain yang punya saldo/riwayat. Hubungi CS untuk menggabungkan.',409)
+            mine=db.execute('SELECT google_sub FROM azhura_web_google_links WHERE telegram_id=%s',(uid(),)).fetchone()
+            if mine and mine['google_sub']!=sub:return err('Akun ini sudah terhubung ke akun Google lain.',409)
+            db.execute('INSERT INTO azhura_web_google_links(google_sub,telegram_id,email,name) VALUES(%s,%s,%s,%s) ON CONFLICT (google_sub) DO UPDATE SET email=EXCLUDED.email,name=EXCLUDED.name',(sub,uid(),email,gname))
         return jsonify(ok=True)
     except (ValueError,requests.RequestException,psycopg.Error):return err('Gagal menautkan Google',400)
 @app.post('/api/logout')
@@ -104,7 +154,15 @@ def logout():session.clear();return jsonify(ok=True)
 def me():
     if not uid():return err('Login diperlukan',401)
     rows=query('SELECT telegram_id,username,first_name,balance FROM users WHERE telegram_id=%s',(uid(),))
-    return jsonify(user=rows[0] if rows else None,csrf=session.get('csrf',''),is_admin=web_is_admin())
+    u=rows[0] if rows else None
+    if u:
+        u['google_only']=is_virtual(u['telegram_id']);u['email']=None
+        if u['google_only']:
+            try:
+                g=query('SELECT email FROM azhura_web_google_links WHERE telegram_id=%s',(u['telegram_id'],))
+                u['email']=g[0]['email'] if g else None
+            except psycopg.Error:pass
+    return jsonify(user=u,csrf=session.get('csrf',''),is_admin=web_is_admin())
 @app.get('/api/deposits')
 def web_deposits():
     if not uid():return err('Login diperlukan',401)
