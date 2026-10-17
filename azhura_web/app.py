@@ -1503,10 +1503,14 @@ def reseller_payload():
     if not data:return {'has_bot':False,'min_margin':rc.MIN_MARGIN,'max_margin':rc.MAX_MARGIN,'min_withdraw':rc.MIN_WITHDRAW}
     b,st=data['bot'],data['stats']
     label,active=rc.status_label(b,True)
+    slug=(b.get('web_slug') or '') or ''
     return {'has_bot':True,'min_margin':rc.MIN_MARGIN,'max_margin':rc.MAX_MARGIN,'min_withdraw':rc.MIN_WITHDRAW,
-        'bot':{'name':b['bot_name'],'username':b['bot_username'],'status':label,'active':active,'enabled':b['enabled'],
+        'bot':{'id':b['id'],'name':b['bot_name'],'username':b['bot_username'],'status':label,'active':active,'enabled':b['enabled'],
         'margin':b['margin_percent'],'cs_url':b['cs_url'],'balance':int(b['margin_balance']),'total_earned':int(b['total_earned']),
-        'buyers':st['buyers'],'success':st['success']}}
+        'buyers':st['buyers'],'success':st['success'],
+        'web_slug':slug,'web_display_name':(b.get('web_display_name') or b.get('bot_name') or ''),
+        'web_logo_url':(b.get('web_logo_url') or ''),
+        'web_url':('/r/'+slug) if slug else ''}}
 def reseller_call(fn,*a):
     try:return jsonify(ok=True,**{'reseller':(fn(*a),reseller_payload())[1]})
     except ValueError as e:return err(str(e))
@@ -1558,6 +1562,163 @@ def reseller_withdraw():
                 'reply_markup':{'inline_keyboard':[[{'text':'✅ Sudah Ditransfer','callback_data':f"rs:adm_ok:{wd['id']}"},{'text':'❌ Tolak','callback_data':f"rs:adm_no:{wd['id']}"}]]}})
         except requests.RequestException:app.logger.exception('Gagal notifikasi admin WD')
     return jsonify(ok=True,id=wd['id'],reseller=reseller_payload())
+# ---------------- PROFILE: edit nama ----------------
+@app.post('/api/me/name')
+def me_update_name():
+    if not uid():return err('Login diperlukan',401)
+    d=request.get_json(silent=True) or {}
+    name=str(d.get('name') or '').strip()[:60]
+    if not name or len(name)<2:return err('Nama minimal 2 karakter')
+    if any(c in name for c in '<>{}[]\\'):return err('Nama mengandung karakter tidak diizinkan')
+    try:
+        with conn() as db:
+            db.execute('UPDATE users SET first_name=%s WHERE telegram_id=%s',(name,uid()))
+        return jsonify(ok=True,name=name)
+    except psycopg.Error:
+        app.logger.exception('Update nama gagal')
+        return err('Gagal menyimpan nama',500)
+
+# ---------------- SEARCH layanan lintas server ----------------
+@app.get('/api/search')
+def api_search():
+    if not uid():return err('Login diperlukan',401)
+    q=(request.args.get('q') or '').strip().lower()[:60]
+    if len(q)<1:return jsonify(items=[])
+    items=[]
+    seen=set()
+    # Server 1,2,4
+    for server in (1,2,4):
+        try:
+            for s in (web_catalog(server,'services') or []):
+                name=str(s.get('name') or s.get('service') or s.get('id') or '')
+                key=name.lower()
+                if q in key and key not in seen:
+                    seen.add(key)
+                    items.append({'name':name,'server':server,'kind':None,'id':s.get('id') or s.get('service') or name,
+                                  'logo_key':key.replace(' ','')})
+        except Exception:
+            pass
+    # Server 3 PremOTP reguler + plus
+    for kind in ('regular','plus'):
+        try:
+            for s in (get_services(kind) or []):
+                name=str(s.get('name') or s.get('service') or s.get('id') or '')
+                key=name.lower()
+                if q in key and key not in seen:
+                    seen.add(key)
+                    items.append({'name':name,'server':3,'kind':kind,'id':s.get('id') or s.get('service') or name,
+                                  'logo_key':key.replace(' ','')})
+        except Exception:
+            pass
+    items.sort(key=lambda x:(0 if q==x['name'].lower() else 1,x['name'].lower()))
+    return jsonify(items=items[:40])
+
+# ---------------- RESELLER: web branding + dashboard scoped ----------------
+@app.post('/api/reseller/web')
+def reseller_web_config():
+    """Simpan slug, nama tampilan, dan logo URL untuk website reseller."""
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    d=request.get_json(silent=True) or {}
+    import re as _re
+    slug=_re.sub(r'[^a-z0-9-]','',str(d.get('slug') or '').strip().lower())[:32]
+    if slug and (len(slug)<3 or slug.startswith('-') or slug.endswith('-') or '--' in slug):
+        return err('Slug minimal 3 karakter, hanya huruf kecil, angka, dan tanda hubung')
+    display=str(d.get('display_name') or '').strip()[:64]
+    logo=str(d.get('logo_url') or '').strip()[:300]
+    if logo and not (logo.startswith('https://') or logo.startswith('/')):
+        return err('Logo URL harus https://')
+    bot=rc.db.get_reseller_by_owner(uid())
+    if not bot:return err('Anda belum punya bot reseller')
+    if slug:
+        existing=rc.db.get_reseller_by_slug(slug)
+        if existing and int(existing['id'])!=int(bot['id']):
+            return err('Slug sudah dipakai reseller lain')
+    try:
+        fields={}
+        if 'slug' in d:fields['web_slug']=slug or None
+        if 'display_name' in d:fields['web_display_name']=display or None
+        if 'logo_url' in d:fields['web_logo_url']=logo or None
+        if fields:
+            rc.db.update_reseller(uid(),**fields)
+        return jsonify(ok=True,reseller=reseller_payload())
+    except Exception as e:
+        app.logger.exception('reseller web config')
+        return err(str(e) or 'Gagal menyimpan',500)
+
+@app.get('/api/reseller/dashboard')
+def reseller_dashboard():
+    """Dashboard scoped: hanya data bot milik user yang login."""
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    bot=rc.db.get_reseller_by_owner(uid())
+    if not bot:return err('Anda belum punya bot reseller',404)
+    bid=int(bot['id'])
+    try:
+        stats=rc.db.get_reseller_stats(bid)
+        # recent orders milik reseller ini
+        orders=query("""SELECT order_id,service,service_name,status,sell_price,reseller_margin,created_at,country
+            FROM orders WHERE reseller_bot_id=%s ORDER BY id DESC LIMIT 30""",(bid,))
+        ledger=query("""SELECT amount,balance_after,entry_type,reference,created_at
+            FROM reseller_ledger WHERE bot_id=%s ORDER BY id DESC LIMIT 20""",(bid,))
+        wds=query("""SELECT id,amount,provider_name,account_number,account_name,status,created_at
+            FROM reseller_withdrawals WHERE bot_id=%s ORDER BY id DESC LIMIT 15""",(bid,))
+        return jsonify(ok=True,
+            bot={'id':bid,'name':bot.get('bot_name'),'username':bot.get('bot_username'),
+                 'margin':float(bot.get('margin_percent') or 0),'balance':int(bot.get('margin_balance') or 0),
+                 'total_earned':int(bot.get('total_earned') or 0),'enabled':bool(bot.get('enabled')),
+                 'web_slug':bot.get('web_slug') or '','web_display_name':bot.get('web_display_name') or '',
+                 'web_logo_url':bot.get('web_logo_url') or '','cs_url':bot.get('cs_url') or ''},
+            stats=stats,
+            orders=[{'id':o['order_id'],'service':o.get('service_name') or o.get('service'),'status':o['status'],
+                     'price':int(o['sell_price'] or 0),'margin':int(o['reseller_margin'] or 0),
+                     'country':o.get('country'),'at':str(o['created_at'])} for o in (orders or [])],
+            ledger=[{'amount':int(r['amount']),'balance':int(r['balance_after']),'type':r['entry_type'],
+                     'ref':r.get('reference'),'at':str(r['created_at'])} for r in (ledger or [])],
+            withdrawals=[{'id':w['id'],'amount':int(w['amount']),'provider':w['provider_name'],
+                          'number':w['account_number'],'name':w['account_name'],'status':w['status'],
+                          'at':str(w['created_at'])} for w in (wds or [])])
+    except Exception:
+        app.logger.exception('reseller dashboard')
+        return err('Gagal memuat dashboard',500)
+
+# ---------------- Public reseller storefront /r/<slug> ----------------
+@app.get('/r/<slug>')
+@app.get('/r/<slug>/')
+def reseller_storefront(slug):
+    """Halaman website reseller: set session branding lalu tampilkan SPA yang sama."""
+    import re as _re
+    slug=_re.sub(r'[^a-z0-9-]','', (slug or '').strip().lower())[:32]
+    row=None
+    try:
+        from database import get_reseller_by_slug
+        row=get_reseller_by_slug(slug)
+    except Exception:
+        app.logger.exception('slug lookup')
+    if not row or not row.get('enabled'):
+        return Response('<!doctype html><html><body style="font-family:system-ui;text-align:center;padding:60px">'
+                        '<h2>Website reseller tidak ditemukan</h2><p>Link tidak valid atau bot nonaktif.</p>'
+                        '<a href="/">Kembali ke AZHURA</a></body></html>',mimetype='text/html',status=404)
+    session['rb']=int(row['id'])
+    session['rb_slug']=slug
+    session.permanent=True
+    return send_from_directory('static','index.html')
+
+@app.get('/api/storefront')
+def api_storefront():
+    """Info branding publik (atau dari session rb)."""
+    rb=session.get('rb')
+    row=None
+    if rb:
+        try:row=get_reseller_by_id(int(rb))
+        except Exception:pass
+    if not row:
+        return jsonify(reseller=False)
+    return jsonify(reseller=True,
+        name=str(row.get('web_display_name') or row.get('bot_name') or row.get('bot_username') or 'Reseller')[:64],
+        username=str(row.get('bot_username') or '').lstrip('@')[:64],
+        logo_url=(row.get('web_logo_url') or '/api/brand/logo'),
+        slug=row.get('web_slug') or '',
+        cs=str(row.get('cs_url') or ''))
+
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
 if __name__=='__main__':app.run(port=int(os.getenv('PORT','8080')),debug=os.getenv('WEB_DEV')=='1')
