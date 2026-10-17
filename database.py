@@ -1566,11 +1566,6 @@ def init_reseller_tables(db):
     """)
     db.execute("ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS admin_blocked BOOLEAN NOT NULL DEFAULT FALSE")
     db.execute("ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS admin_blocked_previous_enabled BOOLEAN NOT NULL DEFAULT TRUE")
-    # Web branding for reseller storefront (path /r/<slug>)
-    db.execute("ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS web_slug TEXT")
-    db.execute("ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS web_display_name TEXT")
-    db.execute("ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS web_logo_url TEXT")
-    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS reseller_bots_web_slug_uidx ON reseller_bots (web_slug) WHERE web_slug IS NOT NULL AND web_slug <> ''")
     db.execute("""
         CREATE TABLE IF NOT EXISTS reseller_bot_archive (
             id BIGINT PRIMARY KEY,
@@ -1710,7 +1705,7 @@ def replace_reseller_token(owner_telegram_id, bot_token, bot_telegram_id, bot_us
         ).fetchone())
 
 
-_RESELLER_FIELDS = {"margin_percent", "cs_url", "enabled", "web_slug", "web_display_name", "web_logo_url"}
+_RESELLER_FIELDS = {"margin_percent", "cs_url", "enabled"}
 
 
 def update_reseller(owner_telegram_id, **fields):
@@ -1722,18 +1717,6 @@ def update_reseller(owner_telegram_id, **fields):
         return _reseller_row(db.execute(
             f"UPDATE reseller_bots SET {sets} WHERE owner_telegram_id = %s RETURNING *",
             (*fields.values(), owner_telegram_id),
-        ).fetchone())
-
-
-def get_reseller_by_slug(slug):
-    """Public storefront lookup by web_slug (lowercase alphanumeric + hyphen)."""
-    slug = (slug or "").strip().lower()
-    if not slug or len(slug) > 40:
-        return None
-    with get_db() as db:
-        return _reseller_row(db.execute(
-            "SELECT * FROM reseller_bots WHERE lower(web_slug) = %s AND COALESCE(admin_blocked,FALSE) = FALSE",
-            (slug,),
         ).fetchone())
 
 
