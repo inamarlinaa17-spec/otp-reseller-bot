@@ -364,13 +364,13 @@ def normalize(d):
 def services(kind):
     if not uid():return err('Login diperlukan',401)
     if kind not in ('regular','plus'):return err('Pilihan tidak valid')
-    try:return jsonify(items=normalize(get_services(kind)))
+    try:return jsonify(items=swr_cached(('p3svc',kind),lambda:normalize(get_services(kind)),fresh=600))
     except Exception:return err('Katalog belum tersedia',503)
 @app.get('/api/prem/countries/<kind>/<service>')
 def countries(kind,service):
     if not uid():return err('Login diperlukan',401)
     if kind not in ('regular','plus') or len(service)>100:return err('Pilihan tidak valid')
-    try:return jsonify(items=normalize(get_countries(service,kind)))
+    try:return jsonify(items=swr_cached(('p3cty',kind,service),lambda:normalize(get_countries(service,kind))))
     except Exception:return err('Negara belum tersedia',503)
 def parse_offer(o,key):
     if not isinstance(o,dict):return None
@@ -465,18 +465,45 @@ def web_live_traffic():
         app.logger.exception('Live traffic read failed')
         return jsonify(items=[])
 
+
+# Cache daftar layanan/negara (tanpa harga) dengan stale-while-revalidate: respons langsung dari cache,
+# dan diperbarui di latar belakang. Harga & stok FINAL tetap diambil live saat user memilih negara (/quotes, /offers).
+import threading as _thr
+_SWR={}; _SWR_LOCK=_thr.Lock()
+def swr_cached(key,fn,fresh=120,stale=3600):
+    now=time.time()
+    with _SWR_LOCK:
+        hit=_SWR.get(key)
+    if hit and now-hit[0]<fresh:return hit[1]
+    if hit and now-hit[0]<stale:
+        with _SWR_LOCK:
+            if key in _SWR_BUSY:return hit[1]
+            _SWR_BUSY.add(key)
+        def _refresh():
+            try:
+                val=fn()
+                with _SWR_LOCK:_SWR[key]=(time.time(),val)
+            except Exception:pass
+            finally:
+                with _SWR_LOCK:_SWR_BUSY.discard(key)
+        _thr.Thread(target=_refresh,daemon=True).start()
+        return hit[1]
+    val=fn()
+    with _SWR_LOCK:_SWR[key]=(time.time(),val)
+    return val
+_SWR_BUSY=set()
 @app.get('/api/server/<int:server>/services')
 def server_services(server):
     if not uid():return err('Login diperlukan',401)
     if server not in (1,2,4):return err('Server tidak valid')
-    try:return jsonify(items=web_catalog(server,'services'))
+    try:return jsonify(items=swr_cached(('svc',server),lambda:web_catalog(server,'services'),fresh=600))
     except Exception:app.logger.exception('Service catalog failed');return err('Katalog sementara tidak tersedia',503)
 
 @app.get('/api/server/<int:server>/countries/<service>')
 def server_countries(server,service):
     if not uid():return err('Login diperlukan',401)
     if server not in (1,2,4) or len(service)>100:return err('Pilihan tidak valid')
-    try:return jsonify(items=web_catalog(server,'countries',service))
+    try:return jsonify(items=swr_cached(('cty',server,service),lambda:web_catalog(server,'countries',service)))
     except Exception:app.logger.exception('Country catalog failed');return err('Negara sementara tidak tersedia',503)
 
 @app.get('/api/server/<int:server>/quotes/<service>/<country>')
