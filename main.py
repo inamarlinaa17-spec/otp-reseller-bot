@@ -9758,7 +9758,7 @@ async def admin_callback(
                 user_bot = _bot_for_reseller_id(context.bot, result.get("reseller_bot_id"))
                 edited_user_message = False
                 user_message_id = result.get("user_message_id")
-                if user_message_id:
+                if user_message_id and not _is_virtual_web_user(result["telegram_id"]):
                     try:
                         await user_bot.edit_message_text(
                             chat_id=result["telegram_id"],
@@ -9770,7 +9770,8 @@ async def admin_callback(
                         edited_user_message = True
                     except Exception:
                         logger.exception("Gagal mengedit pesan konfirmasi user untuk deposit %s", deposit_id)
-                if not edited_user_message:
+                # Akun Google-only (ID virtual) tidak punya chat Telegram: lewati notifikasi, saldo tetap masuk.
+                if not edited_user_message and not _is_virtual_web_user(result["telegram_id"]):
                     await user_bot.send_message(
                         chat_id=result["telegram_id"],
                         text=approved_text,
