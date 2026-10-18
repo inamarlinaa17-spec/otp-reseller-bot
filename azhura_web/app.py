@@ -156,6 +156,10 @@ def me():
     rows=query('SELECT telegram_id,username,first_name,balance FROM users WHERE telegram_id=%s',(uid(),))
     u=rows[0] if rows else None
     if u:
+        try:
+            pn=query('SELECT display_name FROM azhura_web_profile WHERE telegram_id=%s',(uid(),))
+            if pn:u['first_name']=pn[0]['display_name']
+        except psycopg.Error:pass   # tabel profil belum dibuat: pakai nama dari users
         u['google_only']=is_virtual(u['telegram_id']);u['email']=None
         if u['google_only']:
             try:
@@ -1426,6 +1430,10 @@ def smm_reseller_context():
     # dan margin dicatat ke order agar masuk saldo margin reseller. Polling OTP/batal/refund tetap berjalan
     # walau reseller dinonaktifkan; hanya harga/pembelian baru yang ditolak.
     rb=session.get('rb') if request.path.startswith('/api/') else None
+    if not rb and request.path.startswith('/api/'):
+        # Website reseller (/r/<slug>): halaman mengirim header X-Site; konteks margin sama dengan bot reseller.
+        rb=_site_header_rid()
+        if rb:request.environ['az_site_rid']=rb
     if not rb:return None
     p=request.path
     pricing=p.startswith('/api/smm/') or p.startswith('/api/apk/') or p.startswith('/api/gmail/') or p.startswith('/api/prem/offers/') or p=='/api/prem/buy' or (p.startswith('/api/server/') and ('/quotes/' in p or p.endswith('/buy')))
@@ -1558,6 +1566,273 @@ def reseller_withdraw():
                 'reply_markup':{'inline_keyboard':[[{'text':'✅ Sudah Ditransfer','callback_data':f"rs:adm_ok:{wd['id']}"},{'text':'❌ Tolak','callback_data':f"rs:adm_no:{wd['id']}"}]]}})
         except requests.RequestException:app.logger.exception('Gagal notifikasi admin WD')
     return jsonify(ok=True,id=wd['id'],reseller=reseller_payload())
+# =====================================================================
+# AZHURA v2: edit nama profil, website reseller (/r/<slug>), dashboard reseller, katalog pencarian.
+# Semua transaksi tetap memakai alur/DB lama; blok ini hanya menambah route dan konteks margin reseller.
+# =====================================================================
+import re, threading
+from concurrent.futures import ThreadPoolExecutor
+
+_V2_READY=False
+_V2_LOCK=threading.Lock()
+SLUG_RE=re.compile(r'^[a-z0-9](?:[a-z0-9-]{1,28})[a-z0-9]$')
+SLUG_RESERVED={'admin','api','static','r','www','app','login','azhura','support','help','info','null','undefined'}
+TG_CHANNEL_URL='https://t.me/infonokosazhura'
+
+def v2_init(db):
+    """Tambah kolom/tabel baru secara aman (IF NOT EXISTS). Tidak mengubah data lama."""
+    global _V2_READY
+    if _V2_READY:return
+    with _V2_LOCK:
+        if _V2_READY:return
+        db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_slug TEXT')
+        db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_name TEXT')
+        db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_enabled BOOLEAN NOT NULL DEFAULT TRUE')
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS reseller_bots_site_slug_uq ON reseller_bots (LOWER(site_slug)) WHERE site_slug IS NOT NULL')
+        db.execute('CREATE TABLE IF NOT EXISTS azhura_web_profile (telegram_id BIGINT PRIMARY KEY, display_name TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())')
+        _V2_READY=True
+
+def _slugify(raw):
+    s=re.sub(r'[^a-z0-9]+','-',str(raw or '').lower()).strip('-')
+    return s[:30].strip('-')
+
+def _default_slug(db,row):
+    base=_slugify(row.get('bot_username') or row.get('bot_name') or '')
+    for suf in ('-bot','bot'):
+        if base.endswith(suf) and len(base)-len(suf)>=3:base=base[:-len(suf)].strip('-');break
+    if len(base)<3 or base in SLUG_RESERVED:base='toko-'+str(row['id'])
+    cand=base;n=1
+    while db.execute('SELECT 1 FROM reseller_bots WHERE LOWER(site_slug)=%s AND id<>%s',(cand,row['id'])).fetchone() or cand in SLUG_RESERVED:
+        n+=1;cand=(base[:26]+'-'+str(n))
+    return cand
+
+def site_row_by_slug(slug):
+    """Baris reseller aktif untuk slug (None bila tidak ada / nonaktif / diblokir / website dimatikan)."""
+    slug=str(slug or '').lower()
+    if not SLUG_RE.match(slug):return None
+    with conn() as db:
+        v2_init(db)
+        row=db.execute('SELECT * FROM reseller_bots WHERE LOWER(site_slug)=%s',(slug,)).fetchone()
+    if not row or row.get('admin_blocked') or not row.get('enabled') or not row.get('site_enabled') or not row.get('cs_url'):return None
+    return row
+
+def _site_header_rid():
+    """Konteks reseller dari header X-Site (dikirim halaman /r/<slug>). Header tidak valid -> -1 (ditolak di jalur harga)."""
+    slug=request.headers.get('X-Site','').strip().lower()
+    if not slug:return None
+    try:row=site_row_by_slug(slug)
+    except Exception:
+        app.logger.exception('Site lookup failed');return -1
+    return int(row['id']) if row else -1
+
+def _public_site(row):
+    cs=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64]
+    return {'slug':row['site_slug'],'name':str(row.get('site_name') or row.get('bot_name') or row.get('bot_username') or 'Toko OTP')[:64],
+            'bot_username':str(row.get('bot_username') or '').lstrip('@')[:64],'cs_username':cs,
+            'logo':'/api/site/%s/logo'%row['site_slug']}
+
+@app.get('/r/<slug>')
+def site_page(slug):
+    return send_from_directory('static','index.html')
+
+@app.get('/api/site/<slug>')
+def site_info(slug):
+    try:row=site_row_by_slug(slug)
+    except Exception:
+        app.logger.exception('Site info failed');return err('Website sementara tidak tersedia.',503)
+    if not row:return err('Website tidak ditemukan atau sedang tidak aktif.',404)
+    return jsonify(ok=True,site=_public_site(row))
+
+def _logo_bytes(row):
+    rid=int(row['id']);hit=_BRAND_LOGO_CACHE.get(rid)
+    if hit and time.time()-hit[0]<3600:return hit[1]
+    data=None
+    try:
+        from database import get_reseller_token
+        tok=get_reseller_token(rid);api='https://api.telegram.org/bot%s/'%tok;fid=None
+        ph=requests.get(api+'getUserProfilePhotos',params={'user_id':int(row['bot_telegram_id']),'limit':1},timeout=8).json()
+        if ph.get('ok') and ph['result'].get('photos'):fid=ph['result']['photos'][0][-1]['file_id']
+        if not fid:
+            ch=requests.get(api+'getChat',params={'chat_id':int(row['bot_telegram_id'])},timeout=8).json()
+            if ch.get('ok') and ch['result'].get('photo'):fid=ch['result']['photo'].get('big_file_id')
+        if fid:
+            fi=requests.get(api+'getFile',params={'file_id':fid},timeout=8).json()
+            if fi.get('ok'):
+                img=requests.get('https://api.telegram.org/file/bot%s/%s'%(tok,fi['result']['file_path']),timeout=10)
+                if img.ok and 0<len(img.content)<2_000_000:data=img.content
+    except Exception:app.logger.warning('Site logo fetch failed',exc_info=False)
+    _BRAND_LOGO_CACHE[rid]=(time.time(),data)
+    return data
+
+@app.get('/api/site/<slug>/logo')
+def site_logo(slug):
+    try:row=site_row_by_slug(slug)
+    except Exception:return Response(status=404)
+    if not row:return Response(status=404)
+    data=_logo_bytes(row)
+    if not data:return Response(status=404)
+    return Response(data,mimetype='image/jpeg',headers={'Cache-Control':'public, max-age=3600'})
+
+# Pembeli yang memesan lewat website reseller dicatat sebagai pembeli reseller itu (sama seperti pembeli bot reseller).
+@app.after_request
+def site_register_buyer(resp):
+    try:
+        rs=request.environ.get('az_site_rid')
+        if rs and request.method=='POST' and uid() and 200<=resp.status_code<300:
+            p=request.path
+            if p in ('/api/prem/buy','/api/smm/order','/api/apk/order','/api/gmail/order') or (p.startswith('/api/server/') and p.endswith('/buy')):
+                from database import register_reseller_buyer
+                register_reseller_buyer(int(rs),int(uid()))
+    except Exception:app.logger.exception('Register site buyer failed')
+    return resp
+
+# ---------------- Profil: ubah nama ----------------
+@app.post('/api/profile/name')
+def profile_name():
+    if not uid():return err('Login diperlukan',401)
+    name=re.sub(r'\s+',' ',str((request.get_json(silent=True) or {}).get('name','')).strip())
+    if len(name)<2 or len(name)>40:return err('Nama harus 2–40 karakter.')
+    if re.search(r'[<>\x00-\x1f]',name):return err('Nama mengandung karakter yang tidak diizinkan.')
+    with conn() as db:
+        v2_init(db)
+        if not db.execute('SELECT 1 FROM users WHERE telegram_id=%s',(uid(),)).fetchone():return err('Akun tidak ditemukan',404)
+        db.execute('UPDATE users SET first_name=%s WHERE telegram_id=%s',(name,uid()))
+        db.execute('INSERT INTO azhura_web_profile(telegram_id,display_name) VALUES(%s,%s) ON CONFLICT (telegram_id) DO UPDATE SET display_name=EXCLUDED.display_name,updated_at=NOW()',(uid(),name))
+        if is_virtual(uid()):
+            google_tables(db)   # pastikan tabel ada: kegagalan SQL di tengah transaksi akan membatalkan seluruh perubahan
+            db.execute('UPDATE azhura_web_google_links SET name=%s WHERE telegram_id=%s',(name,uid()))
+    return jsonify(ok=True,name=name)
+
+# ---------------- Dashboard reseller (hanya data milik sendiri) ----------------
+def _own_reseller():
+    """Baris reseller milik user login. Seluruh endpoint dashboard memakai ini; id TIDAK PERNAH dibaca dari request."""
+    if not uid():return None
+    return rc.db.get_reseller_by_owner(int(uid()))
+
+def _mask_phone(p):
+    p=str(p or '')
+    return (p[:3]+'•'*max(len(p)-6,0)+p[-3:]) if len(p)>6 else p
+
+def _site_info_for_owner(row):
+    with conn() as db:
+        v2_init(db)
+        cur=db.execute('SELECT id,site_slug,site_name,site_enabled,bot_username,bot_name FROM reseller_bots WHERE id=%s',(row['id'],)).fetchone()
+        if cur and not cur['site_slug']:
+            slug=_default_slug(db,cur)
+            try:db.execute('UPDATE reseller_bots SET site_slug=%s WHERE id=%s AND site_slug IS NULL',(slug,cur['id']))
+            except psycopg.errors.UniqueViolation:pass
+            cur=db.execute('SELECT id,site_slug,site_name,site_enabled,bot_username,bot_name FROM reseller_bots WHERE id=%s',(row['id'],)).fetchone()
+    base=request.host_url.rstrip('/')
+    return {'slug':cur['site_slug'],'url':base+'/r/'+cur['site_slug'],'name':cur['site_name'] or cur['bot_name'] or cur['bot_username'] or '',
+            'custom_name':cur['site_name'] or '','enabled':bool(cur['site_enabled'])}
+
+@app.get('/api/rsdash/overview')
+def rsdash_overview():
+    row=_own_reseller()
+    if not row:return err('Anda belum terdaftar sebagai reseller.',403)
+    try:
+        data=rc.db.admin_get_reseller_detail(int(row['id']),archived=False,limit=100)
+        site=_site_info_for_owner(row)
+        bid=int(row['id'])
+        with conn() as db:
+            agg=db.execute("""SELECT COUNT(*) total,
+                COUNT(*) FILTER (WHERE UPPER(status) IN ('SUCCESS','COMPLETED','FINISHED')) success,
+                COUNT(*) FILTER (WHERE UPPER(status) IN ('WAITING_OTP','PENDING','ACTIVE')) waiting,
+                COALESCE(SUM(sell_price) FILTER (WHERE UPPER(status) IN ('SUCCESS','COMPLETED','FINISHED')),0) omzet,
+                COALESCE(SUM(reseller_margin) FILTER (WHERE reseller_margin_status='CREDITED'),0) margin_credited,
+                COALESCE(SUM(reseller_margin) FILTER (WHERE reseller_margin_status='PENDING'),0) margin_pending
+                FROM orders WHERE reseller_bot_id=%s""",(bid,)).fetchone()
+    except psycopg.Error:
+        app.logger.exception('Dashboard reseller gagal');return err('Dashboard tidak dapat dimuat.',503)
+    if not data:return err('Data tidak ditemukan',404)
+    b=data['bot']
+    bot={k:b.get(k) for k in ('id','bot_username','bot_name','margin_percent','cs_url','enabled','admin_blocked','margin_balance','total_earned','created_at')}
+    orders=[{'order_id':o['order_id'],'buyer':o.get('first_name') or o.get('username') or 'Pembeli','service':o['service'],'country':o['country'],
+             'provider':o['provider'],'phone':_mask_phone(o.get('phone')),'price':int(o['sell_price'] or 0),'margin':int(o['reseller_margin'] or 0),
+             'margin_status':o['reseller_margin_status'],'status':o['status'],'created_at':o['created_at']} for o in data['orders']]
+    buyers=[{'name':u.get('first_name') or u.get('username') or 'Pembeli','since':u['first_seen']} for u in data['buyers']]
+    return jsonify(ok=True,bot=bot,site=site,stats={k:int(agg[k] or 0) for k in agg},orders=orders,buyers=buyers,
+        ledger=data['ledger'],withdrawals=[{k:w[k] for k in ('id','amount','method','provider_name','account_number','account_name','status','admin_note','created_at','processed_at')} for w in data['withdrawals']],
+        deposits=[{'deposit_id':d['deposit_id'],'buyer':d.get('first_name') or d.get('username') or 'Pembeli','amount':int(d['amount'] or 0),'status':d['status'],'created_at':d['created_at']} for d in data['deposits']],
+        reseller=reseller_payload())
+
+@app.post('/api/rsdash/site')
+def rsdash_site():
+    row=_own_reseller()
+    if not row:return err('Anda belum terdaftar sebagai reseller.',403)
+    d=request.get_json(silent=True) or {}
+    sets=[];args=[]
+    with conn() as db:
+        v2_init(db)
+        if 'slug' in d:
+            slug=_slugify(d.get('slug'))
+            if not SLUG_RE.match(slug):return err('Link harus 3–30 karakter: huruf kecil, angka, atau tanda hubung.')
+            if slug in SLUG_RESERVED:return err('Link ini tidak boleh dipakai.')
+            if db.execute('SELECT 1 FROM reseller_bots WHERE LOWER(site_slug)=%s AND id<>%s',(slug,row['id'])).fetchone():return err('Link sudah dipakai reseller lain.')
+            sets.append('site_slug=%s');args.append(slug)
+        if 'name' in d:
+            nm=re.sub(r'\s+',' ',str(d.get('name') or '').strip())
+            if len(nm)>40 or re.search(r'[<>\x00-\x1f]',nm):return err('Nama website maksimal 40 karakter tanpa simbol < >.')
+            sets.append('site_name=%s');args.append(nm or None)
+        if 'enabled' in d:
+            if type(d['enabled']) is not bool:return err('Nilai tidak valid')
+            sets.append('site_enabled=%s');args.append(d['enabled'])
+        if not sets:return err('Tidak ada perubahan.')
+        try:db.execute('UPDATE reseller_bots SET '+','.join(sets)+' WHERE id=%s',tuple(args)+(row['id'],))
+        except psycopg.errors.UniqueViolation:return err('Link sudah dipakai reseller lain.')
+    return jsonify(ok=True,site=_site_info_for_owner(row))
+
+# ---------------- Katalog gabungan (pencarian semua server) ----------------
+_SRC_CACHE={}   # sumber -> (waktu, daftar)
+_SRC_TTL=600
+_CAT_LOCK=threading.Lock()
+def _canon(name):
+    c=re.sub(r'[^a-z0-9]+','',str(name or '').lower())
+    if any(k in c for k in ('google','gmail','youtube')):return 'google'
+    if 'twitter' in c or c in ('x','xcom','xtwitter'):return 'twitter'
+    return c
+def _src_fetch(src):
+    if src in ('1','2','4'):items=web_catalog(int(src),'services')
+    else:items=[{'id':str(x.get('key') or x.get('id')),'name':str(x.get('name') or x.get('service_name') or x.get('key') or x.get('id'))} for x in normalize(get_services('regular' if src=='3r' else 'plus')) if isinstance(x,dict)]
+    return [i for i in items if i.get('id') and i.get('name')]
+def _src_get(src):
+    hit=_SRC_CACHE.get(src)
+    if hit and time.time()-hit[0]<_SRC_TTL:return hit[1],True
+    try:
+        items=_src_fetch(src);_SRC_CACHE[src]=(time.time(),items);return items,True
+    except Exception:
+        app.logger.warning('Katalog sumber %s gagal',src,exc_info=False)
+        return (hit[1] if hit else []),False
+_CAT_MERGED={'t':0,'data':None}
+@app.get('/api/catalog')
+def catalog_all():
+    """Semua layanan Server 1–4 digabung per aplikasi. Harga/stok TIDAK ada di sini (diambil real-time saat memilih)."""
+    if not uid():return err('Login diperlukan',401)
+    m=_CAT_MERGED
+    if m['data'] and time.time()-m['t']<_SRC_TTL:return jsonify(m['data'])
+    with _CAT_LOCK:
+        if m['data'] and time.time()-m['t']<_SRC_TTL:return jsonify(m['data'])
+        srcs=['1','2','3r','3p','4']
+        with ThreadPoolExecutor(5) as ex:res=dict(zip(srcs,ex.map(_src_get,srcs)))
+        apps={};ok=[]
+        for s in srcs:
+            items,good=res[s]
+            if good:ok.append(s)
+            for it in items:
+                k=_canon(it['name']) or _canon(it['id'])
+                if not k:continue
+                a=apps.setdefault(k,{'k':k,'n':it['name'],'s':{}})
+                a['s'].setdefault(s,it['id'])
+                if k=='google':a['n']='Google/Youtube/Gmail'
+                elif len(it['name'])<len(a['n']) and a['n'].lower()==a['n']:a['n']=it['name']
+        for a in apps.values():
+            if a['n']==a['n'].lower() or a['n']==a['n'].upper():a['n']=a['n'].title()
+        out=sorted(apps.values(),key=lambda a:a['n'].lower())
+        data={'items':out,'sources':ok}
+        if len(ok)==len(srcs):m['t']=time.time();m['data']=data
+        elif out:m['t']=time.time()-_SRC_TTL+60;m['data']=data   # sebagian gagal: coba lagi dalam 1 menit
+    return jsonify(data)
+
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
 if __name__=='__main__':app.run(port=int(os.getenv('PORT','8080')),debug=os.getenv('WEB_DEV')=='1')
