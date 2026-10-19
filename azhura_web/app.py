@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from base64 import b64encode
 from premotp import create_qris as prem_create_qris, qris_id as prem_qris_id, qris_ref_id as prem_qris_ref_id, qris_total_payment as prem_qris_total, qr_image_bytes as prem_qr_image
 import requests, psycopg
+from werkzeug.security import generate_password_hash, check_password_hash
+import mimetypes, re
 import psycopg.sql
 from psycopg.rows import dict_row
 from flask import Flask, request, jsonify, send_from_directory, session, Response
@@ -35,7 +37,7 @@ def hitung_harga_jual_idr(harga_modal_rp):
 from premotp import get_services, get_countries, get_offers, create_order as prem_buy, get_order as prem_status
 app=Flask(__name__,static_folder='static',static_url_path='/static')
 app.secret_key=os.environ['WEB_SESSION_SECRET']
-app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SECURE=os.getenv('WEB_DEV')!='1',SESSION_COOKIE_SAMESITE='Lax',PERMANENT_SESSION_LIFETIME=86400,MAX_CONTENT_LENGTH=16384)
+app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SECURE=os.getenv('WEB_DEV')!='1',SESSION_COOKIE_SAMESITE='Lax',PERMANENT_SESSION_LIFETIME=86400,MAX_CONTENT_LENGTH=6*1024*1024)
 BOT_TOKEN=os.environ['BOT_TOKEN']; DB=os.environ['DATABASE_URL']; BOT_USERNAME=os.environ.get('BOT_USERNAME','').lstrip('@')
 GOOGLE_ID=os.getenv('GOOGLE_CLIENT_ID',''); ENABLE_ORDER=os.getenv('WEB_ORDER_ENABLED','false').lower()=='true'
 def conn():return psycopg.connect(DB,row_factory=dict_row)
@@ -58,6 +60,13 @@ def google_tables(db):
     db.execute('ALTER TABLE azhura_web_google_links ADD COLUMN IF NOT EXISTS name TEXT')
     db.execute('CREATE SEQUENCE IF NOT EXISTS azhura_web_google_vid_seq')
     _G_READY=True
+def email_tables(db):
+    db.execute("CREATE TABLE IF NOT EXISTS azhura_web_email_accounts (email TEXT PRIMARY KEY, telegram_id BIGINT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    db.execute("CREATE SEQUENCE IF NOT EXISTS azhura_web_email_vid_seq")
+def email_account_id(db,email):
+    email_tables(db)
+    row=db.execute('SELECT telegram_id FROM azhura_web_email_accounts WHERE email=%s',(email,)).fetchone()
+    return int(row['telegram_id']) if row else None
 def virtual_is_empty(db,tid):
     """True bila akun virtual Google belum punya saldo/transaksi apa pun (aman dihapus saat digabung)."""
     row=db.execute('SELECT balance FROM users WHERE telegram_id=%s',(tid,)).fetchone()
@@ -70,7 +79,7 @@ def virtual_is_empty(db,tid):
 def err(msg,status=400):return jsonify(error=msg),status
 @app.before_request
 def csrf():
-    if request.method in ('POST','PUT','DELETE') and uid() and request.path not in ('/api/auth/telegram','/api/auth/google'):
+    if request.method in ('POST','PUT','DELETE') and uid() and request.path not in ('/api/auth/telegram','/api/auth/google','/api/auth/email/register','/api/auth/email/login'):
         if not hmac.compare_digest(str(request.headers.get('X-CSRF-Token','')),str(session.get('csrf','missing'))):return err('Sesi tidak valid. Muat ulang halaman.',403)
 def login(user):
     session.clear();session.permanent=True;session['uid']=int(user);session['csrf']=secrets.token_urlsafe(32)
@@ -91,6 +100,29 @@ def telegram():
         digest=hmac.new(hashlib.sha256(BOT_TOKEN.encode()).digest(),check.encode(),hashlib.sha256).hexdigest()
         if not hmac.compare_digest(digest,str(d.get('hash',''))):raise ValueError()
         user=int(items['id'])
+        if uid() and is_virtual(uid()):
+            with conn() as db:
+                email_tables(db)
+                source=int(uid())
+                target_exists=db.execute('SELECT 1 FROM users WHERE telegram_id=%s',(user,)).fetchone()
+                if target_exists:
+                    if not virtual_is_empty(db,source):return err('Akun web ini sudah memiliki saldo atau riwayat. Akun Telegram tujuan sudah ada; hubungi CS agar penggabungan dapat diperiksa dengan aman.',409)
+                    if db.execute('SELECT 1 FROM azhura_web_google_links WHERE telegram_id=%s',(user,)).fetchone() or db.execute('SELECT 1 FROM azhura_web_email_accounts WHERE telegram_id=%s',(user,)).fetchone():
+                        return err('Akun Telegram tujuan sudah terhubung ke login email/Google lain.',409)
+                    db.execute('DELETE FROM users WHERE telegram_id=%s',(source,))
+                    db.execute('UPDATE azhura_web_google_links SET telegram_id=%s WHERE telegram_id=%s',(user,source))
+                    db.execute('UPDATE azhura_web_email_accounts SET telegram_id=%s WHERE telegram_id=%s',(user,source))
+                    login(user);return jsonify(ok=True,csrf=session['csrf'],linked=True)
+                
+                # Preserve the account balance and histories by re-keying rows in one DB transaction.
+                tables=db.execute("SELECT DISTINCT table_name FROM information_schema.columns WHERE table_schema='public' AND column_name='telegram_id' AND table_name NOT IN ('users','azhura_web_google_links','azhura_web_email_accounts','azhura_web_quotes')").fetchall()
+                for t in tables:
+                    ident=psycopg.sql.Identifier(t['table_name'])
+                    db.execute(psycopg.sql.SQL('UPDATE {} SET telegram_id=%s WHERE telegram_id=%s').format(ident),(user,source))
+                db.execute('UPDATE users SET telegram_id=%s WHERE telegram_id=%s',(user,source))
+                db.execute('UPDATE azhura_web_email_accounts SET telegram_id=%s WHERE telegram_id=%s',(user,source))
+                db.execute('UPDATE azhura_web_google_links SET telegram_id=%s WHERE telegram_id=%s',(user,source))
+            login(user);return jsonify(ok=True,csrf=session['csrf'],linked=True)
         if not query('SELECT 1 FROM users WHERE telegram_id=%s',(user,)):return err('Silakan /start bot Telegram dahulu.',403)
         login(user);return jsonify(ok=True,csrf=session['csrf'])
     except (ValueError,KeyError,TypeError):return err('Verifikasi Telegram gagal',401)
@@ -100,6 +132,32 @@ def google_claims(credential):
     if d.get('aud')!=GOOGLE_ID or d.get('iss') not in ('accounts.google.com','https://accounts.google.com') or d.get('email_verified') not in (True,'true'):raise ValueError('Token Google tidak valid')
     if int(d.get('exp',0))<=time.time():raise ValueError('Token kedaluwarsa')
     return d
+@app.post('/api/auth/email/register')
+def email_register():
+    d=request.get_json(silent=True) or {}; email=str(d.get('email','')).strip().lower(); password=str(d.get('password','')); name=str(d.get('name','Pengguna')).strip()[:60] or 'Pengguna'
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+",email) or len(email)>200:return err('Format email tidak valid.')
+    if len(password)<10:return err('Kata sandi minimal 10 karakter.')
+    if len(password)>256:return err('Kata sandi terlalu panjang.')
+    try:
+        with conn() as db:
+            email_tables(db)
+            if db.execute('SELECT 1 FROM azhura_web_email_accounts WHERE email=%s',(email,)).fetchone():return err('Email sudah terdaftar. Silakan masuk.',409)
+            n=db.execute("SELECT nextval('azhura_web_email_vid_seq') AS n").fetchone()['n']; tid=-(2*VID_BASE+int(n))
+            db.execute('INSERT INTO users(telegram_id,username,first_name,balance,created_at) VALUES(%s,NULL,%s,0,%s)',(tid,name,datetime.now(timezone.utc).isoformat()))
+            db.execute('INSERT INTO azhura_web_email_accounts(email,telegram_id,password_hash) VALUES(%s,%s,%s)',(email,tid,generate_password_hash(password)))
+        login(tid);return jsonify(ok=True,csrf=session['csrf'])
+    except psycopg.Error:
+        app.logger.exception('Email registration failed');return err('Pendaftaran gagal sementara. Coba lagi.',503)
+@app.post('/api/auth/email/login')
+def email_login():
+    d=request.get_json(silent=True) or {};email=str(d.get('email','')).strip().lower();password=str(d.get('password',''))
+    try:
+        with conn() as db:
+            email_tables(db);row=db.execute('SELECT telegram_id,password_hash FROM azhura_web_email_accounts WHERE email=%s',(email,)).fetchone()
+        if not row or not check_password_hash(row['password_hash'],password):return err('Email atau kata sandi salah.',401)
+        login(int(row['telegram_id']));return jsonify(ok=True,csrf=session['csrf'])
+    except psycopg.Error:
+        app.logger.exception('Email login failed');return err('Login gagal sementara. Coba lagi.',503)
 @app.post('/api/auth/google')
 def google_login():
     if not GOOGLE_ID:return err('Login Google belum dikonfigurasi',503)
@@ -160,12 +218,16 @@ def me():
             pn=query('SELECT display_name FROM azhura_web_profile WHERE telegram_id=%s',(uid(),))
             if pn:u['first_name']=pn[0]['display_name']
         except psycopg.Error:pass   # tabel profil belum dibuat: pakai nama dari users
-        u['google_only']=is_virtual(u['telegram_id']);u['email']=None
+        u['google_only']=is_virtual(u['telegram_id']);u['email']=None;u['email_account']=False
         if u['google_only']:
             try:
                 g=query('SELECT email FROM azhura_web_google_links WHERE telegram_id=%s',(u['telegram_id'],))
                 u['email']=g[0]['email'] if g else None
             except psycopg.Error:pass
+        try:
+            e=query('SELECT email FROM azhura_web_email_accounts WHERE telegram_id=%s',(u['telegram_id'],))
+            if e:u['email']=e[0]['email'];u['email_account']=True
+        except psycopg.Error:pass
     return jsonify(user=u,csrf=session.get('csrf',''),is_admin=web_is_admin())
 @app.get('/api/deposits')
 def web_deposits():
@@ -828,6 +890,54 @@ def web_finish_order():
         finally:lock_db.execute('SELECT pg_advisory_unlock(hashtext(%s))',(oid,))
 
 
+# --- Live chat: messages and optional attachments stored in PostgreSQL (survive Railway restarts). ---
+def chat_tables(db):
+    db.execute("CREATE TABLE IF NOT EXISTS azhura_web_chat_messages (id BIGSERIAL PRIMARY KEY, telegram_id BIGINT NOT NULL, sender TEXT NOT NULL CHECK(sender IN ('user','admin')), message TEXT NOT NULL DEFAULT '', filename TEXT, mime_type TEXT, file_data BYTEA, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+@app.get('/api/chat/messages')
+def chat_messages():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    try:
+        with conn() as db:
+            chat_tables(db)
+            if web_is_admin():
+                target=request.args.get('user_id',type=int)
+                if target is None:
+                    rows=db.execute("SELECT DISTINCT telegram_id FROM azhura_web_chat_messages ORDER BY telegram_id DESC LIMIT 100").fetchall()
+                    return jsonify(users=[{'user_id':int(r['telegram_id'])} for r in rows])
+                rows=db.execute('SELECT id,telegram_id,sender,message,filename,mime_type,created_at FROM azhura_web_chat_messages WHERE telegram_id=%s ORDER BY id ASC LIMIT 200',(target,)).fetchall()
+            else:rows=db.execute('SELECT id,telegram_id,sender,message,filename,mime_type,created_at FROM azhura_web_chat_messages WHERE telegram_id=%s ORDER BY id ASC LIMIT 200',(uid(),)).fetchall()
+        return jsonify(messages=[{**r,'id':int(r['id']),'telegram_id':int(r['telegram_id']),'created_at':r['created_at'].isoformat(),'file_url':('/api/chat/file/'+str(r['id']) if r['filename'] else None)} for r in rows])
+    except psycopg.Error:app.logger.exception('Chat read failed');return err('Chat sementara tidak tersedia.',503)
+@app.post('/api/chat/messages')
+def chat_send():
+    if not uid():return err('Silakan login terlebih dahulu.',401)
+    if web_is_admin():
+        target=request.form.get('user_id',type=int)
+        if target is None:return err('Pilih pengguna tujuan chat.')
+    else:target=int(uid())
+    msg=(request.form.get('message') or '').strip()[:3000]
+    f=request.files.get('file');data=None;filename=None;mime=None
+    if f and f.filename:
+        filename=Path(f.filename).name[:180];mime=(f.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream')[:120];data=f.read(5*1024*1024+1)
+        if len(data)>5*1024*1024:return err('Ukuran file maksimal 5 MB.')
+        if not (mime.startswith('image/') or mime in ('application/pdf','text/plain','application/zip','application/octet-stream','application/vnd.openxmlformats-officedocument.wordprocessingml.document')):return err('Jenis file belum didukung.')
+    if not msg and not data:return err('Tulis pesan atau pilih file.')
+    sender='admin' if web_is_admin() else 'user'
+    try:
+        with conn() as db:
+            chat_tables(db);db.execute('INSERT INTO azhura_web_chat_messages(telegram_id,sender,message,filename,mime_type,file_data) VALUES(%s,%s,%s,%s,%s,%s)',(target,sender,msg,filename,mime,data))
+        return jsonify(ok=True)
+    except psycopg.Error:app.logger.exception('Chat send failed');return err('Pesan belum terkirim. Coba lagi.',503)
+@app.get('/api/chat/file/<int:message_id>')
+def chat_file(message_id):
+    if not uid():return err('Login diperlukan.',401)
+    try:
+        with conn() as db:
+            chat_tables(db);row=db.execute('SELECT telegram_id,filename,mime_type,file_data FROM azhura_web_chat_messages WHERE id=%s',(message_id,)).fetchone()
+        if not row or not row['filename'] or (int(row['telegram_id'])!=int(uid()) and not web_is_admin()):return err('File tidak ditemukan.',404)
+        return Response(bytes(row['file_data']),mimetype=row['mime_type'],headers={'Content-Disposition':f"inline; filename*=UTF-8''{requests.utils.quote(row['filename'])}",'X-Content-Type-Options':'nosniff'})
+    except psycopg.Error:app.logger.exception('Chat file failed');return err('File tidak tersedia.',503)
+
 # --- AZHURA WEB ADMIN: isolated admin endpoints; bot handlers are untouched. ---
 ADMIN_WEB_ID = int(os.getenv('ADMIN_ID', '0') or '0')
 WEB_MAINT_KEYS = {'web': 'azhura_web_maintenance', '1': 'azhura_web_server_1_maintenance',
@@ -888,6 +998,11 @@ def web_smm_maintenance_guard():
 def web_public_status():
     try:return jsonify(maintenance=web_maintenance_flags(),admin=web_is_admin())
     except psycopg.Error:return err('Status layanan tidak tersedia.',503)
+
+@app.get('/admin/chat')
+def web_admin_chat_page():
+    if not web_is_admin():return err('Halaman khusus admin. Login sebagai admin terlebih dahulu.',403)
+    return send_from_directory('static','chat-admin.html')
 
 @app.get('/admin')
 def web_admin_page():
