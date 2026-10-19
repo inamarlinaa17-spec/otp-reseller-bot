@@ -218,7 +218,7 @@ def me():
             pn=query('SELECT display_name FROM azhura_web_profile WHERE telegram_id=%s',(uid(),))
             if pn:u['first_name']=pn[0]['display_name']
         except psycopg.Error:pass   # tabel profil belum dibuat: pakai nama dari users
-        u['google_only']=is_virtual(u['telegram_id']);u['email']=None;u['email_account']=False
+        u['google_only']=is_virtual(u['telegram_id']);u['email']=None;u['email_account']=False;u['telegram_linked']=not is_virtual(u['telegram_id']);u['google_linked']=False
         if u['google_only']:
             try:
                 g=query('SELECT email FROM azhura_web_google_links WHERE telegram_id=%s',(u['telegram_id'],))
@@ -893,6 +893,7 @@ def web_finish_order():
 # --- Live chat: messages and optional attachments stored in PostgreSQL (survive Railway restarts). ---
 def chat_tables(db):
     db.execute("CREATE TABLE IF NOT EXISTS azhura_web_chat_messages (id BIGSERIAL PRIMARY KEY, telegram_id BIGINT NOT NULL, sender TEXT NOT NULL CHECK(sender IN ('user','admin')), message TEXT NOT NULL DEFAULT '', filename TEXT, mime_type TEXT, file_data BYTEA, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    db.execute('ALTER TABLE azhura_web_chat_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ')
 @app.get('/api/chat/messages')
 def chat_messages():
     if not uid():return err('Silakan login terlebih dahulu.',401)
@@ -902,10 +903,13 @@ def chat_messages():
             if web_is_admin():
                 target=request.args.get('user_id',type=int)
                 if target is None:
-                    rows=db.execute("SELECT DISTINCT telegram_id FROM azhura_web_chat_messages ORDER BY telegram_id DESC LIMIT 100").fetchall()
-                    return jsonify(users=[{'user_id':int(r['telegram_id'])} for r in rows])
+                    rows=db.execute("SELECT telegram_id, MAX(created_at) last_at, (ARRAY_AGG(message ORDER BY id DESC))[1] last_message, COUNT(*) FILTER (WHERE sender='user' AND read_at IS NULL) unread, BOOL_OR(sender='user' AND read_at IS NULL) needs_reply FROM azhura_web_chat_messages GROUP BY telegram_id ORDER BY MAX(created_at) DESC LIMIT 100").fetchall()
+                    return jsonify(users=[{'user_id':int(r['telegram_id']),'last_message':r['last_message'] or '📷 Gambar/lampiran','unread':int(r['unread'] or 0),'needs_reply':bool(r['needs_reply']),'last_at':r['last_at'].isoformat()} for r in rows])
+                db.execute("UPDATE azhura_web_chat_messages SET read_at=NOW() WHERE telegram_id=%s AND sender='user' AND read_at IS NULL",(target,))
                 rows=db.execute('SELECT id,telegram_id,sender,message,filename,mime_type,created_at FROM azhura_web_chat_messages WHERE telegram_id=%s ORDER BY id ASC LIMIT 200',(target,)).fetchall()
-            else:rows=db.execute('SELECT id,telegram_id,sender,message,filename,mime_type,created_at FROM azhura_web_chat_messages WHERE telegram_id=%s ORDER BY id ASC LIMIT 200',(uid(),)).fetchall()
+            else:
+                db.execute("UPDATE azhura_web_chat_messages SET read_at=NOW() WHERE telegram_id=%s AND sender='admin' AND read_at IS NULL",(uid(),))
+                rows=db.execute('SELECT id,telegram_id,sender,message,filename,mime_type,created_at FROM azhura_web_chat_messages WHERE telegram_id=%s ORDER BY id ASC LIMIT 200',(uid(),)).fetchall()
         return jsonify(messages=[{**r,'id':int(r['id']),'telegram_id':int(r['telegram_id']),'created_at':r['created_at'].isoformat(),'file_url':('/api/chat/file/'+str(r['id']) if r['filename'] else None)} for r in rows])
     except psycopg.Error:app.logger.exception('Chat read failed');return err('Chat sementara tidak tersedia.',503)
 @app.post('/api/chat/messages')
@@ -921,6 +925,7 @@ def chat_send():
         filename=Path(f.filename).name[:180];mime=(f.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream')[:120];data=f.read(5*1024*1024+1)
         if len(data)>5*1024*1024:return err('Ukuran file maksimal 5 MB.')
         if not (mime.startswith('image/') or mime in ('application/pdf','text/plain','application/zip','application/octet-stream','application/vnd.openxmlformats-officedocument.wordprocessingml.document')):return err('Jenis file belum didukung.')
+        if mime.startswith('image/') and mime not in ('image/png','image/jpeg','image/webp','image/gif'):return err('Gambar harus PNG, JPG, WebP, atau GIF.')
     if not msg and not data:return err('Tulis pesan atau pilih file.')
     sender='admin' if web_is_admin() else 'user'
     try:
@@ -1730,6 +1735,9 @@ def v2_init(db):
         db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_slug TEXT')
         db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_name TEXT')
         db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_enabled BOOLEAN NOT NULL DEFAULT TRUE')
+        db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_telegram_url TEXT')
+        db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_telegram_info TEXT')
+        db.execute('ALTER TABLE reseller_bots ADD COLUMN IF NOT EXISTS site_whatsapp TEXT')
         db.execute('CREATE UNIQUE INDEX IF NOT EXISTS reseller_bots_site_slug_uq ON reseller_bots (LOWER(site_slug)) WHERE site_slug IS NOT NULL')
         db.execute('CREATE TABLE IF NOT EXISTS azhura_web_profile (telegram_id BIGINT PRIMARY KEY, display_name TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())')
         _V2_READY=True
@@ -1771,6 +1779,7 @@ def _public_site(row):
     cs=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64]
     return {'slug':row['site_slug'],'name':str(row.get('site_name') or row.get('bot_name') or row.get('bot_username') or 'Toko OTP')[:64],
             'bot_username':str(row.get('bot_username') or '').lstrip('@')[:64],'cs_username':cs,
+            'telegram_url':row.get('site_telegram_url') or TG_CHANNEL_URL, 'telegram_info':row.get('site_telegram_info') or ('INFO '+str(row.get('bot_name') or row.get('bot_username') or 'NOKOS').upper()), 'whatsapp':row.get('site_whatsapp') or '',
             'logo':'/api/site/%s/logo'%row['site_slug']}
 
 @app.get('/r/<slug>')
@@ -1858,15 +1867,15 @@ def _mask_phone(p):
 def _site_info_for_owner(row):
     with conn() as db:
         v2_init(db)
-        cur=db.execute('SELECT id,site_slug,site_name,site_enabled,bot_username,bot_name FROM reseller_bots WHERE id=%s',(row['id'],)).fetchone()
+        cur=db.execute('SELECT id,site_slug,site_name,site_enabled,bot_username,bot_name,site_telegram_url,site_telegram_info,site_whatsapp FROM reseller_bots WHERE id=%s',(row['id'],)).fetchone()
         if cur and not cur['site_slug']:
             slug=_default_slug(db,cur)
             try:db.execute('UPDATE reseller_bots SET site_slug=%s WHERE id=%s AND site_slug IS NULL',(slug,cur['id']))
             except psycopg.errors.UniqueViolation:pass
-            cur=db.execute('SELECT id,site_slug,site_name,site_enabled,bot_username,bot_name FROM reseller_bots WHERE id=%s',(row['id'],)).fetchone()
+            cur=db.execute('SELECT id,site_slug,site_name,site_enabled,bot_username,bot_name,site_telegram_url,site_telegram_info,site_whatsapp FROM reseller_bots WHERE id=%s',(row['id'],)).fetchone()
     base=request.host_url.rstrip('/')
     return {'slug':cur['site_slug'],'url':base+'/r/'+cur['site_slug'],'name':cur['site_name'] or cur['bot_name'] or cur['bot_username'] or '',
-            'custom_name':cur['site_name'] or '','enabled':bool(cur['site_enabled'])}
+            'custom_name':cur['site_name'] or '','enabled':bool(cur['site_enabled']), 'telegram_url':cur.get('site_telegram_url') or TG_CHANNEL_URL, 'telegram_info':cur.get('site_telegram_info') or ('INFO '+str(cur.get('bot_name') or cur.get('bot_username') or 'NOKOS').upper()), 'whatsapp':cur.get('site_whatsapp') or ''}
 
 @app.get('/api/rsdash/overview')
 def rsdash_overview():
@@ -1919,6 +1928,13 @@ def rsdash_site():
         if 'enabled' in d:
             if type(d['enabled']) is not bool:return err('Nilai tidak valid')
             sets.append('site_enabled=%s');args.append(d['enabled'])
+        for key,col,limit in [('telegram_url','site_telegram_url',300),('telegram_info','site_telegram_info',80),('whatsapp','site_whatsapp',20)]:
+            if key in d:
+                val=str(d.get(key) or '').strip()[:limit]
+                if key=='telegram_url' and val and not re.match(r'^https://t\.me/[A-Za-z0-9_/?=-]+$',val):return err('Link Telegram harus berupa https://t.me/...')
+                if key=='whatsapp' and val and not re.fullmatch(r'\+?[0-9]{8,16}',val):return err('Nomor WhatsApp harus berisi 8–16 digit, boleh diawali +.')
+                if key=='telegram_info' and re.search(r'[<>\x00-\x1f]',val):return err('Informasi Telegram tidak valid.')
+                sets.append(col+'=%s');args.append(val or None)
         if not sets:return err('Tidak ada perubahan.')
         try:db.execute('UPDATE reseller_bots SET '+','.join(sets)+' WHERE id=%s',tuple(args)+(row['id'],))
         except psycopg.errors.UniqueViolation:return err('Link sudah dipakai reseller lain.')
