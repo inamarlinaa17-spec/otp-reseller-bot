@@ -219,11 +219,13 @@ def me():
             if pn:u['first_name']=pn[0]['display_name']
         except psycopg.Error:pass   # tabel profil belum dibuat: pakai nama dari users
         u['google_only']=is_virtual(u['telegram_id']);u['email']=None;u['email_account']=False;u['telegram_linked']=not is_virtual(u['telegram_id']);u['google_linked']=False
-        if u['google_only']:
-            try:
-                g=query('SELECT email FROM azhura_web_google_links WHERE telegram_id=%s',(u['telegram_id'],))
-                u['email']=g[0]['email'] if g else None
-            except psycopg.Error:pass
+        # Status Google: berlaku untuk akun Google-only MAUPUN akun Telegram yang menautkan Google lewat Profil.
+        try:
+            g=query('SELECT email FROM azhura_web_google_links WHERE telegram_id=%s',(u['telegram_id'],))
+            if g:
+                u['google_linked']=True
+                if u['google_only'] or not u['email']:u['email']=g[0]['email']
+        except psycopg.Error:pass
         try:
             e=query('SELECT email FROM azhura_web_email_accounts WHERE telegram_id=%s',(u['telegram_id'],))
             if e:u['email']=e[0]['email'];u['email_account']=True
@@ -1616,9 +1618,12 @@ def _brand_row():
 def web_brand():
     row=_brand_row()
     if not row:return jsonify(ok=True,reseller=False)
-    return jsonify(ok=True,reseller=True,name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
+    resp=jsonify(ok=True,reseller=True,name=str(row.get('bot_name') or row.get('bot_username') or '')[:64],
                    username=str(row.get('bot_username') or '').lstrip('@')[:64],
-                   cs_username=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64])
+                   cs_username=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64],
+                   **_site_contact(row))
+    resp.headers['Cache-Control']='private, no-store'   # pengaturan reseller harus selalu terbaru & tidak dibagi antar sesi
+    return resp
 
 @app.get('/api/brand/logo')
 def web_brand_logo():
@@ -1726,6 +1731,15 @@ SLUG_RE=re.compile(r'^[a-z0-9](?:[a-z0-9-]{1,28})[a-z0-9]$')
 SLUG_RESERVED={'admin','api','static','r','www','app','login','azhura','support','help','info','null','undefined'}
 TG_CHANNEL_URL='https://t.me/infonokosazhura'
 
+def _site_contact(row):
+    """Link Join Telegram, teks INFO, dan WhatsApp milik SATU reseller (dari baris reseller_bots-nya).
+    Bila reseller belum mengisi: link -> bot Telegram reseller itu sendiri (bukan channel bot utama), teks -> 'INFO <NAMA BOT>'."""
+    bu=str(row.get('bot_username') or '').lstrip('@')[:64]
+    nm=str(row.get('bot_name') or row.get('bot_username') or 'NOKOS')
+    return {'telegram_url':row.get('site_telegram_url') or (('https://t.me/'+bu) if bu else TG_CHANNEL_URL),
+            'telegram_info':row.get('site_telegram_info') or ('INFO '+nm.upper()),
+            'whatsapp':row.get('site_whatsapp') or ''}
+
 def v2_init(db):
     """Tambah kolom/tabel baru secara aman (IF NOT EXISTS). Tidak mengubah data lama."""
     global _V2_READY
@@ -1779,7 +1793,7 @@ def _public_site(row):
     cs=str(row.get('cs_url') or '').rstrip('/').rsplit('/',1)[-1].lstrip('@')[:64]
     return {'slug':row['site_slug'],'name':str(row.get('site_name') or row.get('bot_name') or row.get('bot_username') or 'Toko OTP')[:64],
             'bot_username':str(row.get('bot_username') or '').lstrip('@')[:64],'cs_username':cs,
-            'telegram_url':row.get('site_telegram_url') or TG_CHANNEL_URL, 'telegram_info':row.get('site_telegram_info') or ('INFO '+str(row.get('bot_name') or row.get('bot_username') or 'NOKOS').upper()), 'whatsapp':row.get('site_whatsapp') or '',
+            **_site_contact(row),
             'logo':'/api/site/%s/logo'%row['site_slug']}
 
 @app.get('/r/<slug>')
@@ -1875,7 +1889,7 @@ def _site_info_for_owner(row):
             cur=db.execute('SELECT id,site_slug,site_name,site_enabled,bot_username,bot_name,site_telegram_url,site_telegram_info,site_whatsapp FROM reseller_bots WHERE id=%s',(row['id'],)).fetchone()
     base=request.host_url.rstrip('/')
     return {'slug':cur['site_slug'],'url':base+'/r/'+cur['site_slug'],'name':cur['site_name'] or cur['bot_name'] or cur['bot_username'] or '',
-            'custom_name':cur['site_name'] or '','enabled':bool(cur['site_enabled']), 'telegram_url':cur.get('site_telegram_url') or TG_CHANNEL_URL, 'telegram_info':cur.get('site_telegram_info') or ('INFO '+str(cur.get('bot_name') or cur.get('bot_username') or 'NOKOS').upper()), 'whatsapp':cur.get('site_whatsapp') or ''}
+            'custom_name':cur['site_name'] or '','enabled':bool(cur['site_enabled']), 'telegram_url':cur.get('site_telegram_url') or '', 'telegram_info':cur.get('site_telegram_info') or '', 'whatsapp':cur.get('site_whatsapp') or ''}
 
 @app.get('/api/rsdash/overview')
 def rsdash_overview():
