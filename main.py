@@ -7763,6 +7763,33 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
     # CANCEL / REFUND
     # =====================================================
 
+    # WhatsApp Ready To Use: code entry is handled directly in Telegram by an authorized admin.
+    if query.data.startswith("wa_code:"):
+        if not is_admin(user_id):
+            await query.answer("Akses khusus admin.", show_alert=True)
+            return
+        order_id = query.data.split(":", 1)[1]
+        try:
+            with get_db() as db:
+                row = db.execute("SELECT order_id, phone, status, otp_code FROM azhura_wa_orders WHERE order_id=%s", (order_id,)).fetchone()
+            if not row or row.get("otp_code"):
+                await query.answer("Pesanan tidak ditemukan atau kode sudah dikirim.", show_alert=True)
+                return
+            if str(row.get("status") or "").upper() != "WAITING_CODE":
+                await query.answer(f"Pesanan sudah {row.get('status')} (mis. direfund user). Kode tidak dapat dikirim.", show_alert=True)
+                return
+            context.user_data["wa_code_order_id"] = order_id
+            await query.message.reply_text(
+                f"Kirim kode untuk pesanan <code>{escape(order_id)}</code>\nNomor: <code>{escape(row['phone'])}</code>\n\n"
+                "Ketik kode verifikasi sebagai pesan berikutnya. /batal untuk membatalkan.",
+                parse_mode="HTML"
+            )
+            await query.answer("Silakan masukkan kode melalui chat ini.")
+        except Exception:
+            logger.exception("WA code callback failed")
+            await query.answer("Gagal membuka pesanan.", show_alert=True)
+        return
+
     if data.startswith("otp_cancel:"):
         order_id = data.split(":", 1)[1]
 
@@ -7864,6 +7891,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
         # itself is still returned as quickly as possible after the checks.
         order = await asyncio.to_thread(get_order, order_id)
         user_id = query.from_user.id
+
         if not order:
             await query.answer("Order tidak ditemukan.", show_alert=True)
             return
@@ -10141,6 +10169,7 @@ async def button_handler(
         or query.data.startswith("otp_server:")
         or query.data.startswith("otp_resend:")
         or query.data.startswith("otp_cancel:")
+        or query.data.startswith("wa_code:")
     )
     if not deferred_callbacks:
         try:
@@ -10367,6 +10396,35 @@ async def text_handler(
 
     if not update.message:
 
+        return
+
+    # Admin enters WhatsApp Ready To Use verification code after tapping Telegram button.
+    if context.user_data.get("wa_code_order_id"):
+        if not is_admin(update.effective_user.id):
+            context.user_data.pop("wa_code_order_id", None)
+            return
+        text = (update.message.text or "").strip()
+        if text.lower() in {"/batal", "batal", "cancel"}:
+            context.user_data.pop("wa_code_order_id", None)
+            await update.message.reply_text("Pengiriman kode dibatalkan.")
+            return
+        order_id = context.user_data["wa_code_order_id"]
+        if not text or len(text) > 40 or len(text.split()) != 1:
+            await update.message.reply_text("Kode tidak valid. Kirim satu kode saja atau /batal.")
+            return
+        try:
+            with get_db() as db:
+                with db.transaction():
+                    row = db.execute("UPDATE azhura_wa_orders SET otp_code=%s,status='SUCCESS',completed_at=NOW() WHERE order_id=%s AND otp_code IS NULL AND status='WAITING_CODE' RETURNING telegram_id,phone,country", (text, order_id)).fetchone()
+            if not row:
+                await update.message.reply_text("Pesanan tidak valid, sudah direfund/selesai, atau kode sudah dikirim.")
+                context.user_data.pop("wa_code_order_id", None)
+                return
+            context.user_data.pop("wa_code_order_id", None)
+            await update.message.reply_text(f"✅ Kode terkirim ke pesanan {order_id}.")
+        except Exception:
+            logger.exception("Failed to save WA code for %s", order_id)
+            await update.message.reply_text("Gagal menyimpan kode. Coba lagi atau hubungi developer.")
         return
 
     # Alur menu RESELLER (input token, Contact CS, margin, withdraw).
