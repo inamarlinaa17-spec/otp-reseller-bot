@@ -1055,7 +1055,7 @@ def web_admin_orders():
     if search:where.append("(o.order_id ILIKE %s OR CAST(o.telegram_id AS TEXT) ILIKE %s OR COALESCE(o.service_name,o.service,'') ILIKE %s)");args.extend(['%'+search+'%']*3)
     sql='''SELECT o.order_id,o.telegram_id,u.username,COALESCE(o.service_name,o.service) service,
       COALESCE(o.country_name,o.country) country,o.provider,o.phone,o.sell_price,o.status,
-      o.refund_status,o.created_at,o.completed_at FROM orders o LEFT JOIN users u ON u.telegram_id=o.telegram_id
+      o.refund_status,o.created_at,o.completed_at,(COALESCE(o.otp_code,'')<>'' OR COALESCE(o.previous_otp_code,'')<>'') AS has_otp FROM orders o LEFT JOIN users u ON u.telegram_id=o.telegram_id
       WHERE '''+' AND '.join(where)+' ORDER BY o.id DESC LIMIT 200'
     return jsonify(items=query(sql,tuple(args)))
 
@@ -1078,6 +1078,165 @@ def web_admin_deposits():
       d.status,d.created_at,d.completed_at,d.confirmed_at FROM deposits d
       LEFT JOIN users u ON u.telegram_id=d.telegram_id WHERE '''+' AND '.join(where)+' ORDER BY d.id DESC LIMIT 200'
     return jsonify(items=query(sql,tuple(args)))
+
+# ---------------- Aksi admin: ACC/Tolak deposit manual & Batal+Refund / Tutup pesanan pending ----------------
+import html as _html
+def _tg_notify(chat_id,text,reseller_bot_id=None,edit_message_id=None):
+    """Kirim/ubah pesan Telegram ke user lewat bot yang dipakai user (bot utama atau bot reseller). Gagal = diabaikan."""
+    try:
+        cid=int(chat_id)
+        if cid<=0:return False   # akun web/Google tanpa chat Telegram
+        token=BOT_TOKEN
+        if reseller_bot_id:
+            from database import get_reseller_token
+            token=get_reseller_token(int(reseller_bot_id)) or BOT_TOKEN
+        base='https://api.telegram.org/bot%s/'%token
+        if edit_message_id:
+            r=requests.post(base+'editMessageText',json={'chat_id':cid,'message_id':int(edit_message_id),'text':text,'parse_mode':'HTML'},timeout=10)
+            if r.ok and r.json().get('ok'):return True
+        r=requests.post(base+'sendMessage',json={'chat_id':cid,'text':text,'parse_mode':'HTML'},timeout=10)
+        return bool(r.ok and r.json().get('ok'))
+    except Exception:
+        app.logger.warning('Notifikasi Telegram admin gagal chat=%s',chat_id,exc_info=False);return False
+def _idr(n):return 'Rp'+format(int(n or 0),',').replace(',','.')
+def _utcnow():return datetime.now(timezone.utc).isoformat()
+
+@app.post('/api/admin/deposits/<deposit_id>/approve')
+def web_admin_deposit_approve(deposit_id):
+    denied=web_admin_required()
+    if denied:return denied
+    if not re.fullmatch(r'[A-Za-z0-9_-]{3,60}',deposit_id):return err('ID deposit tidak valid')
+    # Sama dengan tombol "Terima & Tambah Saldo" di bot: satu transaksi, baris dikunci, hanya dari PENDING -> tidak bisa kredit ganda.
+    try:
+        with conn() as db:
+            dep=db.execute("SELECT deposit_id,telegram_id,amount,payment_method,status,user_message_id,reseller_bot_id FROM deposits WHERE deposit_id=%s FOR UPDATE",(deposit_id,)).fetchone()
+            if not dep:return err('Deposit tidak ditemukan.',404)
+            if dep['payment_method']!='MANUAL_QRIS':return err('Deposit ini bukan QRIS manual.',409)
+            if dep['status']=='SUCCESS':return err('Deposit sudah disetujui sebelumnya.',409)
+            if dep['status']!='PENDING':return err('Deposit berstatus %s dan tidak bisa disetujui.'%dep['status'],409)
+            usr=db.execute("SELECT balance FROM users WHERE telegram_id=%s FOR UPDATE",(dep['telegram_id'],)).fetchone()
+            if not usr:return err('User deposit tidak ditemukan.',404)
+            before=int(usr['balance'] or 0);amount=int(dep['amount']);bonus=int(amount*0.10) if amount>=100000 else 0;after=before+amount+bonus;ts=_utcnow()
+            db.execute("UPDATE users SET balance=%s WHERE telegram_id=%s",(after,dep['telegram_id']))
+            db.execute("INSERT INTO ledger (telegram_id,amount,balance_before,balance_after,transaction_type,reference,description,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",(dep['telegram_id'],amount,before,before+amount,'DEPOSIT',deposit_id,'Deposit QRIS Manual '+deposit_id,ts))
+            if bonus:db.execute("INSERT INTO ledger (telegram_id,amount,balance_before,balance_after,transaction_type,reference,description,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",(dep['telegram_id'],bonus,before+amount,after,'DEPOSIT_BONUS',deposit_id,'Bonus 10% deposit '+deposit_id,ts))
+            db.execute("UPDATE deposits SET status='SUCCESS', payment_reference=%s, completed_at=%s, confirmed_at=%s WHERE deposit_id=%s",('MANUAL-'+deposit_id,ts,ts,deposit_id))
+    except psycopg.Error:
+        app.logger.exception('Approve deposit gagal %s',deposit_id);return err('Gagal memproses deposit. Coba lagi.',503)
+    app.logger.info('ADMIN %s menyetujui deposit %s (+%s)',uid(),deposit_id,amount+bonus)
+    _tg_notify(dep['telegram_id'],'✅ <b>DEPOSIT MANUAL DISETUJUI</b>\n\n🧾 Deposit: <code>%s</code>\n💰 Deposit: <b>%s</b>\n%s💳 Total masuk: <b>%s</b>\n💰 Saldo sekarang: <b>%s</b>'%(_html.escape(deposit_id),_idr(amount),('🎁 Bonus 10%%: <b>%s</b>\n'%_idr(bonus)) if bonus else '',_idr(amount+bonus),_idr(after)),dep.get('reseller_bot_id'),dep.get('user_message_id'))
+    return jsonify(ok=True,status='SUCCESS',credited=amount+bonus,balance=after)
+
+@app.post('/api/admin/deposits/<deposit_id>/reject')
+def web_admin_deposit_reject(deposit_id):
+    denied=web_admin_required()
+    if denied:return denied
+    if not re.fullmatch(r'[A-Za-z0-9_-]{3,60}',deposit_id):return err('ID deposit tidak valid')
+    try:
+        with conn() as db:
+            dep=db.execute("SELECT telegram_id,status,amount,payment_amount,unique_code,payment_method,reseller_bot_id FROM deposits WHERE deposit_id=%s FOR UPDATE",(deposit_id,)).fetchone()
+            if not dep:return err('Deposit tidak ditemukan.',404)
+            if dep['payment_method']!='MANUAL_QRIS':return err('Deposit ini bukan QRIS manual.',409)
+            if dep['status']!='PENDING':return err('Deposit sudah tidak pending.',409)
+            db.execute("UPDATE deposits SET status='FAILED', confirmed_at=%s WHERE deposit_id=%s AND status='PENDING'",(_utcnow(),deposit_id))
+    except psycopg.Error:
+        app.logger.exception('Reject deposit gagal %s',deposit_id);return err('Gagal memproses deposit. Coba lagi.',503)
+    app.logger.info('ADMIN %s menolak deposit %s',uid(),deposit_id)
+    _tg_notify(dep['telegram_id'],'❌ <b>KONFIRMASI DEPOSIT QRIS MANUAL DITOLAK</b>\n\n🧾 Deposit: <code>%s</code>\n💰 Saldo: <b>%s</b>\n💸 Transfer: <b>%s</b>\n🔢 Kode unik: <b>%03d</b>\n\nSilakan hubungi admin jika kamu sudah melakukan pembayaran.'%(_html.escape(deposit_id),_idr(dep['amount']),_idr(dep['payment_amount']),int(dep['unique_code'] or 0)),dep.get('reseller_bot_id'))
+    return jsonify(ok=True,status='FAILED')
+
+def _admin_provider_cancel(provider,pid,oid):
+    """Minta vendor membatalkan lalu verifikasi. Return (state,pesan); state: 'ok' (vendor batal/expired, aman refund), 'otp' (OTP sudah masuk), 'retry'."""
+    provider=str(provider or '').lower();terminal=('cancel','canceled','cancelled','expired','expire','timeout','timed_out')
+    if provider=='5sim':
+        from azhura_web.web_servers import get5
+        try:
+            key=os.getenv('FIVESIM_API_KEY','').strip()
+            if not key:raise RuntimeError('Kunci 5SIM belum tersedia')
+            requests.get('https://5sim.net/v1/user/cancel/'+str(pid),headers={'Authorization':'Bearer '+key,'Accept':'application/json'},timeout=20)
+        except (requests.RequestException,RuntimeError):app.logger.warning('Admin cancel 5SIM request gagal order=%s',oid)
+        st=get5('user/check/'+str(pid),auth=True) or {}
+        if st.get('sms'):return 'otp','OTP sudah masuk di Server 1.'
+        if str(st.get('status','')).lower() in terminal:return 'ok',''
+        return 'retry','Server 1 belum mengonfirmasi pembatalan (status: %s).'%st.get('status','?')
+    if provider=='rumahotp':
+        from azhura_web.web_servers import get2
+        st=get2('v1/orders/get_status',{'order_id':pid}) or {}
+        if st.get('otp_code'):return 'otp','OTP sudah masuk di Server 2.'
+        if str(st.get('status','')).lower() not in terminal:
+            try:get2('v1/orders/set_status',{'order_id':pid,'status':'cancel'})
+            except (requests.RequestException,RuntimeError):pass
+            st=get2('v1/orders/get_status',{'order_id':pid}) or {}
+            if st.get('otp_code'):return 'otp','OTP sudah masuk di Server 2.'
+        if str(st.get('status','')).lower() in terminal:return 'ok',''
+        return 'retry','Server 2 belum mengonfirmasi pembatalan (status: %s).'%st.get('status','?')
+    if provider=='premotp':
+        from premotp import cancel_order as prem_cancel
+        try:prem_cancel(pid)
+        except (requests.RequestException,RuntimeError):pass
+        st=prem_status(pid) or {}
+        if isinstance(st.get('data'),dict):st=st['data']
+        if st.get('otp_code') or st.get('otp') or st.get('sms'):return 'otp','OTP sudah masuk di Server 3.'
+        if str(st.get('status','')).lower() in terminal:return 'ok',''
+        return 'retry','Server 3 belum mengonfirmasi pembatalan (status: %s).'%st.get('status','?')
+    if provider=='grizzly':
+        from grizzlysms import cancel_attempt as g4_attempt
+        a=g4_attempt(pid);s=a.get('state')
+        if s=='cancelled':return 'ok',''
+        if s=='otp_received':return 'otp','OTP sudah masuk di Server 4.'
+        return 'retry','Server 4 menunggu vendor (%s). Coba lagi beberapa saat.'%(a.get('provider_status') or 'proses vendor')
+    return 'retry','Provider order tidak dikenal.'
+
+@app.post('/api/admin/orders/<oid>/refund')
+def web_admin_order_refund(oid):
+    """Admin: batalkan pesanan pending/lupa batal di vendor (Server 1-4), lalu refund saldo SEKALI setelah vendor konfirmasi."""
+    denied=web_admin_required()
+    if denied:return denied
+    if not re.fullmatch(r'[A-Za-z0-9_-]{3,80}',oid):return err('ID order tidak valid')
+    try:
+        with conn() as lock_db:
+            lock_db.execute('SELECT pg_advisory_lock(hashtext(%s))',(oid,))
+            try:
+                with conn() as db:
+                    o=db.execute("SELECT order_id,telegram_id,provider,provider_order_id,status,otp_code,previous_otp_code,refund_status,sell_price,reseller_bot_id FROM orders WHERE order_id=%s",(oid,)).fetchone()
+                if not o:return err('Order tidak ditemukan.',404)
+                if o['refund_status']=='REFUNDED':return err('Saldo order ini sudah dikembalikan.',409)
+                if o['otp_code'] or o['previous_otp_code'] or str(o['status']).upper() in ('SUCCESS','COMPLETED'):return err('OTP sudah diterima / order selesai. Refund tidak tersedia.',409)
+                if str(o['status']).upper() not in ('PENDING','WAITING_OTP','REVIEW'):return err('Status order %s tidak bisa direfund dari sini.'%o['status'],409)
+                pid=str(o['provider_order_id'] or '').strip()
+                if pid:
+                    state,msg=_admin_provider_cancel(o['provider'],pid,oid)
+                    if state=='otp':return err(msg+' Refund dibatalkan; OTP akan diteruskan ke user oleh sistem.',409)
+                    if state!='ok':return err(msg+' Saldo belum dikembalikan.',409)
+                    with conn() as db:
+                        latest=db.execute('SELECT otp_code,status FROM orders WHERE order_id=%s',(oid,)).fetchone()
+                    if not latest or latest['otp_code'] or str(latest['status']).upper() in ('SUCCESS','COMPLETED'):return err('OTP masuk saat proses; refund ditahan.',409)
+                    res=refund_order(oid,'Admin membatalkan order pending dan vendor mengonfirmasi pembatalan.')
+                else:
+                    # Vendor tidak pernah memberi nomor (tidak ada ID provider): aman langsung refund + FAILED.
+                    res=fail_and_refund_order(oid,'Admin: order tanpa nomor vendor dikembalikan.')
+            finally:lock_db.execute('SELECT pg_advisory_unlock(hashtext(%s))',(oid,))
+    except (psycopg.Error,requests.RequestException,RuntimeError,ValueError):
+        app.logger.exception('Admin refund order gagal %s',oid);return err('Proses batal/refund belum selesai. Saldo tidak diubah; coba lagi.',503)
+    if res.get('already_refunded'):return err('Saldo order ini sudah dikembalikan.',409)
+    app.logger.info('ADMIN %s membatalkan+refund order %s',uid(),oid)
+    _tg_notify(o['telegram_id'],'🎉 <b>INFO REFUND AZHURA</b>\n\n🧾 Order: <code>%s</code>\n❌ Pesanan dibatalkan oleh admin.\n💸 Saldo dikembalikan: <b>%s</b>\n💳 Saldo kamu sekarang: <b>%s</b>'%(_html.escape(oid),_idr(o['sell_price']),_idr(res.get('balance'))),o.get('reseller_bot_id'))
+    return jsonify(ok=True,status='REFUNDED',balance=res.get('balance'))
+
+@app.post('/api/admin/orders/<oid>/close')
+def web_admin_order_close(oid):
+    """Admin: tolak refund -> tutup pesanan pending tanpa mengembalikan saldo (status COMPLETED)."""
+    denied=web_admin_required()
+    if denied:return denied
+    if not re.fullmatch(r'[A-Za-z0-9_-]{3,80}',oid):return err('ID order tidak valid')
+    try:
+        with conn() as db:
+            r=db.execute("UPDATE orders SET status='COMPLETED',completed_at=%s WHERE order_id=%s AND status IN ('PENDING','WAITING_OTP') AND COALESCE(refund_status,'')<>'REFUNDED' AND COALESCE(otp_code,'')='' ",(_utcnow(),oid))
+            if r.rowcount==0:return err('Order tidak ditemukan atau statusnya sudah berubah.',409)
+    except psycopg.Error:
+        app.logger.exception('Admin tutup order gagal %s',oid);return err('Gagal memproses order. Coba lagi.',503)
+    app.logger.info('ADMIN %s menutup order %s tanpa refund',uid(),oid)
+    return jsonify(ok=True,status='COMPLETED')
 
 @app.get('/api/admin/users')
 def web_admin_users():
