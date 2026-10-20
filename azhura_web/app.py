@@ -2164,6 +2164,158 @@ def catalog_all():
         elif out:m['t']=time.time()-_SRC_TTL+60;m['data']=data   # sebagian gagal: coba lagi dalam 1 menit
     return jsonify(data)
 
+
+# WhatsApp Ready To Use: manual inventory and Telegram-admin code delivery.
+WA_REFUND_SECONDS=300  # batas tunggu kode admin sebelum user boleh Batal/Refund (5 menit)
+def wa_tables(db):
+    db.execute("CREATE TABLE IF NOT EXISTS azhura_wa_stock (id BIGSERIAL PRIMARY KEY,country TEXT NOT NULL,flag TEXT NOT NULL DEFAULT '🌐',phone TEXT NOT NULL UNIQUE,price BIGINT NOT NULL CHECK(price>0),active BOOLEAN NOT NULL DEFAULT TRUE,sold_order_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    db.execute("CREATE TABLE IF NOT EXISTS azhura_wa_orders (order_id TEXT PRIMARY KEY,telegram_id BIGINT NOT NULL,stock_id BIGINT NOT NULL REFERENCES azhura_wa_stock(id),country TEXT NOT NULL,phone TEXT NOT NULL,price BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'WAITING_CODE',otp_code TEXT,requested_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),completed_at TIMESTAMPTZ)")
+
+@app.get('/whatsapp-ready')
+def wa_page():
+    if not uid(): return err('Login diperlukan',401)
+    return send_from_directory('static','whatsapp-ready.html')
+
+@app.get('/api/wa/catalog')
+def wa_catalog():
+    if not uid(): return err('Login diperlukan',401)
+    with conn() as db:
+        wa_tables(db); items=db.execute("SELECT id,country,flag,price FROM azhura_wa_stock WHERE active=TRUE AND sold_order_id IS NULL ORDER BY country,price,id").fetchall(); bal=db.execute('SELECT balance FROM users WHERE telegram_id=%s',(uid(),)).fetchone()
+    return jsonify(items=items,balance=int((bal or {}).get('balance') or 0))
+
+@app.get('/api/wa/orders')
+def wa_orders():
+    if not uid(): return err('Login diperlukan',401)
+    with conn() as db:
+        wa_tables(db); rows=db.execute("SELECT order_id,country,phone,price,status,otp_code,created_at,requested_at,CASE WHEN requested_at IS NULL THEN NULL ELSE GREATEST(0,CEIL(EXTRACT(EPOCH FROM (requested_at+make_interval(secs=>%s)-NOW()))))::int END AS refund_in FROM azhura_wa_orders WHERE telegram_id=%s ORDER BY created_at DESC LIMIT 50",(WA_REFUND_SECONDS,uid())).fetchall()
+    return jsonify(orders=[{**r,'created_at':r['created_at'].isoformat(),'requested_at':r['requested_at'].isoformat() if r['requested_at'] else None} for r in rows],refund_seconds=WA_REFUND_SECONDS)
+
+@app.post('/api/wa/buy')
+def wa_buy():
+    if not uid(): return err('Login diperlukan',401)
+    try: sid=int((request.get_json(silent=True) or {}).get('stock_id',0))
+    except (ValueError,TypeError): return err('Nomor tidak valid')
+    oid='WA-'+uuid.uuid4().hex[:12].upper()
+    try:
+        with conn() as db:
+            wa_tables(db)
+            with db.transaction():
+                stock=db.execute('SELECT * FROM azhura_wa_stock WHERE id=%s AND active=TRUE AND sold_order_id IS NULL FOR UPDATE',(sid,)).fetchone()
+                if not stock:return err('Nomor sudah terjual atau tidak tersedia.',409)
+                user=db.execute('SELECT balance FROM users WHERE telegram_id=%s FOR UPDATE',(uid(),)).fetchone()
+                if not user:return err('Akun tidak ditemukan.',404)
+                if int(user['balance'] or 0)<int(stock['price']):return err('Saldo tidak mencukupi.',400)
+                bal=db.execute('UPDATE users SET balance=balance-%s WHERE telegram_id=%s AND balance>=%s RETURNING balance',(stock['price'],uid(),stock['price'])).fetchone()
+                if not bal:return err('Saldo tidak mencukupi.',400)
+                db.execute("INSERT INTO azhura_wa_orders(order_id,telegram_id,stock_id,country,phone,price) VALUES(%s,%s,%s,%s,%s,%s)",(oid,uid(),sid,stock['country'],stock['phone'],stock['price']))
+                db.execute('UPDATE azhura_wa_stock SET sold_order_id=%s WHERE id=%s',(oid,sid))
+        return jsonify(ok=True,order_id=oid,phone=stock['phone'],country=stock['country'],price=int(stock['price']),balance=int(bal['balance']))
+    except psycopg.Error:
+        app.logger.exception('WA purchase failed');return err('Transaksi gagal.',503)
+
+@app.post('/api/wa/orders/<order_id>/request-code')
+def wa_request_code(order_id):
+    if not uid(): return err('Login diperlukan',401)
+    admin=str(ADMIN_WEB_ID or '')
+    if not admin or admin=='0':return err('ADMIN_ID belum dikonfigurasi.',503)
+    with conn() as db:
+        wa_tables(db)
+        # Atomic: hanya SATU permintaan per pesanan. Klik kedua/paralel tidak mendapat baris.
+        row=db.execute("UPDATE azhura_wa_orders SET requested_at=NOW() WHERE order_id=%s AND telegram_id=%s AND requested_at IS NULL AND otp_code IS NULL AND status='WAITING_CODE' RETURNING country,phone",(order_id,uid())).fetchone()
+        if not row:
+            cur=db.execute('SELECT status,otp_code,requested_at FROM azhura_wa_orders WHERE order_id=%s AND telegram_id=%s',(order_id,uid())).fetchone()
+            if not cur:return err('Pesanan tidak ditemukan.',404)
+            if cur['otp_code']:return err('Kode sudah dikirim.',409)
+            if cur['status']!='WAITING_CODE':return err('Pesanan sudah '+str(cur['status'])+'.',409)
+            return err('Permintaan kode sudah dikirim. Mohon tunggu admin.',409)
+    try:
+        r=requests.post('https://api.telegram.org/bot'+BOT_TOKEN+'/sendMessage',json={'chat_id':admin,'text':f'📩 PERMINTAAN KODE WA READY TO USE\nUser ID: {uid()}\nPesanan: {order_id}\nNegara: {row["country"]}\nNomor: {row["phone"]}\n\nTekan KIRIM KODE untuk meneruskan kode ke user.\nBila tidak dikirim dalam 5 menit, user dapat Batal/Refund.','reply_markup':{'inline_keyboard':[[{'text':'📤 KIRIM KODE','callback_data':'wa_code:'+order_id}]]}},timeout=12)
+        if not r.ok or not r.json().get('ok'):raise RuntimeError('Telegram API gagal')
+    except Exception:
+        app.logger.exception('WA Telegram notification failed')
+        # Notifikasi gagal terkirim: buka kembali kesempatan minta kode agar user tidak terkunci.
+        with conn() as db:db.execute("UPDATE azhura_wa_orders SET requested_at=NULL WHERE order_id=%s AND telegram_id=%s AND otp_code IS NULL AND status='WAITING_CODE'",(order_id,uid()))
+        return err('Notifikasi Telegram gagal dikirim. Silakan coba lagi.',502)
+    return jsonify(ok=True,message='Permintaan kode dikirim ke admin.',refund_seconds=WA_REFUND_SECONDS)
+
+@app.post('/api/wa/orders/<order_id>/refund')
+def wa_refund(order_id):
+    if not uid(): return err('Login diperlukan',401)
+    try:
+        with conn() as db:
+            wa_tables(db)
+            with db.transaction():
+                # Atomic: hanya bila kode diminta, belum dikirim admin, dan 5 menit sudah lewat (jam database).
+                o=db.execute("UPDATE azhura_wa_orders SET status='REFUNDED',completed_at=NOW() WHERE order_id=%s AND telegram_id=%s AND status='WAITING_CODE' AND otp_code IS NULL AND requested_at IS NOT NULL AND requested_at<=NOW()-make_interval(secs=>%s) RETURNING price,stock_id",(order_id,uid(),WA_REFUND_SECONDS)).fetchone()
+                if not o:
+                    cur=db.execute("SELECT status,otp_code,requested_at,CASE WHEN requested_at IS NULL THEN NULL ELSE GREATEST(0,CEIL(EXTRACT(EPOCH FROM (requested_at+make_interval(secs=>%s)-NOW()))))::int END AS left_s FROM azhura_wa_orders WHERE order_id=%s AND telegram_id=%s",(WA_REFUND_SECONDS,order_id,uid())).fetchone()
+                    if not cur:return err('Pesanan tidak ditemukan.',404)
+                    if cur['otp_code']:return err('Kode sudah dikirim, refund tidak tersedia.',409)
+                    if cur['status']=='REFUNDED':return err('Pesanan sudah direfund.',409)
+                    if cur['requested_at'] is None:return err('Minta kode terlebih dahulu. Refund tersedia 5 menit setelah permintaan jika admin belum mengirim kode.',409)
+                    if cur['left_s'] and cur['left_s']>0:return err(f'Refund tersedia dalam {cur["left_s"]} detik.',409)
+                    return err('Pesanan tidak dapat direfund.',409)
+                bal=db.execute('UPDATE users SET balance=balance+%s WHERE telegram_id=%s RETURNING balance',(o['price'],uid())).fetchone()
+                if not bal:raise RuntimeError('Akun tidak ditemukan untuk refund')
+                # Nomor yang sudah dikirim ke user tidak dijual lagi (bisa sudah terdaftar di WhatsApp): nonaktifkan, tetap tercatat terjual.
+                db.execute('UPDATE azhura_wa_stock SET active=FALSE WHERE id=%s',(o['stock_id'],))
+        return jsonify(ok=True,refunded=int(o['price']),balance=int(bal['balance']))
+    except (psycopg.Error,RuntimeError):
+        app.logger.exception('WA refund failed');return err('Refund gagal diproses. Hubungi admin.',503)
+
+@app.get('/api/wa/orders/<order_id>/status')
+def wa_order_status(order_id):
+    if not uid(): return err('Login diperlukan',401)
+    with conn() as db:
+        wa_tables(db);r=db.execute('SELECT status,otp_code FROM azhura_wa_orders WHERE order_id=%s AND telegram_id=%s',(order_id,uid())).fetchone()
+    if not r:return err('Pesanan tidak ditemukan.',404)
+    return jsonify(status=r['status'],otp_code=r['otp_code'])
+
+@app.get('/api/admin/wa/stock')
+def wa_admin_stock():
+    denied=web_admin_required()
+    if denied:return denied
+    with conn() as db:
+        wa_tables(db); rows=db.execute('SELECT * FROM azhura_wa_stock ORDER BY id DESC LIMIT 500').fetchall()
+    return jsonify(items=[{**r,'created_at':r['created_at'].isoformat()} for r in rows])
+
+@app.post('/api/admin/wa/stock')
+def wa_admin_add_stock():
+    denied=web_admin_required()
+    if denied:return denied
+    d=request.get_json(silent=True) or {};country=str(d.get('country','')).strip()[:80];flag=str(d.get('flag','🌐')).strip()[:12];phone=str(d.get('phone','')).strip()[:40]
+    try:price=int(d.get('price',0))
+    except (TypeError,ValueError):return err('Harga tidak valid')
+    if not country or not phone or price<1:return err('Negara, nomor, dan harga wajib diisi.')
+    with conn() as db:
+        wa_tables(db)
+        try:db.execute('INSERT INTO azhura_wa_stock(country,flag,phone,price) VALUES(%s,%s,%s,%s)',(country,flag or '🌐',phone,price))
+        except psycopg.errors.UniqueViolation:return err('Nomor sudah terdaftar.',409)
+    return jsonify(ok=True)
+
+@app.post('/api/admin/wa/stock/<int:sid>')
+def wa_admin_toggle_stock(sid):
+    denied=web_admin_required()
+    if denied:return denied
+    d=request.get_json(silent=True) or {}
+    with conn() as db:
+        wa_tables(db);r=db.execute('UPDATE azhura_wa_stock SET active=%s WHERE id=%s AND sold_order_id IS NULL RETURNING id',(bool(d.get('active')),sid)).fetchone()
+    if not r:return err('Stok tidak ditemukan atau sudah terjual.',404)
+    return jsonify(ok=True)
+
+@app.get('/admin/whatsapp-ready')
+def wa_admin_page():
+    if not web_is_admin():return err('Akses khusus admin.',403)
+    return send_from_directory('static','wa-admin.html')
+
+@app.get('/api/admin/wa/orders')
+def wa_admin_orders():
+    denied=web_admin_required()
+    if denied:return denied
+    with conn() as db:
+        wa_tables(db);rows=db.execute('SELECT * FROM azhura_wa_orders ORDER BY created_at DESC LIMIT 500').fetchall()
+    return jsonify(items=[{**r,'created_at':r['created_at'].isoformat(),'requested_at':r['requested_at'].isoformat() if r['requested_at'] else None} for r in rows])
+
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
 if __name__=='__main__':app.run(port=int(os.getenv('PORT','8080')),debug=os.getenv('WEB_DEV')=='1')
