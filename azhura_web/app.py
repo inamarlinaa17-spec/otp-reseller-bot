@@ -2181,7 +2181,9 @@ def wa_catalog():
     if not uid(): return err('Login diperlukan',401)
     with conn() as db:
         wa_tables(db); items=db.execute("SELECT id,country,flag,price FROM azhura_wa_stock WHERE active=TRUE AND sold_order_id IS NULL ORDER BY country,price,id").fetchall(); bal=db.execute('SELECT balance FROM users WHERE telegram_id=%s',(uid(),)).fetchone()
-    return jsonify(items=items,balance=int((bal or {}).get('balance') or 0))
+        # Ringkasan per negara+harga (termasuk yang stoknya habis) untuk tampilan "Pilih Negara".
+        groups=db.execute("SELECT country,MIN(flag) AS flag,price,COUNT(*) FILTER (WHERE active=TRUE AND sold_order_id IS NULL)::int AS stock FROM azhura_wa_stock GROUP BY country,price ORDER BY (COUNT(*) FILTER (WHERE active=TRUE AND sold_order_id IS NULL))>0 DESC,country,price").fetchall()
+    return jsonify(items=items,groups=groups,balance=int((bal or {}).get('balance') or 0))
 
 @app.get('/api/wa/orders')
 def wa_orders():
