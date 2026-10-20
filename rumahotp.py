@@ -486,6 +486,15 @@ def cancel_number(order_id):
                 "already_cancelled": True,
                 "raw": before,
             }
+        if before_status in {"expired", "expire", "timeout", "timed_out"}:
+            # Waktu order habis tanpa OTP: vendor sudah mengakhirinya sendiri, aman lanjut refund lokal.
+            logger.info("[RUMAHOTP] order already expired order_id=%s status=%s", order_id, before_status)
+            return {
+                "response": "OK",
+                "provider_status": before_status,
+                "already_cancelled": True,
+                "raw": before,
+            }
         if before_status in {"completed", "received", "done"}:
             return {
                 "response": "ERROR",
@@ -557,6 +566,14 @@ def cancel_number(order_id):
                 "[RUMAHOTP] cancel confirmed order_id=%s status=%s",
                 order_id, verify_status,
             )
+            return {
+                "response": "OK",
+                "provider_status": verify_status,
+                "already_cancelled": False,
+                "raw": verify_raw,
+            }
+
+        if verify_status in {"expired", "expire", "timeout", "timed_out"}:
             return {
                 "response": "OK",
                 "provider_status": verify_status,

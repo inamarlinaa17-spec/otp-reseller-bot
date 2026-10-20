@@ -4201,10 +4201,19 @@ def _parse_provider_time(value):
         return None
 
 
+ORDER_FALLBACK_EXPIRE_MINUTES = int(os.getenv("ORDER_FALLBACK_EXPIRE_MINUTES", "30") or 30)
+
+
 def _order_expired(order, runtime_provider=None):
     runtime_provider = runtime_provider or {}
     value = order.get("expired_at") or runtime_provider.get("expired_at")
     dt = _parse_provider_time(value)
+    if dt is None:
+        # Vendor tidak mengirim / format waktu expired tidak terbaca: pakai batas aman dari waktu order dibuat
+        # supaya saldo user tidak nyangkut selamanya. Pembatalan tetap butuh konfirmasi vendor dan OTP belum masuk.
+        created = _parse_provider_time(order.get("created_at"))
+        if created is not None:
+            dt = created + timedelta(minutes=ORDER_FALLBACK_EXPIRE_MINUTES)
     return bool(dt and dt <= datetime.now(timezone.utc))
 
 
@@ -4770,6 +4779,13 @@ async def _cancel_provider_and_verify(provider, provider_order_id, order_id=""):
         verify_statuses = _provider_status_values(verify)
         if any(status in CANCELLED_PROVIDER_STATES for status in verify_statuses):
             return {"response": "OK", "provider_status": verify_statuses, "raw": verify}
+        # Order 5SIM yang habis waktunya berstatus TIMEOUT dan tidak bisa di-cancel lagi. Selama tidak ada SMS,
+        # status final ini sama artinya dengan batal (5SIM tidak menagih order tanpa SMS) -> lanjut refund.
+        if (
+            any(status in {"timeout", "expired", "expire", "timed_out"} for status in verify_statuses)
+            and not (isinstance(verify, dict) and verify.get("sms"))
+        ):
+            return {"response": "OK", "provider_status": verify_statuses, "raw": verify}
         return {
             "response": "ERROR",
             "error": "Pembatalan 5SIM belum terkonfirmasi oleh provider.",
@@ -5134,6 +5150,43 @@ async def auto_notify_web_otp(application):
 
 
 
+UNASSIGNED_ORDER_MINUTES = int(os.getenv("UNASSIGNED_ORDER_MINUTES", "10") or 10)
+_UNASSIGNED_SWEEP_NEXT = 0.0
+
+
+def _sweep_unassigned_orders():
+    """Order yang saldonya sudah terpotong tapi vendor tidak pernah memberi nomor (provider_order_id kosong)
+    dan sudah lewat UNASSIGNED_ORDER_MINUTES -> refund otomatis + FAILED. Aman: tidak ada nomor aktif di vendor,
+    refund_order idempoten (row lock + refund_status)."""
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT order_id, created_at FROM orders
+            WHERE status IN ('PENDING', 'WAITING_OTP', 'REVIEW')
+              AND (provider_order_id IS NULL OR provider_order_id = '')
+              AND COALESCE(refund_status, '') <> 'REFUNDED'
+            ORDER BY created_at ASC
+            LIMIT 50
+            """
+        ).fetchall()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=UNASSIGNED_ORDER_MINUTES)
+    done = 0
+    for row in rows:
+        oid = row["order_id"]
+        created = _parse_provider_time(row.get("created_at"))
+        if created is None or created > cutoff:
+            continue
+        if (_RUNTIME_PROVIDER_CACHE.get(oid) or {}).get("provider_order_id"):
+            continue  # nomor sudah dibeli, penyimpanan ke database masih berjalan
+        try:
+            fail_and_refund_order(oid, "Vendor tidak memberi nomor; order otomatis dikembalikan.")
+            done += 1
+            logger.info("[AUTO SWEEP] order tanpa ID vendor direfund order=%s", oid)
+        except Exception:
+            logger.exception("[AUTO SWEEP] gagal refund order=%s", oid)
+    return done
+
+
 async def auto_process_pending_orders(application):
     """Poll pending orders automatically and refund unused expired orders.
 
@@ -5141,9 +5194,16 @@ async def auto_process_pending_orders(application):
     worker therefore spaces status reads per provider instead of polling every
     order aggressively. This also removes the need for users to press Cek OTP.
     """
-    global _AUTO_POLL_CURSOR, _S4_LAST_POLLED_ORDER
+    global _AUTO_POLL_CURSOR, _S4_LAST_POLLED_ORDER, _UNASSIGNED_SWEEP_NEXT
     while True:
         try:
+            _sweep_now = asyncio.get_running_loop().time()
+            if _sweep_now >= _UNASSIGNED_SWEEP_NEXT:
+                _UNASSIGNED_SWEEP_NEXT = _sweep_now + 60.0
+                try:
+                    await asyncio.to_thread(_sweep_unassigned_orders)
+                except Exception:
+                    logger.exception("[AUTO SWEEP] loop error")
             with get_db() as db:
                 rows = db.execute(
                     """
@@ -5713,7 +5773,8 @@ async def process_otp_order(
             result = None
         provider_order_id = result.get("id") if result else None
         phone = result.get("phone") if result else None
-        provider_expired_at = result.get("expired_at") if result else None
+        # 5SIM mengirim waktu habis sebagai "expires"; tanpa ini order Server 1 tidak pernah dianggap expired.
+        provider_expired_at = (result.get("expired_at") or result.get("expires")) if result else None
         provider_error = not result or result.get("response") == "ERROR"
         error_reason = "Pembelian nomor Server 1 gagal."
     elif server == "rumahotp":
