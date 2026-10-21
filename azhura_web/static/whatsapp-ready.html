@@ -49,6 +49,15 @@ main{max-width:560px;margin:auto;padding:16px 16px 0}
 .cta{flex:1;border:0;border-radius:18px;background:var(--green);color:#04271a;font-weight:850;font-size:17px;padding:17px 12px;box-shadow:0 8px 22px #10c27a40;transition:transform .08s,opacity .2s}
 .cta:active{transform:scale(.98)}
 .cta:disabled{opacity:.45;box-shadow:none;cursor:not-allowed}
+.warn{margin:14px 0 4px;border:1px solid var(--warn-bd);background:var(--warn-bg);color:#ffd45e;border-radius:18px;padding:14px 14px 4px}
+.wrow{display:flex;gap:11px;align-items:flex-start;font-weight:700;line-height:1.5;font-size:14.5px}
+.wrow svg{flex:none;margin-top:2px}
+.rules summary{list-style:none;display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-weight:800;color:var(--warn);padding:14px 2px 12px}
+.rules summary::-webkit-details-marker{display:none}
+.rules summary svg{transition:transform .2s}
+.rules[open] summary svg{transform:rotate(180deg)}
+.rules ol{margin:0 0 12px;padding-left:22px;color:#f3e3b0;font-weight:500}
+.rules li{margin:0 0 10px;padding-left:4px}
 .how{display:block;text-align:center;margin-top:14px;color:#4ee3a4;font-weight:700;text-decoration:none}
 .card{background:linear-gradient(135deg,#14263f,#0f1b30);border:1px solid var(--bd);border-radius:24px;padding:20px;margin:16px 0;scroll-margin-top:76px}
 .card h3{margin:0 0 14px;font-size:13px;letter-spacing:1.6px;color:var(--mu)}
@@ -85,7 +94,7 @@ main{max-width:560px;margin:auto;padding:16px 16px 0}
 </head>
 <body>
 <div class="top"><div class="top-in">
-  <a class="back" href="/" aria-label="Kembali"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></a>
+  <a class="back" id="back" href="/" aria-label="Kembali"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></a>
   <h1>WhatsApp Ready</h1>
   <span class="bal"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h15a3 3 0 0 1 3 3v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7l12-3v3"/><circle cx="17" cy="14" r="1"/></svg><span id="balance">…</span></span>
 </div></div>
@@ -107,6 +116,19 @@ main{max-width:560px;margin:auto;padding:16px 16px 0}
     </ul>
     <div class="pick">PILIH NEGARA</div>
     <div class="grid" id="grid"></div>
+    <div class="warn">
+      <div class="wrow"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg><span>DILARANG dipakai blast/spam. WhatsApp sangat ketat pada akun baru. Akun yang diblokir karena blast/spam TIDAK direfund.</span></div>
+      <details class="rules">
+        <summary>Aturan pemakaian <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></summary>
+        <ol>
+          <li>Gunakan aplikasi WhatsApp atau WhatsApp Business resmi. Jangan pakai WA modifikasi (GB/FM/clone) atau tools otomatis.</li>
+          <li>Dilarang blast, broadcast, kirim pesan massal, chat banyak nomor baru, atau masuk banyak grup sekaligus, terutama di 24 jam pertama.</li>
+          <li>Setelah login, pakai sewajarnya dulu (isi profil, simpan kontak, balas chat) minimal 24 jam sebelum dipakai lebih berat.</li>
+          <li>Refund hanya berlaku jika admin belum mengirim kode dalam 5 menit setelah Minta Kode. Setelah kode diterima, pemakaian dan risiko blokir menjadi tanggung jawab pembeli.</li>
+          <li>Setelah berhasil masuk, segera aktifkan verifikasi dua langkah milik Anda sendiri.</li>
+        </ol>
+      </details>
+    </div>
     <div class="buy">
       <div class="price"><small id="plabel">Harga</small><b id="price">—</b></div>
       <button class="cta" id="buy" disabled>Beli Sekarang</button>
@@ -133,6 +155,8 @@ main{max-width:560px;margin:auto;padding:16px 16px 0}
 
 <script>
 (function(){
+var EMBED=false;try{EMBED=window.parent!==window}catch(e){EMBED=true}
+function toParent(m){try{window.parent.postMessage(m,location.origin)}catch(e){}}
 var csrf='',catalog=[],summary=[],groups=[],sel='',orders=[],fetchedAt=0,lastSig='',newId='',busy=false;
 var $=function(id){return document.getElementById(id)};
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -161,7 +185,7 @@ function drawHero(){var total=catalog.length,g=groups.filter(function(x){return 
 $('grid').addEventListener('click',function(e){var b=e.target.closest('.co');if(!b)return;sel=b.dataset.k;drawHero()});
 $('how').addEventListener('click',function(e){e.preventDefault();$('guide').scrollIntoView({behavior:'smooth',block:'start'})});
 
-async function loadCatalog(){var d=await api('/api/wa/catalog');catalog=d.items||[];summary=d.groups||[];$('balance').textContent=rp(d.balance);buildGroups();drawHero()}
+async function loadCatalog(){var d=await api('/api/wa/catalog');catalog=d.items||[];summary=d.groups||[];$('balance').textContent=rp(d.balance);if(EMBED)toParent({type:'az-wa-balance',balance:Number(d.balance)||0});buildGroups();drawHero()}
 
 $('buy').addEventListener('click',async function(){
   var g=groups.filter(function(x){return x.key===sel})[0];if(!g||!g.ids.length||busy)return;
@@ -205,10 +229,15 @@ $('orders').addEventListener('click',async function(e){var b=e.target.closest('b
   try{await loadOrders()}catch(x){}
 });
 
+/* ---------- mode popup (ditampilkan di dalam beranda) ---------- */
+if(EMBED){var bk=$('back');bk.innerHTML='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';bk.setAttribute('aria-label','Tutup');
+  bk.addEventListener('click',function(e){e.preventDefault();toParent({type:'az-wa-close'})});
+  window.addEventListener('message',function(e){if(e.origin!==location.origin||e.source!==window.parent)return;var m=e.data||{};
+    if(m.type==='az-wa-refresh'){window.scrollTo(0,0);loadCatalog().catch(function(){});loadOrders().catch(function(){})}})}
 /* ---------- start ---------- */
 async function init(){
   try{var m=await api('/api/me');csrf=m.csrf;await Promise.all([loadCatalog(),loadOrders()])}
-  catch(e){var msg=e.status===401?'Silakan login dulu di <a href="/">halaman utama</a>.':esc(e.message);$('orders').innerHTML='<div class="err">'+msg+'</div>';$('stock').lastChild.textContent='—';$('buy').textContent='Login diperlukan';return}
+  catch(e){var msg=e.status===401?'Silakan login dulu di <a href="/" target="_top">halaman utama</a>.':esc(e.message);$('orders').innerHTML='<div class="err">'+msg+'</div>';$('stock').lastChild.textContent='—';$('buy').textContent='Login diperlukan';return}
   setInterval(function(){if(document.visibilityState==='visible')loadOrders().catch(function(){})},3500);
   setInterval(renderOrders,1000);
   setInterval(function(){if(document.visibilityState==='visible')loadCatalog().catch(function(){})},20000);

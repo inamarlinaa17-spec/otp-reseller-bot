@@ -1,1 +1,222 @@
-<!doctype html><html lang="id"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin WA Ready To Use</title><style>body{background:#081321;color:#eef6ff;font:15px system-ui;padding:18px}.wrap{max-width:850px;margin:auto}.card{background:#14263d;border:1px solid #34516e;border-radius:16px;padding:16px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}input{padding:11px;background:#09192a;color:white;border:1px solid #34516e;border-radius:9px}.btn{padding:10px;background:#0879dc;color:white;border:0;border-radius:9px}.item{padding:10px;border-bottom:1px solid #34516e}</style><div class="wrap"><a href="/" style="color:#6bd7ff">← Kembali</a><h1>Admin · WhatsApp Ready To Use</h1><div class="card"><h2>Tambah stok</h2><div class="grid"><input id="flag" value="🇮🇩" placeholder="Bendera"><input id="country" placeholder="Negara"><input id="phone" placeholder="Nomor internasional"><input id="price" type="number" placeholder="Harga jual"></div><p><button class="btn" onclick="add()">Tambah nomor</button></p></div><div class="card"><h2>Stok</h2><div id="stock"></div></div><div class="card"><h2>Pesanan</h2><p>Permintaan kode dikirim melalui tombol Telegram pada notifikasi admin.</p><div id="orders"></div></div></div><script>let csrf='';const $=x=>document.getElementById(x),e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));async function api(u,o={}){let r=await fetch(u,{credentials:'same-origin',...o,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...o.headers}}),d=await r.json();if(!r.ok)throw Error(d.error||'Gagal');return d}async function init(){try{let m=await api('/api/me');csrf=m.csrf;if(!m.is_admin)throw Error('Login sebagai admin.');await refresh()}catch(x){document.body.innerHTML=e(x.message)}}async function add(){try{await api('/api/admin/wa/stock',{method:'POST',body:JSON.stringify({flag:$('flag').value,country:$('country').value,phone:$('phone').value,price:$('price').value})});await refresh();alert('Stok ditambahkan')}catch(x){alert(x.message)}}async function toggle(id,active){try{await api('/api/admin/wa/stock/'+id,{method:'POST',body:JSON.stringify({active})});await refresh()}catch(x){alert(x.message)}}async function refresh(){let s=await api('/api/admin/wa/stock');$('stock').innerHTML=s.items.map(x=>'<div class="item">'+e(x.flag)+' '+e(x.country)+' · '+e(x.phone)+' · Rp'+Number(x.price).toLocaleString('id-ID')+' · '+(x.sold_order_id?'TERJUAL':x.active?'AKTIF':'NONAKTIF')+(!x.sold_order_id?'<button class="btn" onclick="toggle('+x.id+','+(!x.active)+')">Ubah status</button>':'')+'</div>').join('')||'Belum ada stok';let o=await api('/api/admin/wa/orders');$('orders').innerHTML=o.items.map(x=>'<div class="item">'+e(x.order_id)+' · '+e(x.country)+' '+e(x.phone)+' · User '+e(x.telegram_id)+' · '+e(x.status)+(x.otp_code?' · Kode sudah dikirim':'')+'</div>').join('')||'Belum ada pesanan'}init();</script></html>
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Admin · WhatsApp Ready To Use</title>
+<style>
+:root{--bg:#080e1b;--bd:#2c4666;--tx:#edf6ff;--mu:#9aafc9;--green:#10c27a;--red:#e05252;--blue:#38c5ff;--warn:#fbbf24;--c1:#14263f;--c2:#0f1b30}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(ellipse at top,#173e73 0,transparent 50%),var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100vh;padding-bottom:40px}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer}
+.top{position:sticky;top:0;z-index:20;background:#080e1bef;backdrop-filter:blur(14px);border-bottom:1px solid #1c2f49;padding:max(12px,env(safe-area-inset-top)) 16px 12px}
+.top-in{max-width:760px;margin:auto;display:flex;align-items:center;gap:10px}
+.ib{width:40px;height:40px;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:12px;background:#142640;border:1px solid var(--bd);color:var(--tx);text-decoration:none}
+.top h1{flex:1;margin:0;font-size:17px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+main{max-width:760px;margin:auto;padding:14px 16px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:520px){.stats{grid-template-columns:1fr 1fr}}
+.stat{background:linear-gradient(135deg,var(--c1),var(--c2));border:1px solid var(--bd);border-radius:16px;padding:12px 14px}
+.stat small{display:block;color:var(--mu);font-size:12px}
+.stat b{font-size:24px}
+.stat.g b{color:#5ff0b3}.stat.y b{color:var(--warn)}
+.seg{display:flex;gap:6px;background:#0d1a2e;border:1px solid var(--bd);border-radius:14px;padding:5px;margin:14px 0 4px;position:sticky;top:67px;z-index:15}
+.seg button{flex:1;border:0;background:none;color:var(--mu);font-weight:800;padding:10px 6px;border-radius:10px}
+.seg button.on{background:#1b3a63;color:#fff}
+.card{background:linear-gradient(135deg,var(--c1),var(--c2));border:1px solid var(--bd);border-radius:20px;padding:16px;margin:12px 0}
+.card h2{margin:0 0 4px;font-size:17px}
+.mu{color:var(--mu);font-size:13px}
+.hidden{display:none!important}
+.rows{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.crow{display:grid;grid-template-columns:62px 1fr 110px 36px;gap:8px;align-items:center}
+@media(max-width:420px){.crow{grid-template-columns:54px 1fr 92px 34px}}
+input,select,textarea{width:100%;padding:12px;background:#0a182b;color:#fff;border:1px solid #38577a;border-radius:12px;min-width:0}
+textarea{min-height:150px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace}
+input:focus,select:focus,textarea:focus{outline:2px solid #2f7de1;outline-offset:0}
+.btn{border:0;border-radius:12px;padding:12px 16px;font-weight:800;color:#fff;background:#1468dd}
+.btn.g{background:var(--green);color:#04271a}.btn.s{background:#26405f}.btn.r{background:#b53b3b}.btn.sm{padding:9px 12px;font-size:13px}
+.btn:disabled{opacity:.5}
+.x{border:0;background:#26405f;color:#cfe0f5;border-radius:10px;height:42px;font-size:18px}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.country{background:linear-gradient(135deg,var(--c1),var(--c2));border:1px solid var(--bd);border-radius:18px;padding:14px;margin:10px 0}
+.country.off{opacity:.62}
+.chd{display:flex;align-items:center;gap:12px}
+.fl{font-size:30px;line-height:1}
+.chd b{font-size:16px;display:block}
+.chd small{color:var(--mu)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.chip{border-radius:999px;padding:4px 10px;font-size:12px;font-weight:800;background:#1d3555;color:#bcd2ee}
+.chip.ok{background:#0d3f30;color:#5ff0b3}.chip.no{background:#3a1c1c;color:#f5a3a3}.chip.wa{background:#33280c;color:var(--warn)}
+.num{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 0;border-bottom:1px solid #223a58}
+.num:last-child{border-bottom:0}
+.num code{font:600 15px ui-monospace,Menlo,Consolas,monospace}
+.num small{display:block;color:var(--mu)}
+.filters{display:flex;gap:8px;margin:12px 0}
+.empty{text-align:center;color:var(--mu);padding:26px 10px;border:1px dashed var(--bd);border-radius:16px;margin:12px 0}
+.ord{background:linear-gradient(135deg,var(--c1),var(--c2));border:1px solid var(--bd);border-radius:16px;padding:13px 14px;margin:10px 0}
+.ord .hl{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.ord code{font:700 16px ui-monospace,Menlo,Consolas,monospace}
+.fchips{display:flex;gap:6px;overflow-x:auto;margin:12px 0;scrollbar-width:none}
+.fchips::-webkit-scrollbar{display:none}
+.fchips button{flex:none;border:1px solid var(--bd);background:#0d1a2e;color:var(--mu);border-radius:999px;padding:7px 13px;font-weight:700}
+.fchips button.on{background:#1b3a63;color:#fff;border-color:#3b6aa0}
+.sheet-bg{position:fixed;inset:0;background:#000a;z-index:40;display:flex;align-items:flex-end;justify-content:center}
+.sheet{width:100%;max-width:560px;background:#0f1b30;border:1px solid var(--bd);border-radius:24px 24px 0 0;padding:18px 18px max(18px,env(safe-area-inset-bottom));max-height:92vh;overflow:auto}
+.sheet h3{margin:0 0 4px}
+.sheet label{display:block;margin:12px 0 5px;color:var(--mu);font-size:13px;font-weight:700}
+#toast{position:fixed;left:50%;bottom:max(24px,env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);max-width:90%;background:#223f63;border:1px solid #3b6aa0;padding:12px 18px;border-radius:14px;z-index:60;opacity:0;pointer-events:none;transition:.25s;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.err{padding:40px 20px;text-align:center;color:#f5a3a3}
+</style>
+</head>
+<body>
+<div class="top"><div class="top-in">
+  <a class="ib" href="/" aria-label="Kembali"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></a>
+  <h1>Admin · WhatsApp Ready</h1>
+  <button class="ib" id="reload" aria-label="Muat ulang"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg></button>
+</div></div>
+
+<main id="app">
+  <div class="stats">
+    <div class="stat g"><small>Stok siap</small><b id="s-ready">–</b></div>
+    <div class="stat"><small>Terjual</small><b id="s-sold">–</b></div>
+    <div class="stat y"><small>Menunggu kode</small><b id="s-wait">–</b></div>
+    <div class="stat"><small>Negara aktif</small><b id="s-co">–</b></div>
+  </div>
+
+  <div class="seg" id="seg">
+    <button data-t="co" class="on">Negara</button>
+    <button data-t="no">Nomor</button>
+    <button data-t="or">Pesanan</button>
+  </div>
+
+  <!-- ===== NEGARA ===== -->
+  <section id="t-co">
+    <div class="card">
+      <h2>Tambah negara &amp; harga</h2>
+      <div class="mu">Cukup isi negara dan harga, nomor bisa ditambahkan nanti. Negara tanpa nomor tampil “Stok habis” bagi pengguna.</div>
+      <div class="rows" id="rows"></div>
+      <div class="acts"><button class="btn s" id="addrow">+ Baris</button><button class="btn g" id="saveall" style="flex:1;white-space:nowrap">Simpan semua</button></div>
+    </div>
+    <div id="countries"><div class="empty">Memuat…</div></div>
+  </section>
+
+  <!-- ===== NOMOR ===== -->
+  <section id="t-no" class="hidden">
+    <div class="filters">
+      <select id="f-co"><option value="">Semua negara</option></select>
+      <select id="f-st"><option value="">Semua status</option><option value="ready">Siap dijual</option><option value="off">Nonaktif</option><option value="sold">Terjual</option></select>
+    </div>
+    <input id="f-q" type="search" placeholder="Cari nomor…">
+    <div class="card" id="numbers" style="padding:6px 16px"><div class="empty">Memuat…</div></div>
+  </section>
+
+  <!-- ===== PESANAN ===== -->
+  <section id="t-or" class="hidden">
+    <div class="mu" style="margin-top:12px">Permintaan kode dikirim ke Telegram admin lewat tombol <b>KIRIM KODE</b>. Daftar ini diperbarui otomatis.</div>
+    <div class="fchips" id="ofilters">
+      <button data-f="" class="on">Semua</button><button data-f="WAITING_CODE">Menunggu kode</button><button data-f="SUCCESS">Selesai</button><button data-f="REFUNDED">Refund</button>
+    </div>
+    <div id="orders"><div class="empty">Memuat…</div></div>
+  </section>
+</main>
+
+<div id="sheet-host"></div>
+<div id="toast" role="status"></div>
+<datalist id="cl"></datalist>
+
+<script>
+(function(){
+var csrf='',countries=[],numbers=[],orders=[],ofilter='',tab='co';
+var $=function(id){return document.getElementById(id)};
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function rp(n){return 'Rp '+Number(n||0).toLocaleString('id-ID')}
+var tt;function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(tt);tt=setTimeout(function(){t.classList.remove('show')},3800)}
+async function api(u,o){o=o||{};var r=await fetch(u,Object.assign({credentials:'same-origin',cache:'no-store'},o,{headers:Object.assign({'Content-Type':'application/json','X-CSRF-Token':csrf},o.headers||{})}));var d={};try{d=await r.json()}catch(e){}
+  if(!r.ok)throw new Error(d.error||'Gagal');return d}
+function post(u,b){return api(u,{method:'POST',body:JSON.stringify(b||{})})}
+function fmt(iso){if(!iso)return '';var d=new Date(iso);if(isNaN(d))return '';var m=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'][d.getMonth()];return d.getDate()+' '+m+', '+String(d.getHours()).padStart(2,'0')+'.'+String(d.getMinutes()).padStart(2,'0')}
+
+/* ---------- daftar negara umum (autocomplete + bendera otomatis) ---------- */
+var COMMON=[['Indonesia','🇮🇩'],['Malaysia','🇲🇾'],['Filipina','🇵🇭'],['Thailand','🇹🇭'],['Vietnam','🇻🇳'],['Singapura','🇸🇬'],['Kamboja','🇰🇭'],['Myanmar','🇲🇲'],['Laos','🇱🇦'],['India','🇮🇳'],['Pakistan','🇵🇰'],['Bangladesh','🇧🇩'],['Sri Lanka','🇱🇰'],['Nepal','🇳🇵'],['Jepang','🇯🇵'],['Korea Selatan','🇰🇷'],['Tiongkok','🇨🇳'],['Hong Kong','🇭🇰'],['Taiwan','🇹🇼'],['Inggris Raya','🇬🇧'],['Amerika Serikat','🇺🇸'],['Kanada','🇨🇦'],['Meksiko','🇲🇽'],['Brasil','🇧🇷'],['Argentina','🇦🇷'],['Kolombia','🇨🇴'],['Cile','🇨🇱'],['Peru','🇵🇪'],['Venezuela','🇻🇪'],['Turki','🇹🇷'],['Rusia','🇷🇺'],['Ukraina','🇺🇦'],['Jerman','🇩🇪'],['Prancis','🇫🇷'],['Spanyol','🇪🇸'],['Italia','🇮🇹'],['Belanda','🇳🇱'],['Polandia','🇵🇱'],['Mesir','🇪🇬'],['Nigeria','🇳🇬'],['Afrika Selatan','🇿🇦'],['Kenya','🇰🇪'],['Maroko','🇲🇦'],['Arab Saudi','🇸🇦'],['Uni Emirat Arab','🇦🇪'],['Australia','🇦🇺'],['Selandia Baru','🇳🇿']];
+var FLAGS={};COMMON.forEach(function(c){FLAGS[c[0].toLowerCase()]=c[1]});
+$('cl').innerHTML=COMMON.map(function(c){return '<option value="'+esc(c[0])+'">'}).join('');
+
+/* ---------- baris tambah negara ---------- */
+function addRow(){var d=document.createElement('div');d.className='crow';
+  d.innerHTML='<input class="r-fl" placeholder="🌐" maxlength="8" aria-label="Bendera" style="text-align:center;font-size:20px"><input class="r-co" list="cl" placeholder="Negara" maxlength="80" aria-label="Negara"><input class="r-pr" type="number" inputmode="numeric" min="1" placeholder="Harga" aria-label="Harga"><button type="button" class="x" aria-label="Hapus baris">×</button>';
+  $('rows').appendChild(d);return d}
+$('rows').addEventListener('input',function(e){if(!e.target.classList.contains('r-co'))return;var row=e.target.closest('.crow'),f=row.querySelector('.r-fl'),fl=FLAGS[e.target.value.trim().toLowerCase()];if(fl&&(!f.value||f.dataset.auto==='1')){f.value=fl;f.dataset.auto='1'}});
+$('rows').addEventListener('input',function(e){if(e.target.classList.contains('r-fl'))e.target.dataset.auto='0'});
+$('rows').addEventListener('click',function(e){var b=e.target.closest('.x');if(!b)return;var rows=$('rows');if(rows.children.length>1)b.closest('.crow').remove();else{b.closest('.crow').querySelectorAll('input').forEach(function(i){i.value=''})}});
+$('addrow').onclick=function(){addRow().querySelector('.r-co').focus()};
+$('saveall').onclick=async function(){var items=[];[].forEach.call($('rows').children,function(r){var c=r.querySelector('.r-co').value.trim(),p=r.querySelector('.r-pr').value.trim();if(c||p)items.push({flag:r.querySelector('.r-fl').value.trim(),country:c,price:p})});
+  if(!items.length)return toast('Isi minimal satu negara dan harga.');var b=this;b.disabled=true;
+  try{var d=await post('/api/admin/wa/countries',{items:items});toast('Tersimpan: '+d.added+' baru'+(d.updated?', '+d.updated+' diperbarui':'')+(d.errors&&d.errors.length?' · '+d.errors.join(' '):''));$('rows').innerHTML='';addRow();await loadAll()}
+  catch(e){toast(e.message)}b.disabled=false};
+
+/* ---------- sheet ---------- */
+function openSheet(html,onmount){var h=$('sheet-host');h.innerHTML='<div class="sheet-bg"><div class="sheet">'+html+'</div></div>';var bg=h.firstChild;bg.addEventListener('click',function(e){if(e.target===bg)closeSheet()});if(onmount)onmount(bg.firstChild)}
+function closeSheet(){$('sheet-host').innerHTML=''}
+
+function addNumbers(c){
+  openSheet('<h3>Tambah nomor</h3><div class="mu">'+esc(c.flag)+' '+esc(c.country)+' · '+rp(c.price)+'</div><label>Satu nomor per baris (boleh banyak sekaligus)</label><textarea id="ph" placeholder="+6281234567890&#10;+6281234567891"></textarea><div class="mu" id="phc" style="margin-top:6px">0 nomor terbaca</div><div class="acts" style="margin-top:14px"><button class="btn s" id="sx" style="flex:1">Batal</button><button class="btn g" id="ss" style="flex:2">Tambah nomor</button></div>',function(sh){
+    var ta=sh.querySelector('#ph');function count(){var n=ta.value.split(/[\n,;]+/).map(function(t){return t.replace(/[\s\-().]/g,'')}).filter(function(t){return /^\+?\d{7,16}$/.test(t)});sh.querySelector('#phc').textContent=new Set(n).size+' nomor terbaca'}
+    ta.addEventListener('input',count);sh.querySelector('#sx').onclick=closeSheet;
+    sh.querySelector('#ss').onclick=async function(){var b=this;b.disabled=true;try{var d=await post('/api/admin/wa/stock/bulk',{country_id:c.id,phones:ta.value});closeSheet();toast('Ditambahkan '+d.added+' nomor'+(d.duplicate?' · '+d.duplicate+' sudah ada':'')+(d.invalid&&d.invalid.length?' · '+d.invalid.length+' tidak valid':''));await loadAll()}catch(e){toast(e.message);b.disabled=false}};
+    ta.focus()})}
+function editCountry(c){
+  openSheet('<h3>Ubah harga</h3><div class="mu">'+esc(c.country)+' · berlaku untuk nomor yang belum terjual</div><label>Bendera</label><input id="ef" maxlength="8" value="'+esc(c.flag)+'"><label>Harga jual (Rp)</label><input id="ep" type="number" inputmode="numeric" min="1" value="'+Number(c.price)+'"><div class="acts" style="margin-top:14px"><button class="btn s" id="sx" style="flex:1">Batal</button><button class="btn g" id="ss" style="flex:2">Simpan</button></div>',function(sh){
+    sh.querySelector('#sx').onclick=closeSheet;
+    sh.querySelector('#ss').onclick=async function(){var b=this;b.disabled=true;try{await post('/api/admin/wa/countries/'+c.id,{flag:sh.querySelector('#ef').value,price:sh.querySelector('#ep').value});closeSheet();toast('Tersimpan');await loadAll()}catch(e){toast(e.message);b.disabled=false}}})}
+
+/* ---------- render ---------- */
+function stats(){var ready=countries.reduce(function(a,c){return a+(c.active?c.stock:0)},0),sold=countries.reduce(function(a,c){return a+c.sold},0),wait=orders.filter(function(o){return o.status==='WAITING_CODE'}).length,co=countries.filter(function(c){return c.active}).length;
+  $('s-ready').textContent=ready;$('s-sold').textContent=sold;$('s-wait').textContent=wait;$('s-co').textContent=co}
+function drawCountries(){
+  $('countries').innerHTML=countries.length?countries.map(function(c){
+    var st=c.stock>0?'<span class="chip ok">'+c.stock+' siap</span>':'<span class="chip no">Stok habis</span>';
+    return '<div class="country'+(c.active?'':' off')+'"><div class="chd"><span class="fl">'+esc(c.flag)+'</span><div style="flex:1;min-width:0"><b>'+esc(c.country)+'</b><small>'+rp(c.price)+'</small></div>'+(c.active?'':'<span class="chip">Disembunyikan</span>')+'</div>'
+     +'<div class="chips">'+st+'<span class="chip">'+c.sold+' terjual</span>'+(c.disabled?'<span class="chip wa">'+c.disabled+' nonaktif</span>':'')+'</div>'
+     +'<div class="acts"><button class="btn g sm" data-a="num" data-id="'+c.id+'">+ Nomor</button><button class="btn s sm" data-a="edit" data-id="'+c.id+'">Ubah harga</button><button class="btn s sm" data-a="tog" data-id="'+c.id+'">'+(c.active?'Sembunyikan':'Tampilkan')+'</button><button class="btn r sm" data-a="del" data-id="'+c.id+'">Hapus</button></div></div>'}).join(''):'<div class="empty">Belum ada negara. Tambahkan di atas.</div>';
+  var cur=$('f-co').value;$('f-co').innerHTML='<option value="">Semua negara</option>'+countries.map(function(c){var k=c.country+'|'+c.price;return '<option value="'+esc(k)+'">'+esc(c.flag+' '+c.country+' · '+rp(c.price))+'</option>'}).join('');$('f-co').value=cur}
+$('countries').addEventListener('click',async function(e){var b=e.target.closest('button[data-a]');if(!b)return;var c=countries.filter(function(x){return String(x.id)===b.dataset.id})[0];if(!c)return;var a=b.dataset.a;
+  if(a==='num')return addNumbers(c);if(a==='edit')return editCountry(c);
+  try{
+    if(a==='tog'){await post('/api/admin/wa/countries/'+c.id,{active:!c.active});toast(c.active?'Disembunyikan dari pengguna':'Ditampilkan ke pengguna')}
+    if(a==='del'){if(!confirm('Hapus '+c.country+' ('+rp(c.price)+')?'))return;await post('/api/admin/wa/countries/'+c.id+'/delete');toast('Dihapus')}
+    await loadAll()}catch(er){toast(er.message)}});
+
+function numState(x){return x.sold_order_id?'sold':(x.active?'ready':'off')}
+function drawNumbers(){var fc=$('f-co').value,fs=$('f-st').value,q=$('f-q').value.replace(/\s/g,'');
+  var list=numbers.filter(function(x){return(!fc||(x.country+'|'+x.price)===fc)&&(!fs||numState(x)===fs)&&(!q||String(x.phone).indexOf(q)>-1)});
+  $('numbers').innerHTML=list.length?list.slice(0,200).map(function(x){var s=numState(x);
+    return '<div class="num"><div><code>'+esc(x.phone)+'</code><small>'+esc(x.flag+' '+x.country)+' · '+rp(x.price)+'</small></div><div class="acts" style="align-items:center"><span class="chip '+(s==='ready'?'ok':s==='off'?'wa':'')+'">'+(s==='ready'?'Siap':s==='off'?'Nonaktif':'Terjual')+'</span>'+(s==='sold'?'':'<button class="btn s sm" data-id="'+x.id+'" data-act="'+(x.active?'0':'1')+'">'+(x.active?'Nonaktifkan':'Aktifkan')+'</button>')+'</div></div>'}).join('')+(list.length>200?'<div class="mu" style="padding:12px 0">Menampilkan 200 dari '+list.length+'. Gunakan filter/cari.</div>':''):'<div class="empty" style="border:0">Tidak ada nomor.</div>'}
+['f-co','f-st'].forEach(function(i){$(i).addEventListener('change',drawNumbers)});$('f-q').addEventListener('input',drawNumbers);
+$('numbers').addEventListener('click',async function(e){var b=e.target.closest('button[data-id]');if(!b)return;try{await post('/api/admin/wa/stock/'+b.dataset.id,{active:b.dataset.act==='1'});await loadAll()}catch(er){toast(er.message)}});
+
+function ob(o){var s=o.status;if(s==='SUCCESS')return '<span class="chip ok">Selesai</span>';if(s==='REFUNDED')return '<span class="chip no">Refund</span>';return '<span class="chip wa">'+(o.requested_at?'Menunggu kode':'Belum minta kode')+'</span>'}
+function drawOrders(){var list=orders.filter(function(o){return !ofilter||o.status===ofilter});
+  $('orders').innerHTML=list.length?list.map(function(o){
+    var note=o.otp_code?'Kode sudah dikirim':(o.status==='REFUNDED'?'Dibatalkan, saldo dikembalikan'+(o.completed_at?' · '+fmt(o.completed_at):''):(o.requested_at?'Diminta '+fmt(o.requested_at)+' · tekan KIRIM KODE di Telegram':'User belum menekan Minta Kode'));
+    return '<div class="ord"><div class="hl"><div><code>'+esc(o.phone)+'</code><div class="mu">'+esc(o.country)+' · '+rp(o.price)+'</div></div>'+ob(o)+'</div><div class="mu" style="margin-top:8px">'+esc(o.order_id)+' · User '+esc(o.telegram_id)+'<br>'+esc(fmt(o.created_at))+' · '+esc(note)+'</div></div>'}).join(''):'<div class="empty">Belum ada pesanan.</div>'}
+$('ofilters').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;ofilter=b.dataset.f;[].forEach.call($('ofilters').children,function(x){x.classList.toggle('on',x===b)});drawOrders()});
+
+$('seg').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;tab=b.dataset.t;[].forEach.call($('seg').children,function(x){x.classList.toggle('on',x===b)});['co','no','or'].forEach(function(t){$('t-'+t).classList.toggle('hidden',t!==tab)})});
+
+async function loadOrders(){var o=await api('/api/admin/wa/orders');orders=o.items||[];drawOrders();stats()}
+async function loadAll(){var r=await Promise.all([api('/api/admin/wa/countries'),api('/api/admin/wa/stock'),api('/api/admin/wa/orders')]);countries=r[0].items||[];numbers=r[1].items||[];orders=r[2].items||[];drawCountries();drawNumbers();drawOrders();stats()}
+$('reload').onclick=function(){loadAll().then(function(){toast('Dimuat ulang')}).catch(function(e){toast(e.message)})};
+
+async function init(){
+  try{var m=await api('/api/me');csrf=m.csrf;if(!m.is_admin)throw new Error('Login sebagai admin untuk membuka halaman ini.');
+    addRow();await loadAll()}
+  catch(e){$('app').innerHTML='<div class="err">'+esc(e.message)+'<br><br><a href="/" style="color:#38c5ff">Kembali ke beranda</a></div>';return}
+  setInterval(function(){if(document.visibilityState==='visible'&&tab==='or')loadOrders().catch(function(){})},8000);
+}
+init();
+})();
+</script>
+</body>
+</html>
