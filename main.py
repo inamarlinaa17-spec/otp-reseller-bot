@@ -3813,12 +3813,9 @@ def _manual_deposit_message(deposit_id, amount, payment_amount, code):
         "💳 <b>DEPOSIT QRIS MANUAL</b>\n\n"
         f"🧾 ID: <code>{escape(str(deposit_id))}</code>\n"
         f"💰 Saldo masuk: <b>{format_rupiah(amount)}</b>\n"
-        "🧾 Biaya admin: <b>Rp150</b>\n"
-        f"🔢 Kode unik: <b>Rp{code}</b>\n"
-        f"💸 <b>Transfer tepat: {format_rupiah(payment_amount)}</b>\n\n"
-        "⚠️ Transfer <b>sesuai nominal yang tertera</b> agar admin mudah mencocokkan pembayaran.\n"
-        "Setelah pembayaran, tekan <b>Saya Sudah Bayar</b>.\n\n"
-        "Biaya admin dan kode unik <b>tidak ikut menjadi saldo</b>."
+        f"💸 <b>Total pembayaran: {format_rupiah(payment_amount)}</b>\n\n"
+        "⚠️ Transfer <b>sesuai total pembayaran yang tertera</b> agar admin mudah mencocokkan pembayaran.\n"
+        "Setelah pembayaran, tekan <b>Saya Sudah Bayar</b>."
     )
 
 
@@ -8158,10 +8155,10 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
 
             "💳 <b>Deposit Saldo</b>\n\n"
             "Masukkan nominal deposit.\n\n"
-            "Minimum: <b>Rp1.000</b>\n"
+            "Minimum: <b>Rp2.000</b>\n"
             "Kelipatan: <b>Rp1.000</b>\n\n"
             "Contoh:\n"
-            "1000\n"
+            "2000\n"
             "5000\n"
             "10000\n"
             "25000\n\n"
@@ -8279,8 +8276,7 @@ Jika OTP tidak masuk, tekan <b>❌ Batal / Refund</b>."""
             "📨 <b>KONFIRMASI TERKIRIM</b>\n\n"
             f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
             f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n"
-            f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n"
-            f"🔢 Kode unik: <b>{int(deposit['unique_code'] or 0):03d}</b>\n\n"
+            f"💸 Total pembayaran: <b>{format_rupiah(deposit['payment_amount'])}</b>\n\n"
             "Konfirmasi sudah dikirim ke admin. Admin akan mengecek mutasi QRIS sebelum saldo ditambahkan.\n\n"
             "Menu utama akan muncul setelah deposit disetujui atau ditolak oleh admin."
         )
@@ -9917,8 +9913,7 @@ async def admin_callback(
                         "❌ <b>KONFIRMASI DEPOSIT QRIS MANUAL DITOLAK</b>\n\n"
                         f"🧾 Deposit: <code>{escape(str(deposit_id))}</code>\n"
                         f"💰 Saldo: <b>{format_rupiah(deposit['amount'])}</b>\n"
-                        f"💸 Transfer: <b>{format_rupiah(deposit['payment_amount'])}</b>\n"
-                        f"🔢 Kode unik: <b>{int(deposit['unique_code'] or 0):03d}</b>\n\n"
+                        f"💸 Total pembayaran: <b>{format_rupiah(deposit['payment_amount'])}</b>\n\n"
                         "Silakan hubungi admin jika kamu sudah melakukan pembayaran."
                     ),
                     parse_mode="HTML",
@@ -10730,13 +10725,13 @@ async def text_handler(
         text
     )
 
-    if amount < 1000:
+    if amount < 2000:
 
         await update.message.reply_text(
 
             "❌ <b>Deposit terlalu kecil.</b>\n\n"
             "Minimum deposit adalah "
-            "<b>Rp1.000</b>.",
+            "<b>Rp2.000</b>.",
 
             parse_mode="HTML"
 
@@ -10780,7 +10775,7 @@ async def text_handler(
         "⚡ <b>Pembayaran Otomatis</b>\n"
         "Pembayaran diproses otomatis melalui jalur pembayaran yang tersedia.\n\n"
         "📷 <b>QRIS Manual</b>\n"
-        "Scan QRIS admin, transfer sesuai nominal + kode unik, lalu konfirmasi ke admin.\n\n"
+        "Scan QRIS admin, transfer sesuai total pembayaran, lalu konfirmasi ke admin.\n\n"
         "Silakan pilih metode pembayaran:"
     )
     method_markup = InlineKeyboardMarkup([
