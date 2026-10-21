@@ -2166,10 +2166,16 @@ def catalog_all():
 
 
 # WhatsApp Ready To Use: manual inventory and Telegram-admin code delivery.
+WA_VISIBLE="NOT EXISTS (SELECT 1 FROM azhura_wa_countries c WHERE c.country=s.country AND c.price=s.price AND c.active=FALSE)"  # stok dari negara yang dinonaktifkan admin tidak tampil/dijual
 WA_REFUND_SECONDS=300  # batas tunggu kode admin sebelum user boleh Batal/Refund (5 menit)
 def wa_tables(db):
     db.execute("CREATE TABLE IF NOT EXISTS azhura_wa_stock (id BIGSERIAL PRIMARY KEY,country TEXT NOT NULL,flag TEXT NOT NULL DEFAULT '🌐',phone TEXT NOT NULL UNIQUE,price BIGINT NOT NULL CHECK(price>0),active BOOLEAN NOT NULL DEFAULT TRUE,sold_order_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
     db.execute("CREATE TABLE IF NOT EXISTS azhura_wa_orders (order_id TEXT PRIMARY KEY,telegram_id BIGINT NOT NULL,stock_id BIGINT NOT NULL REFERENCES azhura_wa_stock(id),country TEXT NOT NULL,phone TEXT NOT NULL,price BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'WAITING_CODE',otp_code TEXT,requested_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),completed_at TIMESTAMPTZ)")
+    # Daftar negara + harga yang diatur admin (boleh tanpa nomor). Stok nomor dicocokkan lewat (country, price).
+    fresh=not db.execute("SELECT (to_regclass('azhura_wa_countries') IS NOT NULL) AS e").fetchone()['e']
+    db.execute("CREATE TABLE IF NOT EXISTS azhura_wa_countries (id BIGSERIAL PRIMARY KEY,country TEXT NOT NULL,flag TEXT NOT NULL DEFAULT '🌐',price BIGINT NOT NULL CHECK(price>0),active BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(country,price))")
+    if fresh:  # sekali saja: salin negara+harga dari stok yang sudah ada
+        db.execute("INSERT INTO azhura_wa_countries(country,flag,price) SELECT country,MIN(flag),price FROM azhura_wa_stock GROUP BY country,price ON CONFLICT DO NOTHING")
 
 @app.get('/whatsapp-ready')
 def wa_page():
@@ -2180,9 +2186,9 @@ def wa_page():
 def wa_catalog():
     if not uid(): return err('Login diperlukan',401)
     with conn() as db:
-        wa_tables(db); items=db.execute("SELECT id,country,flag,price FROM azhura_wa_stock WHERE active=TRUE AND sold_order_id IS NULL ORDER BY country,price,id").fetchall(); bal=db.execute('SELECT balance FROM users WHERE telegram_id=%s',(uid(),)).fetchone()
-        # Ringkasan per negara+harga (termasuk yang stoknya habis) untuk tampilan "Pilih Negara".
-        groups=db.execute("SELECT country,MIN(flag) AS flag,price,COUNT(*) FILTER (WHERE active=TRUE AND sold_order_id IS NULL)::int AS stock FROM azhura_wa_stock GROUP BY country,price ORDER BY (COUNT(*) FILTER (WHERE active=TRUE AND sold_order_id IS NULL))>0 DESC,country,price").fetchall()
+        wa_tables(db); items=db.execute("SELECT s.id,s.country,s.flag,s.price FROM azhura_wa_stock s WHERE s.active=TRUE AND s.sold_order_id IS NULL AND "+WA_VISIBLE+" ORDER BY s.country,s.price,s.id").fetchall(); bal=db.execute('SELECT balance FROM users WHERE telegram_id=%s',(uid(),)).fetchone()
+        # Ringkasan per negara+harga: negara terdaftar admin (boleh tanpa nomor => "Stok habis") + stok yang tersedia.
+        groups=db.execute("SELECT country,MIN(flag) AS flag,price,SUM(stock)::int AS stock FROM (SELECT s.country,s.flag,s.price,COUNT(*)::int AS stock FROM azhura_wa_stock s WHERE s.active=TRUE AND s.sold_order_id IS NULL AND "+WA_VISIBLE+" GROUP BY s.country,s.flag,s.price UNION ALL SELECT country,flag,price,0 FROM azhura_wa_countries WHERE active=TRUE) t GROUP BY country,price ORDER BY (SUM(stock)>0) DESC,country,price").fetchall()
     return jsonify(items=items,groups=groups,balance=int((bal or {}).get('balance') or 0))
 
 @app.get('/api/wa/orders')
@@ -2202,7 +2208,7 @@ def wa_buy():
         with conn() as db:
             wa_tables(db)
             with db.transaction():
-                stock=db.execute('SELECT * FROM azhura_wa_stock WHERE id=%s AND active=TRUE AND sold_order_id IS NULL FOR UPDATE',(sid,)).fetchone()
+                stock=db.execute('SELECT s.* FROM azhura_wa_stock s WHERE s.id=%s AND s.active=TRUE AND s.sold_order_id IS NULL AND '+WA_VISIBLE+' FOR UPDATE OF s',(sid,)).fetchone()
                 if not stock:return err('Nomor sudah terjual atau tidak tersedia.',409)
                 user=db.execute('SELECT balance FROM users WHERE telegram_id=%s FOR UPDATE',(uid(),)).fetchone()
                 if not user:return err('Akun tidak ditemukan.',404)
@@ -2293,6 +2299,7 @@ def wa_admin_add_stock():
         wa_tables(db)
         try:db.execute('INSERT INTO azhura_wa_stock(country,flag,phone,price) VALUES(%s,%s,%s,%s)',(country,flag or '🌐',phone,price))
         except psycopg.errors.UniqueViolation:return err('Nomor sudah terdaftar.',409)
+        db.execute('INSERT INTO azhura_wa_countries(country,flag,price) VALUES(%s,%s,%s) ON CONFLICT (country,price) DO NOTHING',(country,flag or '🌐',price))
     return jsonify(ok=True)
 
 @app.post('/api/admin/wa/stock/<int:sid>')
@@ -2310,13 +2317,118 @@ def wa_admin_page():
     if not web_is_admin():return err('Akses khusus admin.',403)
     return send_from_directory('static','wa-admin.html')
 
+def _wa_country_fields(d):
+    country=re.sub(r'\s+',' ',str(d.get('country','')).strip())[:80]
+    flag=(str(d.get('flag') or '').strip()[:12]) or '🌐'
+    try:price=int(d.get('price',0))
+    except (TypeError,ValueError):price=0
+    if re.search(r'[<>\x00-\x1f]',country) or not country:return None,'Nama negara wajib diisi.'
+    if price<1 or price>100000000:return None,'Harga harus antara Rp1 dan Rp100.000.000.'
+    return (country,flag,price),None
+
+@app.get('/api/admin/wa/countries')
+def wa_admin_countries():
+    denied=web_admin_required()
+    if denied:return denied
+    with conn() as db:
+        wa_tables(db)
+        rows=db.execute("SELECT c.id,c.country,c.flag,c.price,c.active,COUNT(s.id) FILTER (WHERE s.active=TRUE AND s.sold_order_id IS NULL)::int AS stock,COUNT(s.id) FILTER (WHERE s.active=FALSE AND s.sold_order_id IS NULL)::int AS disabled,COUNT(s.id) FILTER (WHERE s.sold_order_id IS NOT NULL)::int AS sold FROM azhura_wa_countries c LEFT JOIN azhura_wa_stock s ON s.country=c.country AND s.price=c.price GROUP BY c.id ORDER BY c.active DESC,c.country,c.price").fetchall()
+    return jsonify(items=rows)
+
+@app.post('/api/admin/wa/countries')
+def wa_admin_add_countries():
+    denied=web_admin_required()
+    if denied:return denied
+    d=request.get_json(silent=True) or {}
+    raw=d.get('items') if isinstance(d.get('items'),list) else [d]
+    if not raw or len(raw)>50:return err('Kirim 1–50 negara sekaligus.')
+    ok=[];bad=[]
+    for i,r in enumerate(raw,1):
+        v,e=_wa_country_fields(r if isinstance(r,dict) else {})
+        if e:bad.append(f'Baris {i}: {e}')
+        else:ok.append(v)
+    if not ok:return err(' '.join(bad) or 'Data tidak valid.')
+    added=updated=0
+    with conn() as db:
+        wa_tables(db)
+        with db.transaction():
+            for country,flag,price in ok:
+                r=db.execute("INSERT INTO azhura_wa_countries(country,flag,price) VALUES(%s,%s,%s) ON CONFLICT (country,price) DO UPDATE SET flag=EXCLUDED.flag,active=TRUE RETURNING (xmax=0) AS inserted",(country,flag,price)).fetchone()
+                if r['inserted']:added+=1
+                else:updated+=1
+    return jsonify(ok=True,added=added,updated=updated,errors=bad)
+
+@app.post('/api/admin/wa/countries/<int:cid>')
+def wa_admin_update_country(cid):
+    denied=web_admin_required()
+    if denied:return denied
+    d=request.get_json(silent=True) or {}
+    with conn() as db:
+        wa_tables(db)
+        with db.transaction():
+            c=db.execute('SELECT * FROM azhura_wa_countries WHERE id=%s FOR UPDATE',(cid,)).fetchone()
+            if not c:return err('Negara tidak ditemukan.',404)
+            v,e=_wa_country_fields({'country':c['country'],'flag':d.get('flag',c['flag']),'price':d.get('price',c['price'])})
+            if e:return err(e)
+            _,flag,price=v
+            active=bool(d['active']) if 'active' in d else bool(c['active'])
+            if price!=int(c['price']) and db.execute('SELECT 1 FROM azhura_wa_countries WHERE country=%s AND price=%s AND id<>%s',(c['country'],price,cid)).fetchone():
+                return err('Harga tersebut sudah ada untuk negara ini.',409)
+            db.execute('UPDATE azhura_wa_countries SET price=%s,flag=%s,active=%s WHERE id=%s',(price,flag,active,cid))
+            # Harga/bendera baru berlaku untuk nomor yang belum terjual. Pesanan lama tetap memakai harga saat dibeli.
+            db.execute('UPDATE azhura_wa_stock SET price=%s,flag=%s WHERE country=%s AND price=%s AND sold_order_id IS NULL',(price,flag,c['country'],int(c['price'])))
+    return jsonify(ok=True)
+
+@app.post('/api/admin/wa/countries/<int:cid>/delete')
+def wa_admin_delete_country(cid):
+    denied=web_admin_required()
+    if denied:return denied
+    with conn() as db:
+        wa_tables(db)
+        with db.transaction():
+            c=db.execute('SELECT * FROM azhura_wa_countries WHERE id=%s FOR UPDATE',(cid,)).fetchone()
+            if not c:return err('Negara tidak ditemukan.',404)
+            if db.execute('SELECT 1 FROM azhura_wa_stock WHERE country=%s AND price=%s AND sold_order_id IS NULL LIMIT 1',(c['country'],int(c['price']))).fetchone():
+                return err('Masih ada nomor yang belum terjual. Nonaktifkan saja, atau nonaktifkan nomornya dulu.',409)
+            db.execute('DELETE FROM azhura_wa_countries WHERE id=%s',(cid,))
+    return jsonify(ok=True)
+
+@app.post('/api/admin/wa/stock/bulk')
+def wa_admin_bulk_stock():
+    denied=web_admin_required()
+    if denied:return denied
+    d=request.get_json(silent=True) or {}
+    try:cid=int(d.get('country_id',0))
+    except (TypeError,ValueError):return err('Negara tidak valid.')
+    seen=set();valid=[];invalid=[]
+    for t in re.split(r'[\n,;]+',str(d.get('phones',''))):
+        t=t.strip()
+        if not t:continue
+        n=re.sub(r'[\s\-().]','',t)
+        if not re.fullmatch(r'\+?\d{7,16}',n):invalid.append(t[:30]);continue
+        if n not in seen:seen.add(n);valid.append(n)
+    if not valid:return err('Tidak ada nomor yang valid. Tulis satu nomor per baris, contoh +6281234567890.')
+    if len(valid)>500:return err('Maksimal 500 nomor per kiriman.')
+    added=dup=0
+    with conn() as db:
+        wa_tables(db)
+        c=db.execute('SELECT * FROM azhura_wa_countries WHERE id=%s',(cid,)).fetchone()
+        if not c:return err('Negara tidak ditemukan.',404)
+        with db.transaction():
+            for n in valid:
+                r=db.execute('INSERT INTO azhura_wa_stock(country,flag,phone,price) VALUES(%s,%s,%s,%s) ON CONFLICT (phone) DO NOTHING RETURNING id',(c['country'],c['flag'],n,int(c['price']))).fetchone()
+                if r:added+=1
+                else:dup+=1
+    return jsonify(ok=True,added=added,duplicate=dup,invalid=invalid[:20])
+
 @app.get('/api/admin/wa/orders')
 def wa_admin_orders():
     denied=web_admin_required()
     if denied:return denied
     with conn() as db:
-        wa_tables(db);rows=db.execute('SELECT * FROM azhura_wa_orders ORDER BY created_at DESC LIMIT 500').fetchall()
-    return jsonify(items=[{**r,'created_at':r['created_at'].isoformat(),'requested_at':r['requested_at'].isoformat() if r['requested_at'] else None} for r in rows])
+        wa_tables(db);rows=db.execute('SELECT order_id,telegram_id,country,phone,price,status,otp_code,requested_at,created_at,completed_at FROM azhura_wa_orders ORDER BY created_at DESC LIMIT 300').fetchall()
+    iso=lambda v:v.isoformat() if v else None
+    return jsonify(items=[{**r,'created_at':iso(r['created_at']),'requested_at':iso(r['requested_at']),'completed_at':iso(r['completed_at'])} for r in rows])
 
 @app.get('/api/health')
 def health():return jsonify(ok=True,web_order_enabled=ENABLE_ORDER)
