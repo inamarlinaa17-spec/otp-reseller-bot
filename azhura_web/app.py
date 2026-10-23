@@ -269,7 +269,7 @@ def manual_qris_create():
     data=request.get_json(silent=True) or {}
     try:amount=int(data.get('amount',0))
     except (ValueError,TypeError):return err('Nominal tidak valid')
-    if amount<1000 or amount>10_000_000:return err('Nominal deposit harus Rp1.000–Rp10.000.000')
+    if amount<2000 or amount>10_000_000:return err('Nominal deposit harus Rp2.000–Rp10.000.000')
     import random
     from psycopg.errors import UniqueViolation
     from datetime import datetime
@@ -287,7 +287,7 @@ def manual_qris_create():
                 db.execute("""INSERT INTO deposits(deposit_id,telegram_id,amount,status,payment_reference,created_at,payment_method,payment_amount,unique_code)
                     VALUES(%s,%s,%s,'PENDING',%s,%s,'MANUAL_QRIS',%s,%s)""",
                     (dep,uid(),amount,row['setting_value'],datetime.now().strftime('%Y-%m-%d %H:%M:%S'),total,code))
-            return jsonify(deposit_id=dep,amount=amount,admin_fee=150,unique_code=code,payment_amount=total,status='PENDING')
+            return jsonify(deposit_id=dep,amount=amount,payment_amount=total,status='PENDING')
         except UniqueViolation:continue
         except psycopg.Error:app.logger.exception('Manual QRIS create failed');return err('Gagal membuat deposit',503)
     return err('Kode unik sedang penuh. Coba lagi.',503)
@@ -353,7 +353,7 @@ def web_midtrans_create():
     if not key:return err('Midtrans belum dikonfigurasi pada service web',503)
     try:amount=int((request.get_json(silent=True) or {}).get('amount',0))
     except (TypeError,ValueError):return err('Nominal tidak valid')
-    if not 1000<=amount<=10_000_000:return err('Nominal harus Rp1.000–Rp10.000.000')
+    if not 2000<=amount<=10_000_000:return err('Nominal harus Rp2.000–Rp10.000.000')
     with conn() as db:
         setting=db.execute("SELECT setting_value FROM bot_settings WHERE setting_key='payment_auto_enabled'").fetchone()
         if setting and str(setting['setting_value']).lower() not in ('1','true','yes','on'):return err('Midtrans dinonaktifkan admin',503)
@@ -376,7 +376,7 @@ def web_prem_qris_create():
     if not uid():return err('Login diperlukan',401)
     try:amount=int((request.get_json(silent=True) or {}).get('amount',0))
     except (TypeError,ValueError):return err('Nominal tidak valid')
-    if not 1000<=amount<=10_000_000:return err('Nominal harus Rp1.000–Rp10.000.000')
+    if not 2000<=amount<=10_000_000:return err('Nominal harus Rp2.000–Rp10.000.000')
     with conn() as db:
         setting=db.execute("SELECT setting_value FROM bot_settings WHERE setting_key='payment_premotp_qris_enabled'").fetchone()
         if setting and str(setting['setting_value']).lower() not in ('1','true','yes','on'):return err('QRIS otomatis dinonaktifkan admin',503)
@@ -1142,7 +1142,7 @@ def web_admin_deposit_reject(deposit_id):
     except psycopg.Error:
         app.logger.exception('Reject deposit gagal %s',deposit_id);return err('Gagal memproses deposit. Coba lagi.',503)
     app.logger.info('ADMIN %s menolak deposit %s',uid(),deposit_id)
-    _tg_notify(dep['telegram_id'],'❌ <b>KONFIRMASI DEPOSIT QRIS MANUAL DITOLAK</b>\n\n🧾 Deposit: <code>%s</code>\n💰 Saldo: <b>%s</b>\n💸 Transfer: <b>%s</b>\n🔢 Kode unik: <b>%03d</b>\n\nSilakan hubungi admin jika kamu sudah melakukan pembayaran.'%(_html.escape(deposit_id),_idr(dep['amount']),_idr(dep['payment_amount']),int(dep['unique_code'] or 0)),dep.get('reseller_bot_id'))
+    _tg_notify(dep['telegram_id'],'❌ <b>KONFIRMASI DEPOSIT QRIS MANUAL DITOLAK</b>\n\n🧾 Deposit: <code>%s</code>\n💰 Saldo: <b>%s</b>\n💸 Total pembayaran: <b>%s</b>\n\nSilakan hubungi admin jika kamu sudah melakukan pembayaran.'%(_html.escape(deposit_id),_idr(dep['amount']),_idr(dep['payment_amount'])),dep.get('reseller_bot_id'))
     return jsonify(ok=True,status='FAILED')
 
 def _admin_provider_cancel(provider,pid,oid):
